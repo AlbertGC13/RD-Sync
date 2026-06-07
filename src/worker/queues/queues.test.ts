@@ -60,9 +60,11 @@ describe("ingestion processor", () => {
   it("pauses the run for admin action when the scraper reports MFA", async () => {
     const scrapeRuns = new FakeScrapeRunRepository();
     const transactions = new FakeTransactionRepository({ inserted: 0, skipped: 0 });
+    const adminAlerts = new FakeAdminAlertSink();
     const processor = createIngestionProcessor({
       scrapeRuns,
       transactions,
+      adminAlerts,
       scraper: {
         collect: async () => ({
           status: "needs_admin_action",
@@ -84,12 +86,22 @@ describe("ingestion processor", () => {
       },
     ]);
     expect(transactions.received).toEqual([]);
+    expect(adminAlerts.events).toEqual([
+      {
+        runId: "run-1",
+        bankId: "popular",
+        status: "needs_admin_action",
+        safeErrorSummary: "Bank session requires admin MFA action",
+      },
+    ]);
   });
 
   it("records a safe failure summary without leaking secrets", async () => {
     const scrapeRuns = new FakeScrapeRunRepository();
+    const adminAlerts = new FakeAdminAlertSink();
     const processor = createIngestionProcessor({
       scrapeRuns,
+      adminAlerts,
       transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
       scraper: {
         collect: async () => {
@@ -105,6 +117,14 @@ describe("ingestion processor", () => {
       { runId: "run-1", status: "running" },
       {
         runId: "run-1",
+        status: "failed",
+        safeErrorSummary: "selector missing [REDACTED] [REDACTED] account [REDACTED_ACCOUNT]",
+      },
+    ]);
+    expect(adminAlerts.events).toEqual([
+      {
+        runId: "run-1",
+        bankId: "popular",
         status: "failed",
         safeErrorSummary: "selector missing [REDACTED] [REDACTED] account [REDACTED_ACCOUNT]",
       },
@@ -177,5 +197,23 @@ class FakeQueue {
 
   async add(name: string, data: IngestionJobData, options: unknown): Promise<void> {
     this.addCalls.push({ name, data, options });
+  }
+}
+
+class FakeAdminAlertSink {
+  readonly events: Array<{
+    runId: string;
+    bankId: string;
+    status: "failed" | "needs_admin_action";
+    safeErrorSummary: string;
+  }> = [];
+
+  async notifyIngestionAttention(event: {
+    runId: string;
+    bankId: string;
+    status: "failed" | "needs_admin_action";
+    safeErrorSummary: string;
+  }): Promise<void> {
+    this.events.push(event);
   }
 }

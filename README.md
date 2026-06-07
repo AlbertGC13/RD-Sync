@@ -98,5 +98,5 @@ This is acceptable only behind a trusted authentication gateway or in local test
 - [ ] Confirm the first target bank and account permissions.
 - [ ] Configure a real secret provider for bank-session references.
 - [ ] Put the dashboard behind trusted authentication.
-- [ ] Add admin alert delivery for `needs_admin_action` scrape runs.
+- [ ] Wire the admin alert sink to a real external channel for `needs_admin_action` scrape runs.
 - [ ] Replace in-memory repositories with Prisma-backed runtime repositories.

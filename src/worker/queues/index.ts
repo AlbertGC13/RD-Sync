@@ -36,10 +36,20 @@ export interface TransactionUpsertRepository {
   upsertMany(records: readonly TransactionRecord[]): Promise<{ inserted: number; skipped: number }>;
 }
 
+export interface AdminAlertSink {
+  notifyIngestionAttention(event: {
+    runId: string;
+    bankId: string;
+    status: "failed" | "needs_admin_action";
+    safeErrorSummary: string;
+  }): Promise<void>;
+}
+
 export interface IngestionProcessorDependencies {
   scrapeRuns: ScrapeRunRepository;
   transactions: TransactionUpsertRepository;
   scraper: IngestionScraper;
+  adminAlerts?: AdminAlertSink;
   now?: () => Date;
 }
 
@@ -59,11 +69,13 @@ export function createIngestionProcessor(dependencies: IngestionProcessorDepende
       const scrapeResult = await dependencies.scraper.collect();
 
       if (scrapeResult.status === "needs_admin_action") {
+        const safeErrorSummary = scrapeResult.safeErrorSummary ?? "Bank session requires admin action";
         await dependencies.scrapeRuns.markNeedsAdminAction(
           job.data.runId,
-          scrapeResult.safeErrorSummary ?? "Bank session requires admin action",
+          safeErrorSummary,
           now(),
         );
+        await notifyAdminAttention(dependencies.adminAlerts, job.data, "needs_admin_action", safeErrorSummary);
 
         return { status: "needs_admin_action", inserted: 0, skipped: 0 };
       }
@@ -81,6 +93,7 @@ export function createIngestionProcessor(dependencies: IngestionProcessorDepende
     } catch (error) {
       const safeErrorSummary = redactDiagnosticText(error instanceof Error ? error.message : "Ingestion failed");
       await dependencies.scrapeRuns.markFailed(job.data.runId, safeErrorSummary, now());
+      await notifyAdminAttention(dependencies.adminAlerts, job.data, "failed", safeErrorSummary);
       return { status: "failed", inserted: 0, skipped: 0 };
     }
   };
@@ -102,4 +115,18 @@ export async function scheduleIngestionJob(queue: QueueLike, data: IngestionJobD
 
 function normalizeMovements(movements: readonly BankMovement[], scrapeRunId: string): TransactionRecord[] {
   return movements.map((movement) => normalizeBankMovement(movement, { scrapeRunId }));
+}
+
+async function notifyAdminAttention(
+  adminAlerts: AdminAlertSink | undefined,
+  jobData: IngestionJobData,
+  status: "failed" | "needs_admin_action",
+  safeErrorSummary: string,
+): Promise<void> {
+  await adminAlerts?.notifyIngestionAttention({
+    runId: jobData.runId,
+    bankId: jobData.bankId,
+    status,
+    safeErrorSummary,
+  });
 }
