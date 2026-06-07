@@ -47,7 +47,7 @@ Strict TDD is not active until the stack and test runner are scaffolded; after 1
 
 ## Phase 4: Worker and Operations
 
-- [ ] 4.1 RED/GREEN: test and implement `src/worker/scraper/` Playwright read-only adapter, MFA pause, and redacted diagnostics.
+- [x] 4.1 RED/GREEN: test and implement `src/worker/scraper/` Playwright read-only adapter, MFA pause, and redacted diagnostics.
 - [ ] 4.2 RED/GREEN: test and implement `src/worker/queues/` BullMQ ingestion, retries, scrape-run transitions, and idempotent upserts.
 - [ ] 4.3 Create `src/app/admin/scrape-runs/page.tsx` for admin-only health, failure summaries, and MFA/session intervention.
 
@@ -55,4 +55,3 @@ Strict TDD is not active until the stack and test runner are scaffolded; after 1
 
 - [ ] 5.1 Add Playwright E2E tests for viewer dashboard, unauthorized denial, reviewer state, and admin MFA path.
 - [ ] 5.2 Update `README.md` or ops notes with setup, safe scraping boundaries, verification commands, and out-of-scope ERP/reconciliation.
-
