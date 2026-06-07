@@ -35,15 +35,15 @@ Strict TDD is not active until the stack and test runner are scaffolded; after 1
 
 ## Phase 2: Domain, RBAC, Audit
 
-- [ ] 2.1 RED: add Vitest tests for `src/modules/transactions/` normalization, source hashing, optional fields, and idempotent persistence.
-- [ ] 2.2 GREEN: implement `src/modules/transactions/` domain types, normalizer, repository, and filter DTOs.
-- [ ] 2.3 RED/GREEN: test and implement `src/modules/auth/` RBAC plus `src/modules/audit/` redacted audit events and denied employee bank actions.
+- [x] 2.1 RED: add Vitest tests for `src/modules/transactions/` normalization, source hashing, optional fields, and idempotent persistence.
+- [x] 2.2 GREEN: implement `src/modules/transactions/` domain types, normalizer, repository, and filter DTOs.
+- [x] 2.3 RED/GREEN: test and implement `src/modules/auth/` RBAC plus `src/modules/audit/` redacted audit events and denied employee bank actions.
 
 ## Phase 3: Dashboard and API
 
-- [ ] 3.1 RED/GREEN: test and implement `src/app/api/transactions/route.ts` filters, newest-first ordering, data minimization, and audit writes.
-- [ ] 3.2 RED/GREEN: test and implement `src/app/api/transactions/[id]/review/route.ts` reviewer-only state updates.
-- [ ] 3.3 Create `src/app/(private)/transactions/page.tsx` with empty state, filters, transaction list, and no scraper controls.
+- [x] 3.1 RED/GREEN: test and implement `src/app/api/transactions/route.ts` filters, newest-first ordering, data minimization, and audit writes.
+- [x] 3.2 RED/GREEN: test and implement `src/app/api/transactions/[id]/review/route.ts` reviewer-only state updates.
+- [x] 3.3 Create `src/app/(private)/transactions/page.tsx` with empty state, filters, transaction list, and no scraper controls.
 
 ## Phase 4: Worker and Operations
 
@@ -55,5 +55,4 @@ Strict TDD is not active until the stack and test runner are scaffolded; after 1
 
 - [ ] 5.1 Add Playwright E2E tests for viewer dashboard, unauthorized denial, reviewer state, and admin MFA path.
 - [ ] 5.2 Update `README.md` or ops notes with setup, safe scraping boundaries, verification commands, and out-of-scope ERP/reconciliation.
-
 
