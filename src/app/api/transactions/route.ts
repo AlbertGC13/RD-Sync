@@ -1,19 +1,22 @@
-import { InMemoryAuditSink, createAuditEvent } from "../../../modules/audit";
+import { createAuditEvent, type InMemoryAuditSink } from "../../../modules/audit";
 import { requireRole, resolvePrincipalFromTrustedHeaders } from "../../../modules/auth";
 import {
-  InMemoryTransactionRepository,
+  type InMemoryTransactionRepository,
   type TransactionFilters,
   toDashboardTransaction,
 } from "../../../modules/transactions";
+import { defaultAuditSink, defaultTransactionRepository, seedE2ETransactionFixturesIfEnabled } from "./defaults";
 
 interface TransactionsRouteDependencies {
   repository: Pick<InMemoryTransactionRepository, "list">;
   auditSink: Pick<InMemoryAuditSink, "record">;
+  beforeRead?: () => Promise<void>;
 }
 
 const defaultDependencies: TransactionsRouteDependencies = {
-  repository: new InMemoryTransactionRepository(),
-  auditSink: new InMemoryAuditSink(),
+  repository: defaultTransactionRepository,
+  auditSink: defaultAuditSink,
+  beforeRead: seedE2ETransactionFixturesIfEnabled,
 };
 
 export function createGetTransactionsHandler(dependencies: TransactionsRouteDependencies) {
@@ -26,6 +29,8 @@ export function createGetTransactionsHandler(dependencies: TransactionsRouteDepe
     } catch (error) {
       return jsonError(error, 401);
     }
+
+    await dependencies.beforeRead?.();
 
     const filters = parseTransactionFilters(new URL(request.url).searchParams);
     const records = await dependencies.repository.list(filters);

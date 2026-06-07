@@ -53,5 +53,5 @@ Strict TDD is not active until the stack and test runner are scaffolded; after 1
 
 ## Phase 5: Verification and Docs
 
-- [ ] 5.1 Add Playwright E2E tests for viewer dashboard, unauthorized denial, reviewer state, and admin MFA path.
+- [x] 5.1 Add Playwright E2E tests for viewer dashboard, unauthorized denial, reviewer state, and admin MFA path.
 - [ ] 5.2 Update `README.md` or ops notes with setup, safe scraping boundaries, verification commands, and out-of-scope ERP/reconciliation.

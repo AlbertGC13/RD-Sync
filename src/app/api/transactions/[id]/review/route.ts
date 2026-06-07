@@ -1,14 +1,16 @@
-import { InMemoryAuditSink, createAuditEvent } from "../../../../../modules/audit";
+import { createAuditEvent, type InMemoryAuditSink } from "../../../../../modules/audit";
 import { requireRole, resolvePrincipalFromTrustedHeaders } from "../../../../../modules/auth";
 import {
-  InMemoryTransactionRepository,
+  type InMemoryTransactionRepository,
   type ReviewState,
   toDashboardTransaction,
 } from "../../../../../modules/transactions";
+import { defaultAuditSink, defaultTransactionRepository, seedE2ETransactionFixturesIfEnabled } from "../../defaults";
 
 interface ReviewRouteDependencies {
   repository: Pick<InMemoryTransactionRepository, "updateReviewState">;
   auditSink: Pick<InMemoryAuditSink, "record">;
+  beforeWrite?: () => Promise<void>;
 }
 
 interface ReviewRouteContext {
@@ -16,8 +18,9 @@ interface ReviewRouteContext {
 }
 
 const defaultDependencies: ReviewRouteDependencies = {
-  repository: new InMemoryTransactionRepository(),
-  auditSink: new InMemoryAuditSink(),
+  repository: defaultTransactionRepository,
+  auditSink: defaultAuditSink,
+  beforeWrite: seedE2ETransactionFixturesIfEnabled,
 };
 
 const allowedReviewStates = new Set<ReviewState>(["seen", "internally_validated", "ignored", "needs_review"]);
@@ -39,6 +42,8 @@ export function createPatchTransactionReviewHandler(dependencies: ReviewRouteDep
     if (!payload.reviewState || !allowedReviewStates.has(payload.reviewState)) {
       return Response.json({ error: "Invalid reviewState" }, { status: 400 });
     }
+
+    await dependencies.beforeWrite?.();
 
     const transaction = await dependencies.repository.updateReviewState(id, payload.reviewState, authorizedPrincipal.id);
     if (!transaction) {
