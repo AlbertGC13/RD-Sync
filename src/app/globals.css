@@ -133,3 +133,102 @@ h1 {
   gap: 0.5rem;
   justify-items: end;
 }
+
+.admin-metrics {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+}
+
+.metric-card,
+.ops-card,
+.access-denied {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 1rem;
+  padding: 1.25rem;
+}
+
+.metric-card p,
+.metric-card span {
+  color: #94a3b8;
+  margin: 0;
+}
+
+.metric-card strong {
+  color: #f8fafc;
+  font-size: 2rem;
+  line-height: 1;
+}
+
+.ops-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1.3fr) minmax(18rem, 0.7fr);
+}
+
+.ops-card h2,
+.run-card h3 {
+  margin: 0.25rem 0 0;
+}
+
+.metric-card,
+.ops-card {
+  display: grid;
+  gap: 1rem;
+}
+
+.run-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.run-card {
+  background: #020617;
+  border: 1px solid #334155;
+  border-radius: 0.875rem;
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.run-card p {
+  color: #cbd5e1;
+}
+
+.run-card dl,
+.intervention-list {
+  margin: 0;
+}
+
+.run-card dl {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+}
+
+.run-card dt {
+  color: #94a3b8;
+  font-size: 0.8125rem;
+}
+
+.run-card dd {
+  margin: 0.25rem 0 0;
+}
+
+.intervention-list {
+  color: #cbd5e1;
+  line-height: 1.7;
+  padding-left: 1.25rem;
+}
+
+.access-denied {
+  margin: auto;
+  max-width: 48rem;
+}
+
+@media (max-width: 760px) {
+  .ops-grid {
+    grid-template-columns: 1fr;
+  }
+}

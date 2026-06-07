@@ -49,7 +49,7 @@ Strict TDD is not active until the stack and test runner are scaffolded; after 1
 
 - [x] 4.1 RED/GREEN: test and implement `src/worker/scraper/` Playwright read-only adapter, MFA pause, and redacted diagnostics.
 - [x] 4.2 RED/GREEN: test and implement `src/worker/queues/` BullMQ ingestion, retries, scrape-run transitions, and idempotent upserts.
-- [ ] 4.3 Create `src/app/admin/scrape-runs/page.tsx` for admin-only health, failure summaries, and MFA/session intervention.
+- [x] 4.3 Create `src/app/admin/scrape-runs/page.tsx` for admin-only health, failure summaries, and MFA/session intervention.
 
 ## Phase 5: Verification and Docs
 
