@@ -1,0 +1,26 @@
+﻿change: build-transaction-dashboard-mvp
+status: tasked
+artifact_store: openspec
+created_at: "2026-06-07"
+updated_at: "2026-06-07"
+phases:
+  init: completed
+  explore: completed
+  proposal: completed
+  specs: completed
+  design: completed
+  tasks: completed
+  apply: pending
+  verify: pending
+  archive: pending
+scope:
+  in:
+    - Private dashboard for recent bank transactions
+    - Employee filters and limited transaction visibility
+    - Controlled scraping worker with admin-only MFA handling
+    - Audit logging and operational alerts
+  out:
+    - ERP integration
+    - Automatic reconciliation
+    - Transfers or bank mutations
+    - Direct employee access to bank portals

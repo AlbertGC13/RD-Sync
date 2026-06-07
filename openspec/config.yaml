@@ -1,0 +1,82 @@
+﻿schema: spec-driven
+version: 1
+project: RD-Sync
+artifact_store:
+  mode: openspec
+initialized_at: "2026-06-07"
+
+context: |
+  Product: RD-Sync MVP, a private dashboard for recent bank transactions from Dominican banks.
+  MVP scope: scrape or collect recent bank transactions and show them to designated employees with filters.
+  Access boundary: employees must not access bank portals and must only see transaction data.
+  Out of MVP: ERP integration and reconciliation because the ERP is not ready.
+  Tech stack: not detected; workspace is empty.
+  Architecture: not detected yet.
+  Testing: no runner detected; Strict TDD disabled until a runner exists.
+  Persistence: OpenSpec file artifacts under openspec/.
+
+strict_tdd: false
+
+testing:
+  detected_at: "2026-06-07"
+  strict_tdd: false
+  reason: "No application stack, dependency manifest, or test runner was present in the new workspace."
+  test_runner:
+    available: false
+    command: ""
+    framework: ""
+  layers:
+    unit:
+      available: false
+      tool: ""
+    integration:
+      available: false
+      tool: ""
+    e2e:
+      available: false
+      tool: ""
+  coverage:
+    available: false
+    command: ""
+  quality_tools:
+    linter:
+      available: false
+      command: ""
+    type_checker:
+      available: false
+      command: ""
+    formatter:
+      available: false
+      command: ""
+
+rules:
+  proposal:
+    - Include security, credential-handling, and employee data-access boundaries for all bank-transaction work.
+    - Exclude ERP integration and reconciliation unless the product scope is explicitly changed.
+    - Identify legal/compliance risks around bank scraping before implementation tasks are approved.
+  specs:
+    - Use Given/When/Then scenarios.
+    - Use RFC 2119 keywords: MUST, SHALL, SHOULD, MAY.
+    - Separate access-control requirements from dashboard filtering requirements.
+  design:
+    - Include sequence diagrams for scraping, transaction ingestion, and dashboard read paths when those flows are introduced.
+    - Document credential storage, secret rotation, audit logging, and least-privilege boundaries with rationale.
+  tasks:
+    - Group tasks by phase and keep each task completable in one focused session.
+    - Include a Review Workload Forecast before implementation begins.
+  apply:
+    tdd: false
+    test_command: ""
+    guidelines:
+      - Follow existing code patterns after a stack is selected.
+      - Do not create direct bank-login functionality for employees.
+      - Enable Strict TDD once a test runner exists.
+  verify:
+    test_command: ""
+    build_command: ""
+    coverage_threshold: 0
+    guidelines:
+      - Verify access-control and data-minimization requirements before accepting implementation.
+      - Verify no ERP integration or reconciliation behavior enters MVP scope unless explicitly re-scoped.
+  archive:
+    - Warn before merging destructive deltas.
