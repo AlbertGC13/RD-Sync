@@ -1,5 +1,5 @@
 change: build-transaction-dashboard-mvp
-status: applying
+status: verified
 artifact_store: openspec
 created_at: "2026-06-07"
 updated_at: "2026-06-07"
@@ -10,8 +10,8 @@ phases:
   specs: completed
   design: completed
   tasks: completed
-  apply: in_progress
-  verify: pending
+  apply: completed
+  verify: completed
   archive: pending
 scope:
   in:
