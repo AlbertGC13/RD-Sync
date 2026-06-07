@@ -1,2 +1,12 @@
-﻿.atl/
+node_modules/
+.next/
+out/
+coverage/
+playwright-report/
+test-results/
+.env
+.env*.local
+*.tsbuildinfo
+.atl/
+/src/generated/prisma/
 

@@ -1,4 +1,4 @@
-﻿# Tasks: Transaction Dashboard MVP
+# Tasks: Transaction Dashboard MVP
 
 ## Review Workload Forecast
 
@@ -29,9 +29,9 @@ Strict TDD is not active until the stack and test runner are scaffolded; after 1
 
 ## Phase 1: Foundation
 
-- [ ] 1.1 Create `package.json`, `tsconfig.json`, `next.config.ts`, `vitest.config.ts`, and `playwright.config.ts` with runnable unit/e2e commands.
-- [ ] 1.2 Create `prisma/schema.prisma` for users, roles, transactions, scrape runs, audit events, and encrypted session refs with unique `sourceHash`.
-- [ ] 1.3 Create `prisma/seed.ts` for `admin`, `reviewer`, and `viewer` roles.
+- [x] 1.1 Create `package.json`, `tsconfig.json`, `next.config.ts`, `vitest.config.ts`, and `playwright.config.ts` with runnable unit/e2e commands.
+- [x] 1.2 Create `prisma/schema.prisma` for users, roles, transactions, scrape runs, audit events, and encrypted session refs with unique `sourceHash`.
+- [x] 1.3 Create `prisma/seed.ts` for `admin`, `reviewer`, and `viewer` roles.
 
 ## Phase 2: Domain, RBAC, Audit
 
@@ -55,4 +55,5 @@ Strict TDD is not active until the stack and test runner are scaffolded; after 1
 
 - [ ] 5.1 Add Playwright E2E tests for viewer dashboard, unauthorized denial, reviewer state, and admin MFA path.
 - [ ] 5.2 Update `README.md` or ops notes with setup, safe scraping boundaries, verification commands, and out-of-scope ERP/reconciliation.
+
 

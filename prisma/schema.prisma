@@ -1,0 +1,191 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum RoleKey {
+  ADMIN    @map("admin")
+  REVIEWER @map("reviewer")
+  VIEWER   @map("viewer")
+}
+
+enum UserStatus {
+  ACTIVE   @map("active")
+  DISABLED @map("disabled")
+}
+
+enum TransactionDirection {
+  CREDIT @map("credit")
+  DEBIT  @map("debit")
+}
+
+enum ReviewState {
+  NEW                  @map("new")
+  SEEN                 @map("seen")
+  INTERNALLY_VALIDATED @map("internally_validated")
+  IGNORED              @map("ignored")
+  NEEDS_REVIEW         @map("needs_review")
+}
+
+enum ScrapeRunStatus {
+  QUEUED             @map("queued")
+  RUNNING            @map("running")
+  SUCCEEDED          @map("succeeded")
+  FAILED             @map("failed")
+  NEEDS_ADMIN_ACTION @map("needs_admin_action")
+}
+
+enum BankSessionStatus {
+  ACTIVE             @map("active")
+  NEEDS_ADMIN_ACTION @map("needs_admin_action")
+  EXPIRED            @map("expired")
+  REVOKED            @map("revoked")
+}
+
+model User {
+  id          String     @id @default(cuid())
+  email       String     @unique
+  displayName String
+  status      UserStatus @default(ACTIVE)
+  roles       UserRole[]
+  reviews     Transaction[] @relation("TransactionReviewer")
+  auditEvents AuditEvent[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+model Role {
+  id          String     @id @default(cuid())
+  key         RoleKey    @unique
+  name        String
+  description String
+  users       UserRole[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+model UserRole {
+  id        String   @id @default(cuid())
+  userId    String
+  roleId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, roleId])
+  @@index([roleId])
+}
+
+model Bank {
+  id          String                @id @default(cuid())
+  code        String                @unique
+  name        String
+  isActive    Boolean               @default(true)
+  accounts    BankAccount[]
+  sessions    EncryptedSessionRef[]
+  scrapeRuns  ScrapeRun[]
+  transactions Transaction[]
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+}
+
+model BankAccount {
+  id                 String        @id @default(cuid())
+  bankId             String
+  bank               Bank          @relation(fields: [bankId], references: [id], onDelete: Restrict)
+  accountFingerprint String
+  displayName        String
+  currency           String        @default("DOP")
+  isActive           Boolean       @default(true)
+  transactions       Transaction[]
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  @@unique([bankId, accountFingerprint])
+  @@index([bankId])
+}
+
+model Transaction {
+  id                 String               @id @default(cuid())
+  bankId             String
+  bank               Bank                 @relation(fields: [bankId], references: [id], onDelete: Restrict)
+  accountId          String?
+  account            BankAccount?         @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  accountFingerprint String
+  postedAt           DateTime
+  amount             Decimal              @db.Decimal(18, 2)
+  currency           String               @default("DOP")
+  direction          TransactionDirection
+  reference          String?
+  concept            String?
+  originator         String?
+  reviewState        ReviewState          @default(NEW)
+  reviewedById       String?
+  reviewedBy         User?                @relation("TransactionReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt         DateTime?
+  scrapeRunId        String?
+  scrapeRun          ScrapeRun?           @relation(fields: [scrapeRunId], references: [id], onDelete: SetNull)
+  sourceHash         String               @unique
+  metadata           Json?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  @@index([bankId, postedAt])
+  @@index([accountFingerprint, postedAt])
+  @@index([reviewState])
+}
+
+model ScrapeRun {
+  id               String          @id @default(cuid())
+  bankId           String
+  bank             Bank            @relation(fields: [bankId], references: [id], onDelete: Restrict)
+  status           ScrapeRunStatus @default(QUEUED)
+  startedAt        DateTime?
+  endedAt          DateTime?
+  insertedCount    Int             @default(0)
+  skippedCount     Int             @default(0)
+  safeErrorSummary String?
+  transactions     Transaction[]
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  @@index([bankId, createdAt])
+  @@index([status])
+}
+
+model EncryptedSessionRef {
+  id            String            @id @default(cuid())
+  bankId        String
+  bank          Bank              @relation(fields: [bankId], references: [id], onDelete: Restrict)
+  label         String
+  secretRef     String            @unique
+  status        BankSessionStatus @default(NEEDS_ADMIN_ACTION)
+  expiresAt     DateTime?
+  lastRenewedAt DateTime?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@index([bankId, status])
+}
+
+model AuditEvent {
+  id        String   @id @default(cuid())
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actorRole String?
+  action    String
+  target    String
+  targetId  String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+  @@index([target, targetId])
+}
+
+

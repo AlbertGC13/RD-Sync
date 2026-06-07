@@ -1,4 +1,4 @@
-﻿schema: spec-driven
+schema: spec-driven
 version: 1
 project: RD-Sync
 artifact_store:
@@ -10,41 +10,42 @@ context: |
   MVP scope: scrape or collect recent bank transactions and show them to designated employees with filters.
   Access boundary: employees must not access bank portals and must only see transaction data.
   Out of MVP: ERP integration and reconciliation because the ERP is not ready.
-  Tech stack: not detected; workspace is empty.
-  Architecture: not detected yet.
-  Testing: no runner detected; Strict TDD disabled until a runner exists.
+  Tech stack: Next.js App Router, TypeScript, Prisma 7, PostgreSQL, Vitest, Playwright.
+  Architecture: modular monolith plus separate worker process planned by design.md.
+  Testing: Vitest unit runner and Playwright E2E config exist after PR 1 scaffold.
   Persistence: OpenSpec file artifacts under openspec/.
 
-strict_tdd: false
+strict_tdd: true
 
 testing:
   detected_at: "2026-06-07"
-  strict_tdd: false
-  reason: "No application stack, dependency manifest, or test runner was present in the new workspace."
+  strict_tdd: true
+  reason: "PR 1 scaffold introduced package.json, Vitest, Playwright, and TypeScript typecheck commands. Future implementation slices must use Strict TDD where practical."
   test_runner:
-    available: false
-    command: ""
-    framework: ""
+    available: true
+    command: "pnpm test"
+    framework: "Vitest"
   layers:
     unit:
-      available: false
-      tool: ""
+      available: true
+      tool: "Vitest"
     integration:
       available: false
       tool: ""
     e2e:
-      available: false
-      tool: ""
+      available: true
+      tool: "Playwright"
+      command: "pnpm test:e2e"
   coverage:
-    available: false
-    command: ""
+    available: true
+    command: "pnpm test -- --coverage"
   quality_tools:
     linter:
-      available: false
-      command: ""
+      available: true
+      command: "pnpm lint"
     type_checker:
-      available: false
-      command: ""
+      available: true
+      command: "pnpm typecheck"
     formatter:
       available: false
       command: ""
@@ -65,18 +66,19 @@ rules:
     - Group tasks by phase and keep each task completable in one focused session.
     - Include a Review Workload Forecast before implementation begins.
   apply:
-    tdd: false
-    test_command: ""
+    tdd: true
+    test_command: "pnpm test"
     guidelines:
       - Follow existing code patterns after a stack is selected.
       - Do not create direct bank-login functionality for employees.
-      - Enable Strict TDD once a test runner exists.
+      - Use Strict TDD for implementation slices after PR 1 scaffold.
   verify:
-    test_command: ""
-    build_command: ""
+    test_command: "pnpm test"
+    build_command: "pnpm build"
     coverage_threshold: 0
     guidelines:
       - Verify access-control and data-minimization requirements before accepting implementation.
       - Verify no ERP integration or reconciliation behavior enters MVP scope unless explicitly re-scoped.
   archive:
     - Warn before merging destructive deltas.
+
