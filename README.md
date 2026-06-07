@@ -39,6 +39,7 @@ RD-Sync is a private dashboard MVP for viewing recent Dominican bank transaction
 6. Read the operator flow guide before testing scraping assumptions:
 
    - Bank scraping operational guide: [`docs/guia-operativa-scraper-bancario.md`](docs/guia-operativa-scraper-bancario.md)
+   - Final product PRD: [`docs/prd-rd-sync-producto-final.md`](docs/prd-rd-sync-producto-final.md)
 
 For local manual testing only, start the dev server with `RD_SYNC_DEV_PREVIEW=enabled` and use the **Admin demo** link from the home page. Without that variable, the admin route requires a trusted admin principal and direct browser access will show the restricted state.
 
@@ -63,6 +64,8 @@ RD-Sync treats bank scraping as a high-risk integration boundary. The MVP code f
 - Bank credentials and sessions should be stored only as encrypted secret references, never as plain values in the app database or logs.
 
 For the full end-to-end bank-login, MFA, extraction, and employee-dashboard flow, read [`docs/guia-operativa-scraper-bancario.md`](docs/guia-operativa-scraper-bancario.md).
+
+For final product scope, release milestones, user flows, and acceptance criteria, read [`docs/prd-rd-sync-producto-final.md`](docs/prd-rd-sync-producto-final.md).
 
 ## Verification commands
 
