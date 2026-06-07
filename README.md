@@ -34,6 +34,9 @@ RD-Sync is a private dashboard MVP for viewing recent Dominican bank transaction
 
    - Employee dashboard: `http://127.0.0.1:3000/transactions`
    - Admin operations: `http://127.0.0.1:3000/admin/scrape-runs`
+   - Local demo home: `http://127.0.0.1:3000/`
+
+For local manual testing only, start the dev server with `RD_SYNC_DEV_PREVIEW=enabled` and use the **Admin demo** link from the home page. Without that variable, the admin route requires a trusted admin principal and direct browser access will show the restricted state.
 
 ## What employees can see
 
@@ -83,6 +86,8 @@ The MVP currently resolves users from trusted headers:
 - `x-rd-sync-role`
 
 This is acceptable only behind a trusted authentication gateway or in local tests. Before production exposure, replace or wrap this with a real identity provider/session layer and ensure headers cannot be spoofed from the public internet.
+
+`RD_SYNC_DEV_PREVIEW=enabled` only enables the local `?previewRole=admin` demo path. Do not enable it in production.
 
 ## Out of scope for this MVP
 

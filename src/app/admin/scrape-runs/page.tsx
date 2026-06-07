@@ -19,6 +19,10 @@ interface AdminScrapeRunsDashboardProps {
   runs: readonly AdminScrapeRun[];
 }
 
+interface AdminScrapeRunsPageProps {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+}
+
 const previewRuns: AdminScrapeRun[] = [
   {
     id: "preview-run-1",
@@ -42,8 +46,9 @@ const previewRuns: AdminScrapeRun[] = [
   },
 ];
 
-export default async function AdminScrapeRunsPage() {
-  const principal = resolvePrincipalFromTrustedHeaders(await headers());
+export default async function AdminScrapeRunsPage({ searchParams }: AdminScrapeRunsPageProps) {
+  const resolvedSearchParams = searchParams ? await searchParams : {};
+  const principal = resolvePreviewPrincipal(resolvedSearchParams) ?? resolvePrincipalFromTrustedHeaders(await headers());
 
   return <AdminScrapeRunsDashboard principal={principal} runs={previewRuns} />;
 }
@@ -212,4 +217,17 @@ function formatDateTime(value: string | null): string {
     timeStyle: "short",
     timeZone: "UTC",
   }).format(new Date(value));
+}
+
+export function resolvePreviewPrincipal(searchParams: Record<string, string | string[] | undefined>): Principal | null {
+  if (process.env.RD_SYNC_DEV_PREVIEW !== "enabled") {
+    return null;
+  }
+
+  return firstValue(searchParams.previewRole) === "admin" ? { id: "admin-preview", role: "admin" } : null;
+}
+
+function firstValue(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return value;
 }

@@ -1,7 +1,12 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { AdminScrapeRunsDashboard, summarizeScrapeRuns, type AdminScrapeRun } from "./page";
+import {
+  AdminScrapeRunsDashboard,
+  resolvePreviewPrincipal,
+  summarizeScrapeRuns,
+  type AdminScrapeRun,
+} from "./page";
 
 const runs: AdminScrapeRun[] = [
   {
@@ -74,5 +79,27 @@ describe("AdminScrapeRunsDashboard", () => {
       inserted: 12,
       skipped: 3,
     });
+  });
+
+  it("allows admin preview only when local dev preview is enabled", () => {
+    const previousValue = process.env.RD_SYNC_DEV_PREVIEW;
+
+    try {
+      delete process.env.RD_SYNC_DEV_PREVIEW;
+      expect(resolvePreviewPrincipal({ previewRole: "admin" })).toBeNull();
+
+      process.env.RD_SYNC_DEV_PREVIEW = "enabled";
+      expect(resolvePreviewPrincipal({ previewRole: "admin" })).toEqual({
+        id: "admin-preview",
+        role: "admin",
+      });
+      expect(resolvePreviewPrincipal({ previewRole: "viewer" })).toBeNull();
+    } finally {
+      if (previousValue === undefined) {
+        delete process.env.RD_SYNC_DEV_PREVIEW;
+      } else {
+        process.env.RD_SYNC_DEV_PREVIEW = previousValue;
+      }
+    }
   });
 });

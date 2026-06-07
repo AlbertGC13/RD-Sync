@@ -18,9 +18,45 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+.app-nav {
+  align-items: center;
+  background: rgba(2, 6, 23, 0.86);
+  border-bottom: 1px solid #1e293b;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: 1rem max(1.5rem, calc((100vw - 72rem) / 2));
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.app-nav a {
+  color: #cbd5e1;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.app-nav a:hover,
+.app-nav a:focus-visible {
+  color: #67e8f9;
+}
+
+.app-nav nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.brand-link {
+  color: #67e8f9 !important;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
 .shell {
   display: grid;
-  min-height: 100vh;
+  min-height: calc(100vh - 4rem);
   place-items: center;
   padding: 4rem 1.5rem;
 }
@@ -47,6 +83,35 @@ h1 {
   color: #cbd5e1;
   font-size: 1.125rem;
   line-height: 1.7;
+}
+
+.flow-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  margin-top: 2rem;
+}
+
+.flow-card {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 1rem;
+  color: #cbd5e1;
+  display: grid;
+  gap: 0.75rem;
+  min-height: 10rem;
+  padding: 1.25rem;
+  text-decoration: none;
+}
+
+.flow-card:hover,
+.flow-card:focus-visible {
+  border-color: #67e8f9;
+}
+
+.flow-card strong {
+  color: #f8fafc;
+  font-size: 1.25rem;
 }
 
 .dashboard-shell {
