@@ -22,6 +22,7 @@ import { PageHeader } from "../../../components/ui/page-header";
 import { EmptyState } from "../../../components/ui/empty-state";
 import { RunActionAffordances } from "../../../components/admin/run-action-affordances";
 import type { ScrapeRunStatus } from "../../../worker/queues";
+import { listScrapeRunsForPage } from "../../api/scrape-runs/defaults";
 
 export interface AdminScrapeRun {
   id: string;
@@ -43,56 +44,14 @@ interface AdminScrapeRunsPageProps {
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }
 
-const previewRuns: AdminScrapeRun[] = [
-  {
-    id: "preview-run-1",
-    bankId: "popular",
-    status: "needs_admin_action",
-    startedAt: new Date(Date.now() - 1000 * 60 * 5).toISOString(),
-    endedAt: new Date(Date.now() - 1000 * 60 * 4).toISOString(),
-    insertedCount: 0,
-    skippedCount: 0,
-    safeErrorSummary: "Bank session requires admin MFA action",
-  },
-  {
-    id: "preview-run-2",
-    bankId: "banreservas",
-    status: "succeeded",
-    startedAt: new Date(Date.now() - 1000 * 60 * 90).toISOString(),
-    endedAt: new Date(Date.now() - 1000 * 60 * 88).toISOString(),
-    insertedCount: 12,
-    skippedCount: 3,
-    safeErrorSummary: null,
-  },
-  {
-    id: "preview-run-3",
-    bankId: "bhd",
-    status: "failed",
-    startedAt: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString(),
-    endedAt: new Date(Date.now() - 1000 * 60 * 60 * 2 + 60_000).toISOString(),
-    insertedCount: 0,
-    skippedCount: 0,
-    safeErrorSummary: "Transaction table selector missing",
-  },
-  {
-    id: "preview-run-4",
-    bankId: "popular",
-    status: "succeeded",
-    startedAt: new Date(Date.now() - 1000 * 60 * 60 * 5).toISOString(),
-    endedAt: new Date(Date.now() - 1000 * 60 * 60 * 5 + 75_000).toISOString(),
-    insertedCount: 8,
-    skippedCount: 0,
-    safeErrorSummary: null,
-  },
-];
-
 export default async function AdminScrapeRunsPage({ searchParams }: AdminScrapeRunsPageProps) {
   const resolvedSearchParams = searchParams ? await searchParams : {};
   const principal =
     resolvePreviewPrincipal(resolvedSearchParams) ??
     resolvePrincipalFromTrustedHeaders(await headers());
+  const runs = await listScrapeRunsForPage({});
 
-  return <AdminScrapeRunsDashboard principal={principal} runs={previewRuns} />;
+  return <AdminScrapeRunsDashboard principal={principal} runs={runs} />;
 }
 
 export function AdminScrapeRunsDashboard({ principal, runs }: AdminScrapeRunsDashboardProps) {

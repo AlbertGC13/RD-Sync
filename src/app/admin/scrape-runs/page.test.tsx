@@ -1,12 +1,18 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { headers } from "next/headers";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  default as AdminScrapeRunsPage,
   AdminScrapeRunsDashboard,
   resolvePreviewPrincipal,
   summarizeScrapeRuns,
   type AdminScrapeRun,
 } from "./page";
+
+vi.mock("next/headers", () => ({
+  headers: vi.fn(),
+}));
 
 const runs: AdminScrapeRun[] = [
   {
@@ -42,6 +48,35 @@ const runs: AdminScrapeRun[] = [
 ];
 
 describe("AdminScrapeRunsDashboard", () => {
+  it("does not render hard-coded preview runs from the page when local preview is disabled", async () => {
+    const previousValue = process.env.RD_SYNC_DEV_PREVIEW;
+    vi.mocked(headers).mockResolvedValue(
+      new Headers({
+        "x-rd-sync-user-id": "admin-1",
+        "x-rd-sync-role": "admin",
+      }) as never,
+    );
+
+    try {
+      delete process.env.RD_SYNC_DEV_PREVIEW;
+
+      const html = renderToStaticMarkup(
+        await AdminScrapeRunsPage({ searchParams: Promise.resolve({}) }),
+      );
+
+      expect(html).toContain("No scrape runs recorded yet");
+      expect(html).not.toContain("Bank session requires admin MFA action");
+      expect(html).not.toContain("preview-run-");
+    } finally {
+      vi.mocked(headers).mockReset();
+      if (previousValue === undefined) {
+        delete process.env.RD_SYNC_DEV_PREVIEW;
+      } else {
+        process.env.RD_SYNC_DEV_PREVIEW = previousValue;
+      }
+    }
+  });
+
   it("renders operational health and admin intervention guidance for admins", () => {
     const html = renderToStaticMarkup(
       <AdminScrapeRunsDashboard principal={{ id: "admin-1", role: "admin" }} runs={runs} />,
@@ -81,6 +116,16 @@ describe("AdminScrapeRunsDashboard", () => {
       inserted: 12,
       skipped: 3,
     });
+  });
+
+  it("renders an honest empty state when no real scrape runs are recorded", () => {
+    const html = renderToStaticMarkup(
+      <AdminScrapeRunsDashboard principal={{ id: "admin-1", role: "admin" }} runs={[]} />,
+    );
+
+    expect(html).toContain("No scrape runs recorded yet");
+    expect(html).toContain("Once a bank connection is wired and the scheduler is on, runs will appear here.");
+    expect(html).not.toContain("Bank session requires admin MFA action");
   });
 
   it("exposes FR-012 affordances (Retry, Disable, Renew) as disabled stubs", () => {
