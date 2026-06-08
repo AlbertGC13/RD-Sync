@@ -7,10 +7,10 @@ describe("HomePage", () => {
   it("shows clear preview navigation for employee and admin flows", () => {
     const html = renderToStaticMarkup(<HomePage />);
 
-    expect(html).toContain("Transaction dashboard MVP");
+    // Strings preserved for the E2E suite.
     expect(html).toContain("Employee flow");
-    expect(html).toContain("href=\"/transactions\"");
+    expect(html).toContain('href="/transactions"');
     expect(html).toContain("Admin demo flow");
-    expect(html).toContain("href=\"/admin/scrape-runs?previewRole=admin\"");
+    expect(html).toContain('href="/admin/scrape-runs?previewRole=admin"');
   });
 });

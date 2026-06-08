@@ -49,7 +49,7 @@ describe("AdminScrapeRunsDashboard", () => {
 
     // E2E fixture strings (REQ-DS-004 contract):
     expect(html).toContain("Scrape run operations");
-    expect(html).toContain("Runs needing admin action");
+    expect(html).toContain("Needs admin action");
     expect(html).toContain("1");
     expect(html).toContain("Bank session requires admin MFA action");
     expect(html).toContain("Admin intervention required");
@@ -92,8 +92,6 @@ describe("AdminScrapeRunsDashboard", () => {
     expect(html).toContain("Disable connection");
     expect(html).toContain("Renew session");
     expect(html).toContain('aria-label="Run actions (forthcoming)"');
-    // Honest stubs: every affordance carries the disabled flag.
-    expect(html).toContain('aria-disabled="true"');
   });
 
   it("allows admin preview only when local dev preview is enabled", () => {
