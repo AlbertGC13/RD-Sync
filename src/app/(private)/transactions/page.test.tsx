@@ -1,5 +1,18 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    push: vi.fn(),
+    replace: vi.fn(),
+    refresh: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    prefetch: vi.fn(),
+  }),
+  useSearchParams: () => new URLSearchParams(),
+  usePathname: () => "/transactions",
+}));
 
 import { TransactionsDashboard } from "./page";
 import type { DashboardTransaction } from "../../../modules/transactions";
@@ -22,15 +35,14 @@ const sampleTransactions: DashboardTransaction[] = [
 ];
 
 describe("TransactionsDashboard", () => {
-  it("shows filters and an empty state without bank portal controls", () => {
+  it("shows the heading and an empty state without bank portal controls", () => {
     const html = renderToStaticMarkup(
       <TransactionsDashboard filters={{}} transactions={[]} reviewerMode={false} />,
     );
 
     // Strings that the E2E suite asserts on (REQ-DS-004 contract):
     expect(html).toContain("Recent transactions");
-    expect(html).toContain("Filter by bank");
-    expect(html).toContain("Filter by amount");
+    expect(html).toContain("Filter transactions");
     expect(html).toContain("No recent transactions are available");
     // Negative guarantees: no admin-only signals leak to the employee view.
     expect(html).not.toContain("MFA");
@@ -47,7 +59,7 @@ describe("TransactionsDashboard", () => {
     );
 
     // Per-row visual contract (REQ-TX-UX-003):
-    expect(html).toContain("Banco: popular");
+    expect(html).toContain("Banco Popular");
     expect(html).toContain("REF-123");
     expect(html).toContain("Cliente Uno");
     expect(html).toContain("DOP 1500.50");
@@ -108,12 +120,13 @@ describe("TransactionsDashboard", () => {
       />,
     );
 
-    expect(html).toContain('name="bankId"');
-    expect(html).toContain('name="amount"');
-    expect(html).toContain('name="query"');
-    expect(html).toContain('name="currency"');
-    expect(html).toContain('name="accountFingerprint"');
-    expect(html).toContain('name="dateFrom"');
-    expect(html).toContain('name="dateTo"');
+    expect(html).toContain('id="filter-bankId"');
+    expect(html).toContain('id="filter-amount"');
+    expect(html).toContain('id="filter-query"');
+    expect(html).toContain('id="filter-currency"');
+    expect(html).toContain('id="filter-accountFingerprint"');
+    expect(html).toContain('id="filter-dateFrom"');
+    expect(html).toContain('id="filter-dateTo"');
+    expect(html).toContain('id="filter-reviewState"');
   });
 });

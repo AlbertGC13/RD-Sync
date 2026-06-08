@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { headers } from "next/headers";
+import Link from "next/link";
+import { Inbox, Receipt, Sparkles } from "lucide-react";
 
 import { listTransactionsForPage } from "../../api/transactions/defaults";
 import { canReviewTransactions, resolvePrincipalFromTrustedHeaders } from "../../../modules/auth";
@@ -10,9 +11,10 @@ import {
   type TransactionDirection,
 } from "../../../modules/transactions";
 import { TransactionRow } from "../../../components/transactions/transaction-row";
-import { ReviewActions } from "../../../components/transactions/review-actions";
+import { FilterBar } from "../../../components/transactions/filter-bar";
 import { EmptyState } from "../../../components/ui/empty-state";
 import { PageHeader } from "../../../components/ui/page-header";
+import { Badge } from "../../../components/ui/badge";
 
 export const metadata: Metadata = {
   title: "Recent transactions · RD-Sync",
@@ -34,12 +36,60 @@ export default async function TransactionsPage({ searchParams }: TransactionsPag
   const principal = resolvePrincipalFromTrustedHeaders(await headers());
   const reviewerMode = canReviewTransactions(principal);
 
+  const activeCount = countActiveFilters(filters);
+  const totals = summarizeTotals(transactions);
+
   return (
-    <TransactionsDashboard
-      filters={filters}
-      transactions={transactions}
-      reviewerMode={reviewerMode}
-    />
+    <div className="grid gap-6">
+      <PageHeader
+        eyebrow="Employee view"
+        title="Recent transactions"
+        description="Employee-safe visibility into normalized bank movements. Bank sessions, credentials, and operational controls are intentionally excluded from this screen."
+        actions={
+          <Badge variant="outline" className="gap-1.5">
+            <Sparkles className="h-3 w-3 text-primary" aria-hidden />
+            {totals.total} {totals.total === 1 ? "movement" : "movements"} ·{" "}
+            <span className="text-emerald-300 tabular-nums">+{totals.credits}</span> /{" "}
+            <span className="text-amber-300 tabular-nums">−{totals.debits}</span>
+          </Badge>
+        }
+      />
+
+      <FilterBar filters={filters} activeCount={activeCount} resultCount={transactions.length} />
+
+      {transactions.length === 0 ? (
+        <EmptyState
+          icon={<Inbox className="h-6 w-6" aria-hidden />}
+          title="No recent transactions are available"
+          description={
+            activeCount > 0
+              ? "No transactions match the current filters. Clear the active filters above to see all recent movements."
+              : "Transactions will appear here after ingestion stores normalized bank movements."
+          }
+          action={
+            activeCount > 0 ? (
+              <Link
+                href="/transactions"
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-foreground transition-colors hover:border-primary hover:text-primary"
+              >
+                <Receipt className="h-3.5 w-3.5" aria-hidden />
+                Clear filters
+              </Link>
+            ) : undefined
+          }
+        />
+      ) : (
+        <section aria-label="Transaction results" className="grid gap-3">
+          {transactions.map((transaction) => (
+            <TransactionRow
+              key={transaction.id}
+              transaction={transaction}
+              reviewerMode={reviewerMode}
+            />
+          ))}
+        </section>
+      )}
+    </div>
   );
 }
 
@@ -49,133 +99,56 @@ interface TransactionsDashboardProps {
   reviewerMode: boolean;
 }
 
+/**
+ * Standalone dashboard component preserved for unit testing without
+ * the server-side `headers()` call.
+ */
 export function TransactionsDashboard({
   filters,
   transactions,
   reviewerMode,
 }: TransactionsDashboardProps) {
-  const hasActiveFilters = isAnyFilterActive(filters);
+  const activeCount = countActiveFilters(filters);
+  const totals = summarizeTotals(transactions);
 
   return (
-    <main className="mx-auto grid min-h-screen max-w-6xl gap-6 px-6 py-12">
+    <div className="grid gap-6">
       <PageHeader
-        eyebrow="RD-Sync"
+        eyebrow="Employee view"
         title="Recent transactions"
         description="Employee-safe visibility into normalized bank movements. Bank sessions, credentials, and operational controls are intentionally excluded from this screen."
+        actions={
+          <Badge variant="outline" className="gap-1.5">
+            <Sparkles className="h-3 w-3 text-primary" aria-hidden />
+            {totals.total} {totals.total === 1 ? "movement" : "movements"} ·{" "}
+            <span className="text-emerald-300 tabular-nums">+{totals.credits}</span> /{" "}
+            <span className="text-amber-300 tabular-nums">−{totals.debits}</span>
+          </Badge>
+        }
       />
-
-      <form
-        method="get"
-        className="grid gap-4 rounded-lg border border-border bg-card p-4 sm:grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]"
-        aria-label="Transaction filters"
-      >
-        <label className="grid gap-2 text-sm text-card-foreground">
-          Filter by bank
-          <input
-            name="bankId"
-            defaultValue={filters.bankId}
-            placeholder="popular, bhd, banreservas"
-            className="min-h-11 rounded-md border border-input bg-background px-4 py-3 font-sans text-foreground"
-          />
-        </label>
-        <label className="grid gap-2 text-sm text-card-foreground">
-          Filter by amount
-          <input
-            name="amount"
-            defaultValue={filters.amount?.toString()}
-            inputMode="decimal"
-            placeholder="1500.50"
-            className="min-h-11 rounded-md border border-input bg-background px-4 py-3 font-sans text-foreground"
-          />
-        </label>
-        <label className="grid gap-2 text-sm text-card-foreground">
-          Filter by reference or concept
-          <input
-            name="query"
-            defaultValue={filters.query}
-            placeholder="Reference, concept, originator"
-            className="min-h-11 rounded-md border border-input bg-background px-4 py-3 font-sans text-foreground"
-          />
-        </label>
-        <label className="grid gap-2 text-sm text-card-foreground">
-          Currency
-          <input
-            name="currency"
-            defaultValue={filters.currency}
-            placeholder="DOP, USD"
-            className="min-h-11 rounded-md border border-input bg-background px-4 py-3 font-sans text-foreground"
-          />
-        </label>
-        <label className="grid gap-2 text-sm text-card-foreground">
-          Account fingerprint
-          <input
-            name="accountFingerprint"
-            defaultValue={filters.accountFingerprint}
-            placeholder="acct-main"
-            className="min-h-11 rounded-md border border-input bg-background px-4 py-3 font-sans text-foreground"
-          />
-        </label>
-        <label className="grid gap-2 text-sm text-card-foreground">
-          From (date)
-          <input
-            type="date"
-            name="dateFrom"
-            defaultValue={toDateInputValue(filters.dateFrom)}
-            className="min-h-11 rounded-md border border-input bg-background px-4 py-3 font-sans text-foreground"
-          />
-        </label>
-        <label className="grid gap-2 text-sm text-card-foreground">
-          To (date)
-          <input
-            type="date"
-            name="dateTo"
-            defaultValue={toDateInputValue(filters.dateTo)}
-            className="min-h-11 rounded-md border border-input bg-background px-4 py-3 font-sans text-foreground"
-          />
-        </label>
-        <button
-          type="submit"
-          className="min-h-11 cursor-pointer self-end rounded-md bg-accent px-4 py-3 font-bold text-accent-foreground"
-        >
-          Apply filters
-        </button>
-      </form>
-
+      <FilterBar filters={filters} activeCount={activeCount} resultCount={transactions.length} />
       {transactions.length === 0 ? (
         <EmptyState
+          icon={<Inbox className="h-6 w-6" aria-hidden />}
           title="No recent transactions are available"
           description={
-            hasActiveFilters
-              ? "No transactions match the current filters. Clear the filters above to see all recent movements."
+            activeCount > 0
+              ? "No transactions match the current filters. Clear the active filters above to see all recent movements."
               : "Transactions will appear here after ingestion stores normalized bank movements."
-          }
-          action={
-            hasActiveFilters ? (
-              <Link
-                href="/transactions"
-                className="inline-flex min-h-11 items-center rounded-md border border-border bg-background px-4 py-3 text-sm font-medium text-foreground hover:bg-accent hover:text-accent-foreground"
-              >
-                Clear filters
-              </Link>
-            ) : undefined
           }
         />
       ) : (
-        <section aria-label="Transaction results" className="grid gap-4">
+        <section aria-label="Transaction results" className="grid gap-3">
           {transactions.map((transaction) => (
             <TransactionRow
               key={transaction.id}
               transaction={transaction}
-              actions={
-                reviewerMode ? (
-                  <ReviewActions transactionId={transaction.id} currentState={transaction.reviewState} />
-                ) : null
-              }
+              reviewerMode={reviewerMode}
             />
           ))}
         </section>
       )}
-    </main>
+    </div>
   );
 }
 
@@ -199,24 +172,27 @@ function firstValue(value: string | string[] | undefined): string | undefined {
   return value;
 }
 
-function isAnyFilterActive(filters: TransactionFilters): boolean {
-  return Boolean(
-    filters.bankId ||
-      filters.amount ||
-      filters.query ||
-      filters.currency ||
-      filters.accountFingerprint ||
-      filters.dateFrom ||
-      filters.dateTo ||
-      filters.reviewState,
-  );
+function countActiveFilters(filters: TransactionFilters): number {
+  let count = 0;
+  if (filters.bankId) count += 1;
+  if (filters.amount) count += 1;
+  if (filters.query) count += 1;
+  if (filters.currency) count += 1;
+  if (filters.accountFingerprint) count += 1;
+  if (filters.dateFrom) count += 1;
+  if (filters.dateTo) count += 1;
+  if (filters.reviewState) count += 1;
+  return count;
 }
 
-function toDateInputValue(value: string | Date | undefined): string | undefined {
-  if (!value) return undefined;
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return undefined;
-  return date.toISOString().slice(0, 10);
+function summarizeTotals(transactions: readonly DashboardTransaction[]) {
+  let credits = 0;
+  let debits = 0;
+  for (const t of transactions) {
+    if (t.direction === "credit") credits += 1;
+    else debits += 1;
+  }
+  return { total: transactions.length, credits, debits };
 }
 
 export type { TransactionDirection };

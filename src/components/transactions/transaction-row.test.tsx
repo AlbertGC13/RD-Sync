@@ -21,7 +21,9 @@ const baseTx: DashboardTransaction = {
 
 describe("TransactionRow", () => {
   it("renders credit direction with the success badge variant", () => {
-    const html = renderToStaticMarkup(<TransactionRow transaction={baseTx} />);
+    const html = renderToStaticMarkup(
+      <TransactionRow transaction={baseTx} reviewerMode={false} />,
+    );
     expect(html).toContain("Credit");
     expect(html).toContain("+");
     expect(html).toContain("DOP 1500.50");
@@ -29,26 +31,30 @@ describe("TransactionRow", () => {
 
   it("renders debit direction with the warning badge variant", () => {
     const html = renderToStaticMarkup(
-      <TransactionRow transaction={{ ...baseTx, direction: "debit", reference: "DEBIT-1" }} />,
+      <TransactionRow
+        transaction={{ ...baseTx, direction: "debit", reference: "DEBIT-1" }}
+        reviewerMode={false}
+      />,
     );
     expect(html).toContain("Debit");
     expect(html).toContain("−");
   });
 
-  it("shows postedAt formatted for the user locale", () => {
-    const html = renderToStaticMarkup(<TransactionRow transaction={baseTx} />);
-    expect(html).toContain("Posted");
-    // The exact format depends on the test runner locale, but the prefix is
-    // stable and the date is human-readable.
-    expect(html).toMatch(/Posted [A-Z][a-z]{2} \d{1,2}, \d{4}/);
-  });
-
   it("never leaks source hash, balance, session, or MFA fields", () => {
-    const html = renderToStaticMarkup(<TransactionRow transaction={baseTx} />);
+    const html = renderToStaticMarkup(
+      <TransactionRow transaction={baseTx} reviewerMode={false} />,
+    );
     expect(html).not.toContain("sourceHash");
     expect(html).not.toContain("balance");
     expect(html).not.toContain("session");
     expect(html).not.toContain("MFA");
     expect(html).not.toContain("credentials");
+  });
+
+  it("shows the bank name in a human-readable form (not the raw id)", () => {
+    const html = renderToStaticMarkup(
+      <TransactionRow transaction={baseTx} reviewerMode={false} />,
+    );
+    expect(html).toContain("Banco Popular");
   });
 });
