@@ -1,5 +1,11 @@
 import { InMemoryAuditSink } from "../../../modules/audit";
-import { InMemoryTransactionRepository, normalizeBankMovement } from "../../../modules/transactions";
+import {
+  InMemoryTransactionRepository,
+  normalizeBankMovement,
+  toDashboardTransaction,
+  type DashboardTransaction,
+  type TransactionFilters,
+} from "../../../modules/transactions";
 
 export const defaultTransactionRepository = new InMemoryTransactionRepository();
 export const defaultAuditSink = new InMemoryAuditSink();
@@ -29,4 +35,22 @@ export async function seedE2ETransactionFixturesIfEnabled() {
       { id: "tx-e2e-review" },
     ),
   ]);
+}
+
+/**
+ * Read transactions for the dashboard page. Server components in the (private)
+ * route group call this so they render real data through the same in-memory
+ * repository the API route uses. The page-level read deliberately bypasses the
+ * API layer because (a) it is a server component (no HTTP roundtrip needed)
+ * and (b) authorization happens at the layout / trusted-header level, not here.
+ *
+ * @param filters - the FR-010 filter set
+ * @returns dashboard-shaped transactions (no sourceHash, no metadata)
+ */
+export async function listTransactionsForPage(
+  filters: TransactionFilters,
+): Promise<DashboardTransaction[]> {
+  await seedE2ETransactionFixturesIfEnabled();
+  const records = await defaultTransactionRepository.list(filters);
+  return records.map(toDashboardTransaction);
 }
