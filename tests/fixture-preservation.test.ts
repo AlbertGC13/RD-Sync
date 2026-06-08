@@ -44,13 +44,18 @@ const FIXTURES: FixtureString[] = [
   },
   {
     description: "Filter form is labelled for assistive tech and the E2E form role.",
-    file: "src/app/(private)/transactions/page.tsx",
+    file: "src/components/transactions/filter-bar.tsx",
     literal: 'aria-label="Transaction filters"',
   },
   {
     description: "Empty state copy is checked by the E2E suite.",
     file: "src/app/(private)/transactions/page.tsx",
     literal: "No recent transactions are available",
+  },
+  {
+    description: "Filter section header replaces the old 'Filter by bank' label.",
+    file: "src/components/transactions/filter-bar.tsx",
+    literal: "Filter transactions",
   },
 
   // ---- Admin scrape-runs ----
@@ -75,6 +80,11 @@ const FIXTURES: FixtureString[] = [
     file: "src/app/admin/scrape-runs/page.tsx",
     literal:
       "Confirm the alert contains no credentials, cookies, or raw bank session data.",
+  },
+  {
+    description: "Bank-name humanization for Banreservas is in the admin run card.",
+    file: "src/app/admin/scrape-runs/page.tsx",
+    literal: "Banreservas",
   },
 ];
 
