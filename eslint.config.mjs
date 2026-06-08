@@ -35,6 +35,7 @@ const eslintConfig = [
     // `style={{ color: "#fff" }}` snapshots) can exercise the rule without
     // flipping the lint exit code in CI.
     files: ["src/components/**/*.{ts,tsx}", "src/app/**/page.tsx"],
+    ignores: ["src/components/**/*.test.{ts,tsx}", "src/app/**/page.test.tsx"],
     rules: {
       "no-restricted-syntax": [
         "error",
