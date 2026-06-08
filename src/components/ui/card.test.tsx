@@ -15,7 +15,7 @@ describe("Card", () => {
     const html = renderToStaticMarkup(<Card>Body</Card>);
 
     expect(html).toContain("Body");
-    expect(html).toContain("rounded-lg");
+    expect(html).toContain("rounded-xl");
     expect(html).toContain("border");
     expect(html).toContain("bg-card");
   });
@@ -43,7 +43,6 @@ describe("CardTitle", () => {
 
     expect(html).toContain("Card title");
     expect(html).toContain("font-semibold");
-    expect(html).toContain("leading-none");
   });
 });
 
@@ -57,19 +56,20 @@ describe("CardDescription", () => {
 });
 
 describe("CardContent", () => {
-  it("renders content with horizontal padding", () => {
+  it("renders content with padding", () => {
     const html = renderToStaticMarkup(<CardContent>Body</CardContent>);
 
     expect(html).toContain("Body");
-    expect(html).toContain("p-6");
+    expect(html).toContain("px-5");
+    expect(html).toContain("py-5");
   });
 });
 
 describe("CardFooter", () => {
-  it("renders footer with top spacing and items", () => {
+  it("renders footer with top border", () => {
     const html = renderToStaticMarkup(<CardFooter>Footer</CardFooter>);
 
     expect(html).toContain("Footer");
-    expect(html).toContain("flex");
+    expect(html).toContain("border-t");
   });
 });

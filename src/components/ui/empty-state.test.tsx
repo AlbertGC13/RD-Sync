@@ -14,11 +14,9 @@ describe("EmptyState", () => {
   });
 
   it("uses a card-like container", () => {
-    const html = renderToStaticMarkup(
-      <EmptyState title="t" description="d" />,
-    );
+    const html = renderToStaticMarkup(<EmptyState title="t" description="d" />);
 
-    expect(html).toContain("rounded-lg");
+    expect(html).toContain("rounded-xl");
     expect(html).toContain("border");
   });
 
@@ -33,5 +31,12 @@ describe("EmptyState", () => {
 
     expect(html).toContain("<button");
     expect(html).toContain("Retry");
+  });
+
+  it("renders the icon when provided", () => {
+    const html = renderToStaticMarkup(
+      <EmptyState title="t" description="d" icon={<svg data-testid="icon" />} />,
+    );
+    expect(html).toContain('data-testid="icon"');
   });
 });

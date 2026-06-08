@@ -35,42 +35,32 @@
 }
 
 @layer base {
-  :root { color-scheme: dark; background: var(--color-background); color: var(--color-foreground); }
-  html, body { margin: 0; min-height: 100%; }
-  body { font-family: var(--font-sans); }
-  *:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; transition: none !important; }
+  :root {
+    color-scheme: dark;
+    background: var(--color-background);
+    color: var(--color-foreground);
   }
-}
-
-@layer components {
-  .dashboard-shell { @apply mx-auto grid min-h-screen max-w-6xl gap-6 px-6 py-12; }
-  .dashboard-header { @apply max-w-3xl; }
-  .eyebrow { @apply text-xs font-bold uppercase tracking-[0.3em] text-accent; }
-  h1 { @apply mt-3 mb-4 text-[clamp(2.25rem,8vw,4rem)] leading-none; }
-  .lede { @apply text-lg leading-relaxed text-muted-foreground; }
-  .filters { @apply grid gap-4 rounded-lg border border-border bg-card p-4 sm:grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]; }
-  .filters label { @apply grid gap-2 text-sm text-card-foreground; }
-  .filters input { @apply min-h-11 rounded-md border border-input bg-background px-4 py-3 font-sans text-foreground; }
-  .filters button { @apply min-h-11 cursor-pointer self-end rounded-md bg-accent px-4 py-3 font-bold text-accent-foreground; }
-  .empty-state, .transaction-card { @apply rounded-lg border border-border bg-card p-5; }
-  .transaction-grid { @apply grid gap-4; }
-  .transaction-card { @apply flex justify-between gap-4; }
-  .card-kicker, .amount-block span { @apply m-0 text-sm text-muted-foreground; }
-  .amount-block { @apply grid justify-items-end gap-2; }
-  .admin-metrics { @apply grid gap-4 sm:grid-cols-[repeat(auto-fit,minmax(12rem,1fr))]; }
-  .metric-card, .ops-card, .access-denied { @apply grid gap-4 rounded-lg border border-border bg-card p-5; }
-  .metric-card p, .metric-card span { @apply m-0 text-muted-foreground; }
-  .metric-card strong { @apply text-2xl leading-none text-foreground; }
-  .ops-grid { @apply grid gap-4 lg:grid-cols-[minmax(0,1.3fr)_minmax(18rem,0.7fr)]; }
-  .run-list { @apply grid gap-4; }
-  .run-card { @apply grid gap-4 rounded-lg border border-input bg-background p-4; }
-  .run-card p { @apply text-card-foreground; }
-  .run-card dl { @apply m-0 grid gap-3 sm:grid-cols-[repeat(auto-fit,minmax(9rem,1fr))]; }
-  .run-card dt { @apply text-xs text-muted-foreground; }
-  .run-card dd { @apply mt-1; }
-  .intervention-list { @apply pl-5 leading-relaxed text-card-foreground; }
-  .access-denied { @apply m-auto max-w-3xl; }
-  @media (max-width: 1023px) { .ops-grid { grid-template-columns: 1fr; } }
+  html,
+  body {
+    margin: 0;
+    min-height: 100%;
+  }
+  body {
+    font-family: var(--font-sans);
+    background: var(--color-background);
+    color: var(--color-foreground);
+  }
+  *:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
 }
