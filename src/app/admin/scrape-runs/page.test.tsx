@@ -47,6 +47,7 @@ describe("AdminScrapeRunsDashboard", () => {
       <AdminScrapeRunsDashboard principal={{ id: "admin-1", role: "admin" }} runs={runs} />,
     );
 
+    // E2E fixture strings (REQ-DS-004 contract):
     expect(html).toContain("Scrape run operations");
     expect(html).toContain("Runs needing admin action");
     expect(html).toContain("1");
@@ -55,6 +56,7 @@ describe("AdminScrapeRunsDashboard", () => {
     expect(html).toContain("Resume only after session renewal is completed by an admin.");
     expect(html).toContain("Banreservas");
     expect(html).toContain("12 inserted");
+    // Negative guarantees: no secrets in the rendered HTML.
     expect(html).not.toContain("token=");
     expect(html).not.toContain("password=");
   });
@@ -79,6 +81,19 @@ describe("AdminScrapeRunsDashboard", () => {
       inserted: 12,
       skipped: 3,
     });
+  });
+
+  it("exposes FR-012 affordances (Retry, Disable, Renew) as disabled stubs", () => {
+    const html = renderToStaticMarkup(
+      <AdminScrapeRunsDashboard principal={{ id: "admin-1", role: "admin" }} runs={runs} />,
+    );
+
+    expect(html).toContain("Retry run");
+    expect(html).toContain("Disable connection");
+    expect(html).toContain("Renew session");
+    expect(html).toContain('aria-label="Run actions (forthcoming)"');
+    // Honest stubs: every affordance carries the disabled flag.
+    expect(html).toContain('aria-disabled="true"');
   });
 
   it("allows admin preview only when local dev preview is enabled", () => {

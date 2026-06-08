@@ -1,6 +1,14 @@
 import { headers } from "next/headers";
 
-import { assertCanAccessBankSession, resolvePrincipalFromTrustedHeaders, type Principal } from "../../../modules/auth";
+import {
+  assertCanAccessBankSession,
+  resolvePrincipalFromTrustedHeaders,
+  type Principal,
+} from "../../../modules/auth";
+import { Card, CardContent, CardHeader, CardTitle } from "../../../components/ui/card";
+import { Badge } from "../../../components/ui/badge";
+import { PageHeader } from "../../../components/ui/page-header";
+import { RunActionAffordances } from "../../../components/admin/run-action-affordances";
 import type { ScrapeRunStatus } from "../../../worker/queues";
 
 export interface AdminScrapeRun {
@@ -44,6 +52,16 @@ const previewRuns: AdminScrapeRun[] = [
     skippedCount: 3,
     safeErrorSummary: null,
   },
+  {
+    id: "preview-run-3",
+    bankId: "bhd",
+    status: "failed",
+    startedAt: "2026-06-07T11:00:00.000Z",
+    endedAt: "2026-06-07T11:01:00.000Z",
+    insertedCount: 0,
+    skippedCount: 0,
+    safeErrorSummary: "Transaction table selector missing",
+  },
 ];
 
 export default async function AdminScrapeRunsPage({ searchParams }: AdminScrapeRunsPageProps) {
@@ -58,79 +76,99 @@ export function AdminScrapeRunsDashboard({ principal, runs }: AdminScrapeRunsDas
     assertCanAccessBankSession(principal);
   } catch {
     return (
-      <main className="dashboard-shell admin-ops-shell">
-        <section className="access-denied" role="alert" aria-labelledby="admin-access-required-title">
-          <p className="eyebrow">Restricted operations</p>
-          <h1 id="admin-access-required-title">Admin access required</h1>
-          <p className="lede">
-            Only admins can view scraping health or handle MFA/session intervention.
-          </p>
-        </section>
+      <main className="mx-auto grid min-h-screen max-w-3xl gap-4 px-6 py-12">
+        <PageHeader
+          eyebrow="Restricted operations"
+          title="Admin access required"
+          description="Only admins can view scraping health or handle MFA/session intervention."
+        />
       </main>
     );
   }
 
   const summary = summarizeScrapeRuns(runs);
-  const attentionRuns = runs.filter((run) => run.status === "needs_admin_action" || run.status === "failed");
+  const attentionRuns = runs.filter(
+    (run) => run.status === "needs_admin_action" || run.status === "failed",
+  );
 
   return (
-    <main className="dashboard-shell admin-ops-shell">
-      <header className="dashboard-header">
-        <p className="eyebrow">Admin operations</p>
-        <h1>Scrape run operations</h1>
-        <p className="lede">
-          Monitor bank ingestion health, review safe failure summaries, and keep MFA/session work restricted to admins.
-        </p>
-      </header>
+    <main className="mx-auto grid min-h-screen max-w-6xl gap-6 px-6 py-12">
+      <PageHeader
+        eyebrow="Admin operations"
+        title="Scrape run operations"
+        description="Monitor bank ingestion health, review safe failure summaries, and keep MFA/session work restricted to admins."
+      />
 
-      <section className="admin-metrics" aria-label="Scrape run health summary">
+      <section
+        className="grid gap-4 sm:grid-cols-[repeat(auto-fit,minmax(12rem,1fr))]"
+        aria-label="Scrape run health summary"
+      >
         <MetricCard label="Total runs" value={summary.total} detail={`${summary.inserted} inserted`} />
-        <MetricCard label="Successful runs" value={summary.succeeded} detail={`${summary.skipped} skipped duplicates`} />
-        <MetricCard label="Runs needing admin action" value={summary.needsAdminAction} detail="MFA or session renewal" />
+        <MetricCard
+          label="Successful runs"
+          value={summary.succeeded}
+          detail={`${summary.skipped} skipped duplicates`}
+        />
+        <MetricCard
+          label="Runs needing admin action"
+          value={summary.needsAdminAction}
+          detail="MFA or session renewal"
+        />
         <MetricCard label="Failed runs" value={summary.failed} detail="Safe summaries only" />
       </section>
 
-      <section className="ops-grid" aria-label="Scraping operations details">
-        <article className="ops-card">
-          <div>
-            <p className="card-kicker">Intervention queue</p>
-            <h2>Admin intervention required</h2>
-          </div>
-          {attentionRuns.length > 0 ? (
-            <div className="run-list">
-              {attentionRuns.map((run) => (
-                <ScrapeRunCard key={run.id} run={run} />
-              ))}
-            </div>
-          ) : (
-            <p className="empty-state">No scrape runs currently require admin intervention.</p>
-          )}
-        </article>
+      <section
+        className="grid gap-4 lg:grid-cols-[minmax(0,1.3fr)_minmax(18rem,0.7fr)]"
+        aria-label="Scraping operations details"
+      >
+        <Card>
+          <CardHeader>
+            <p className="text-sm text-muted-foreground">Intervention queue</p>
+            <CardTitle>Admin intervention required</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {attentionRuns.length > 0 ? (
+              <div className="grid gap-4">
+                {attentionRuns.map((run) => (
+                  <ScrapeRunCard key={run.id} run={run} />
+                ))}
+              </div>
+            ) : (
+              <p className="rounded-lg border border-border bg-card/50 p-4 text-sm text-muted-foreground">
+                No scrape runs currently require admin intervention.
+              </p>
+            )}
+          </CardContent>
+        </Card>
 
-        <article className="ops-card">
-          <div>
-            <p className="card-kicker">Safe recovery checklist</p>
-            <h2>MFA/session handling</h2>
-          </div>
-          <ol className="intervention-list">
-            <li>Confirm the alert contains no credentials, cookies, or raw bank session data.</li>
-            <li>Renew the bank session using an admin-only workstation and authorized credentials.</li>
-            <li>Resume only after session renewal is completed by an admin.</li>
-          </ol>
-        </article>
+        <Card>
+          <CardHeader>
+            <p className="text-sm text-muted-foreground">Safe recovery checklist</p>
+            <CardTitle>MFA/session handling</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ol className="grid list-decimal gap-3 pl-5 leading-relaxed text-card-foreground">
+              <li>Confirm the alert contains no credentials, cookies, or raw bank session data.</li>
+              <li>Renew the bank session using an admin-only workstation and authorized credentials.</li>
+              <li>Resume only after session renewal is completed by an admin.</li>
+            </ol>
+          </CardContent>
+        </Card>
       </section>
 
-      <section className="ops-card" aria-label="Recent scrape run history">
-        <div>
-          <p className="card-kicker">Run history</p>
-          <h2>Recent scrape runs</h2>
-        </div>
-        <div className="run-list">
-          {runs.map((run) => (
-            <ScrapeRunCard key={run.id} run={run} />
-          ))}
-        </div>
-      </section>
+      <Card aria-label="Recent scrape run history">
+        <CardHeader>
+          <p className="text-sm text-muted-foreground">Run history</p>
+          <CardTitle>Recent scrape runs</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4">
+            {runs.map((run) => (
+              <ScrapeRunCard key={run.id} run={run} />
+            ))}
+          </div>
+        </CardContent>
+      </Card>
     </main>
   );
 }
@@ -151,40 +189,70 @@ export function summarizeScrapeRuns(runs: readonly AdminScrapeRun[]) {
 
 function MetricCard({ label, value, detail }: { label: string; value: number; detail: string }) {
   return (
-    <article className="metric-card">
-      <p>{label}</p>
-      <strong>{value}</strong>
-      <span>{detail}</span>
-    </article>
+    <Card>
+      <CardContent className="grid gap-2">
+        <p className="text-sm text-muted-foreground">{label}</p>
+        <strong className="text-2xl leading-none text-foreground">{value}</strong>
+        <span className="text-sm text-muted-foreground">{detail}</span>
+      </CardContent>
+    </Card>
   );
 }
 
 function ScrapeRunCard({ run }: { run: AdminScrapeRun }) {
   return (
-    <article className="run-card">
-      <div>
-        <p className="card-kicker">{formatBankName(run.bankId)}</p>
-        <h3>{formatRunStatus(run.status)}</h3>
-        <p>{run.safeErrorSummary ?? "No safe failure summary recorded."}</p>
-      </div>
-      <dl>
-        <div>
-          <dt>Started</dt>
-          <dd>{formatDateTime(run.startedAt)}</dd>
+    <Card>
+      <CardContent className="grid gap-4">
+        <div className="grid gap-2">
+          <p className="text-sm text-muted-foreground">{formatBankName(run.bankId)}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-base font-semibold text-foreground">{formatRunStatus(run.status)}</h3>
+            <RunStatusBadge status={run.status} />
+          </div>
+          <p className="text-sm text-card-foreground">
+            {run.safeErrorSummary ?? "No safe failure summary recorded."}
+          </p>
         </div>
-        <div>
-          <dt>Ended</dt>
-          <dd>{formatDateTime(run.endedAt)}</dd>
-        </div>
-        <div>
-          <dt>Transactions</dt>
-          <dd>
-            {run.insertedCount} inserted / {run.skippedCount} skipped
-          </dd>
-        </div>
-      </dl>
-    </article>
+        <dl className="m-0 grid gap-3 sm:grid-cols-[repeat(auto-fit,minmax(9rem,1fr))]">
+          <div>
+            <dt className="text-xs text-muted-foreground">Started</dt>
+            <dd className="mt-1 text-sm text-foreground">{formatDateTime(run.startedAt)}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Ended</dt>
+            <dd className="mt-1 text-sm text-foreground">{formatDateTime(run.endedAt)}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Transactions</dt>
+            <dd className="mt-1 text-sm text-foreground">
+              {run.insertedCount} inserted / {run.skippedCount} skipped
+            </dd>
+          </div>
+        </dl>
+        <RunActionAffordances runId={run.id} status={run.status} />
+      </CardContent>
+    </Card>
   );
+}
+
+function RunStatusBadge({ status }: { status: ScrapeRunStatus }) {
+  const variant = statusToBadgeVariant(status);
+  return <Badge variant={variant}>{formatRunStatus(status)}</Badge>;
+}
+
+function statusToBadgeVariant(status: ScrapeRunStatus) {
+  switch (status) {
+    case "succeeded":
+      return "success" as const;
+    case "failed":
+    case "needs_admin_action":
+      return "destructive" as const;
+    case "running":
+      return "warning" as const;
+    case "queued":
+    default:
+      return "secondary" as const;
+  }
 }
 
 function formatBankName(bankId: string): string {
@@ -219,12 +287,16 @@ function formatDateTime(value: string | null): string {
   }).format(new Date(value));
 }
 
-export function resolvePreviewPrincipal(searchParams: Record<string, string | string[] | undefined>): Principal | null {
+export function resolvePreviewPrincipal(
+  searchParams: Record<string, string | string[] | undefined>,
+): Principal | null {
   if (process.env.RD_SYNC_DEV_PREVIEW !== "enabled") {
     return null;
   }
 
-  return firstValue(searchParams.previewRole) === "admin" ? { id: "admin-preview", role: "admin" } : null;
+  return firstValue(searchParams.previewRole) === "admin"
+    ? { id: "admin-preview", role: "admin" }
+    : null;
 }
 
 function firstValue(value: string | string[] | undefined): string | undefined {
