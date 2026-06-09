@@ -15,18 +15,11 @@ interface RunActionAffordancesProps {
 /**
  * FR-012 run action affordances for admin scrape runs.
  *
- * Per the design contract, these are honest stubs in this change:
- * - All three actions (Retry, Disable, Renew) are visible to admins.
- * - Each is disabled with a Radix Tooltip explaining the deferral.
- * - On click, each calls `notImplemented` with a specific feature tag and
- *   the Sonner toast confirms the deferral to the admin.
- * - No state changes; the run row's status badge and counts do not move.
- *
- * The real implementation lands with Hito 2 (real bank connection), at
- * which point the `disabled` flags and the toast handler are removed.
+ * Retry is wired to the PR4 Run Now endpoint. Disable and Renew remain
+ * honest stubs until session management lands.
  */
 export function RunActionAffordances({ runId, status }: RunActionAffordancesProps) {
-  function handleClick(feature: "retry" | "disable" | "renew") {
+  function handleDeferredClick(feature: "disable" | "renew") {
     void (async () => {
       const result = await notImplemented({ feature });
       if (!result.ok) {
@@ -37,29 +30,49 @@ export function RunActionAffordances({ runId, status }: RunActionAffordancesProp
     })();
   }
 
+  function handleRetryClick() {
+    void (async () => {
+      const response = await fetch(buildRunNowEndpoint(globalThis.location?.search), {
+        method: "POST",
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        toast.error(body.error ?? "Unable to schedule run");
+        return;
+      }
+
+      toast.success("Queued a new Banco Popular ingestion run. Refresh to see it in history.");
+    })();
+  }
+
   return (
     <TooltipProvider delayDuration={150}>
       <div
         className="flex flex-wrap gap-2 border-t border-border pt-3"
         role="group"
-        aria-label="Run actions (forthcoming)"
+        aria-label="Run actions"
       >
         <ActionButton
           label="Retry run"
-          tooltip="Available in Hito 2"
-          onClick={() => handleClick("retry")}
+          tooltip="Schedule a new ingestion run now"
+          onClick={handleRetryClick}
+          aria-label="Schedule a new ingestion run now"
           data-action="retry"
         />
         <ActionButton
           label="Disable connection"
-          tooltip="Available in Hito 2"
-          onClick={() => handleClick("disable")}
+          tooltip="Available after session management is wired"
+          onClick={() => handleDeferredClick("disable")}
+          disabled
+          aria-disabled="true"
           data-action="disable"
         />
         <ActionButton
           label="Renew session"
-          tooltip="Available in Hito 2"
-          onClick={() => handleClick("renew")}
+          tooltip="Available after session management is wired"
+          onClick={() => handleDeferredClick("renew")}
+          disabled
+          aria-disabled="true"
           data-action="renew"
         />
         <span className="ml-auto text-xs text-muted-foreground" aria-live="polite">
@@ -70,14 +83,24 @@ export function RunActionAffordances({ runId, status }: RunActionAffordancesProp
   );
 }
 
+export function buildRunNowEndpoint(search: string | undefined): string {
+  const searchParams = new URLSearchParams(search ?? "");
+  return searchParams.get("previewRole") === "admin"
+    ? "/api/scrape-runs/run-now?previewRole=admin"
+    : "/api/scrape-runs/run-now";
+}
+
 interface ActionButtonProps {
   label: string;
   tooltip: string;
   onClick: () => void;
+  disabled?: boolean;
+  "aria-disabled"?: "true";
+  "aria-label"?: string;
   "data-action": string;
 }
 
-function ActionButton({ label, tooltip, onClick, ...rest }: ActionButtonProps) {
+function ActionButton({ label, tooltip, onClick, disabled, ...rest }: ActionButtonProps) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -85,10 +108,9 @@ function ActionButton({ label, tooltip, onClick, ...rest }: ActionButtonProps) {
           type="button"
           variant="outline"
           size="sm"
-          disabled
-          aria-disabled="true"
+          disabled={disabled}
           onClick={onClick}
-          className="opacity-60"
+          className={disabled ? "opacity-60" : undefined}
           {...rest}
         >
           {label}

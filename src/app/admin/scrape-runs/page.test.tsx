@@ -128,7 +128,7 @@ describe("AdminScrapeRunsDashboard", () => {
     expect(html).not.toContain("Bank session requires admin MFA action");
   });
 
-  it("exposes FR-012 affordances (Retry, Disable, Renew) as disabled stubs", () => {
+  it("exposes FR-012 affordances with retry active and session actions deferred", () => {
     const html = renderToStaticMarkup(
       <AdminScrapeRunsDashboard principal={{ id: "admin-1", role: "admin" }} runs={runs} />,
     );
@@ -136,7 +136,9 @@ describe("AdminScrapeRunsDashboard", () => {
     expect(html).toContain("Retry run");
     expect(html).toContain("Disable connection");
     expect(html).toContain("Renew session");
-    expect(html).toContain('aria-label="Run actions (forthcoming)"');
+    expect(html).toContain('aria-label="Run actions"');
+    expect(html).toContain('aria-label="Schedule a new ingestion run now"');
+    expect(html).toContain('aria-disabled="true"');
   });
 
   it("allows admin preview only when local dev preview is enabled", () => {

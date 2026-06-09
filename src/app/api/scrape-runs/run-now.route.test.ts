@@ -50,6 +50,39 @@ describe("POST /api/scrape-runs/run-now", () => {
     ]);
   });
 
+  it("supports local admin preview when explicitly enabled", async () => {
+    const previousValue = process.env.RD_SYNC_DEV_PREVIEW;
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+    const handler = createPostScrapeRunNowHandler({
+      scrapeRuns,
+      queue,
+      createRunId: () => "popular-preview-run",
+    });
+
+    try {
+      process.env.RD_SYNC_DEV_PREVIEW = "enabled";
+
+      const response = await handler(
+        new Request("http://localhost/api/scrape-runs/run-now?previewRole=admin", {
+          method: "POST",
+        }),
+      );
+
+      expect(response.status).toBe(202);
+      expect(await response.json()).toEqual({
+        run: expect.objectContaining({ runId: "popular-preview-run", status: "queued" }),
+      });
+      expect(queue.addCalls).toHaveLength(1);
+    } finally {
+      if (previousValue === undefined) {
+        delete process.env.RD_SYNC_DEV_PREVIEW;
+      } else {
+        process.env.RD_SYNC_DEV_PREVIEW = previousValue;
+      }
+    }
+  });
+
   it("denies non-admin users without scheduling a job", async () => {
     const scrapeRuns = new InMemoryScrapeRunRepository();
     const queue = new FakeQueue();

@@ -13,7 +13,9 @@ const defaultDependencies: RunNowDependencies = {
 
 export function createPostScrapeRunNowHandler(dependencies: RunNowDependencies) {
   return async function postScrapeRunNow(request: Request): Promise<Response> {
-    const principal = resolvePrincipalFromTrustedHeaders(request.headers);
+    const url = new URL(request.url);
+    const principal =
+      resolveApiPreviewPrincipal(url.searchParams) ?? resolvePrincipalFromTrustedHeaders(request.headers);
     const payload = await readOptionalJson(request);
 
     try {
@@ -34,6 +36,16 @@ export function createPostScrapeRunNowHandler(dependencies: RunNowDependencies) 
 }
 
 export const POST = createPostScrapeRunNowHandler(defaultDependencies);
+
+export function resolveApiPreviewPrincipal(searchParams: URLSearchParams): RunNowRequest["principal"] {
+  if (process.env.RD_SYNC_DEV_PREVIEW !== "enabled") {
+    return null;
+  }
+
+  return searchParams.get("previewRole") === "admin"
+    ? { id: "admin-preview", role: "admin" }
+    : null;
+}
 
 async function readOptionalJson(request: Request): Promise<Partial<RunNowRequest>> {
   const text = await request.text();
