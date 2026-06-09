@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createPreviewScrapeRunRecords,
+  InMemoryScheduledIngestionQueue,
   listScrapeRunsForPage,
 } from "./defaults";
 
@@ -36,5 +37,28 @@ describe("listScrapeRunsForPage", () => {
         process.env.RD_SYNC_DEV_PREVIEW = previousValue;
       }
     }
+  });
+});
+
+describe("InMemoryScheduledIngestionQueue", () => {
+  it("records scheduled ingestion jobs for local server mode", async () => {
+    const queue = new InMemoryScheduledIngestionQueue();
+
+    await queue.add("bank-transaction-ingestion", {
+      runId: "run-1",
+      bankId: "popular",
+      accountFingerprint: "popular-817985690",
+    });
+
+    expect(queue.jobs).toEqual([
+      {
+        name: "bank-transaction-ingestion",
+        data: {
+          runId: "run-1",
+          bankId: "popular",
+          accountFingerprint: "popular-817985690",
+        },
+      },
+    ]);
   });
 });

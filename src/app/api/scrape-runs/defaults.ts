@@ -5,6 +5,7 @@ import {
   type ScrapeRunFilters,
   type ScrapeRunRecord,
 } from "../../../modules/scrape-runs";
+import type { IngestionJobData, QueueLike } from "../../../worker/queues";
 
 export const defaultScrapeRunRepository = new InMemoryScrapeRunRepository();
 
@@ -110,3 +111,13 @@ export async function listScrapeRunsForPage(
   const records = await defaultScrapeRunRepository.list(filters);
   return records.map(toDashboardScrapeRun);
 }
+
+export class InMemoryScheduledIngestionQueue implements QueueLike {
+  readonly jobs: Array<{ name: string; data: IngestionJobData }> = [];
+
+  async add(name: string, data: IngestionJobData): Promise<void> {
+    this.jobs.push({ name, data });
+  }
+}
+
+export const defaultIngestionQueue = new InMemoryScheduledIngestionQueue();
