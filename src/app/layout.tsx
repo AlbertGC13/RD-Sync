@@ -6,6 +6,7 @@ import {
   ArrowLeftRight,
   Building2,
   History,
+  KeyRound,
   LayoutDashboard,
   ScrollText,
 } from "lucide-react";
@@ -19,6 +20,7 @@ export const metadata: Metadata = {
 
 const NAV_LINKS = [
   { href: "/transactions", label: "Transactions", icon: LayoutDashboard },
+  { href: "/admin/bank-connections", label: "Connections", icon: KeyRound },
   { href: "/admin/scrape-runs", label: "Admin", icon: ArrowLeftRight },
   { href: "/admin/audit", label: "Audit log", icon: ScrollText },
 ] as const;

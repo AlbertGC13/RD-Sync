@@ -30,5 +30,7 @@ describe("RootLayout", () => {
     expect(html).toContain("Transactions");
     expect(html).toContain('href="/admin/scrape-runs"');
     expect(html).toContain("Admin");
+    expect(html).toContain('href="/admin/bank-connections"');
+    expect(html).toContain("Connections");
   });
 });
