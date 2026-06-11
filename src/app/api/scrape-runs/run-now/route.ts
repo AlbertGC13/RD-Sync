@@ -1,19 +1,26 @@
 import { resolvePrincipalFromTrustedHeaders } from "../../../../modules/auth";
 import { defaultAuditSink } from "../../audit/defaults";
 import { defaultIngestionQueue, defaultScrapeRunRepository } from "../defaults";
+import { defaultIngestionConsumer } from "../consumer-defaults";
 import {
   scheduleAdminIngestionRunNow,
   type RunNowDependencies,
   type RunNowRequest,
 } from "../run-now";
+import type { InMemoryIngestionConsumer } from "../../../../worker/ingestion-consumer";
 
-const defaultDependencies: RunNowDependencies = {
+export interface RunNowHandlerDependencies extends RunNowDependencies {
+  consumer?: InMemoryIngestionConsumer;
+}
+
+const defaultDependencies: RunNowHandlerDependencies = {
   scrapeRuns: defaultScrapeRunRepository,
   queue: defaultIngestionQueue,
   auditSink: defaultAuditSink,
+  consumer: defaultIngestionConsumer,
 };
 
-export function createPostScrapeRunNowHandler(dependencies: RunNowDependencies) {
+export function createPostScrapeRunNowHandler(dependencies: RunNowHandlerDependencies) {
   return async function postScrapeRunNow(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const principal =
@@ -29,6 +36,13 @@ export function createPostScrapeRunNowHandler(dependencies: RunNowDependencies) 
         },
         dependencies,
       );
+
+      // Kick the in-process consumer fire-and-forget so the 202 is not delayed.
+      // Errors are intentionally swallowed here — the run record in the repository
+      // captures the final status.  BullMQ + a separate worker replaces this in PR5+.
+      if (dependencies.consumer) {
+        void dependencies.consumer.drainPending().catch(() => undefined);
+      }
 
       return Response.json({ run }, { status: 202 });
     } catch (error) {
