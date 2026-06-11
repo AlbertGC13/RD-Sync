@@ -38,6 +38,7 @@
         "ioredis": "latest",
         "lucide-react": "^1.17.0",
         "next": "latest",
+        "nodemailer": "^8.0.11",
         "pg": "latest",
         "react": "latest",
         "react-dom": "latest",
@@ -50,6 +51,7 @@
     "devDependencies": {
         "@playwright/test": "latest",
         "@types/node": "latest",
+        "@types/nodemailer": "^8.0.0",
         "@types/pg": "latest",
         "@types/react": "latest",
         "@types/react-dom": "latest",
