@@ -38,7 +38,7 @@ export function createPostScrapeRunNowHandler(dependencies: RunNowDependencies) 
 export const POST = createPostScrapeRunNowHandler(defaultDependencies);
 
 export function resolveApiPreviewPrincipal(searchParams: URLSearchParams): RunNowRequest["principal"] {
-  if (process.env.RD_SYNC_DEV_PREVIEW !== "enabled") {
+  if (process.env.NODE_ENV === "production" || process.env.RD_SYNC_DEV_PREVIEW !== "enabled") {
     return null;
   }
 

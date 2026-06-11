@@ -426,7 +426,7 @@ function formatRelative(value: string | null): string {
 export function resolvePreviewPrincipal(
   searchParams: Record<string, string | string[] | undefined>,
 ): Principal | null {
-  if (process.env.RD_SYNC_DEV_PREVIEW !== "enabled") {
+  if (process.env.NODE_ENV === "production" || process.env.RD_SYNC_DEV_PREVIEW !== "enabled") {
     return null;
   }
   return firstValue(searchParams.previewRole) === "admin"

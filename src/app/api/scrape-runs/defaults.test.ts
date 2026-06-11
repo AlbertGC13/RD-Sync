@@ -48,6 +48,9 @@ describe("InMemoryScheduledIngestionQueue", () => {
       runId: "run-1",
       bankId: "popular",
       accountFingerprint: "popular-817985690",
+    }, {
+      jobId: "run-1",
+      attempts: 3,
     });
 
     expect(queue.jobs).toEqual([
@@ -57,6 +60,10 @@ describe("InMemoryScheduledIngestionQueue", () => {
           runId: "run-1",
           bankId: "popular",
           accountFingerprint: "popular-817985690",
+        },
+        options: {
+          jobId: "run-1",
+          attempts: 3,
         },
       },
     ]);

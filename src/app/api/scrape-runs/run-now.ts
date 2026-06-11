@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 import { assertCanAccessBankSession, type Principal } from "../../../modules/auth";
 import { popularScraperProfile } from "../../../modules/bank-adapters/popular";
 import type { CreateQueuedScrapeRunInput } from "../../../modules/scrape-runs";
@@ -25,6 +27,9 @@ export interface RunNowResult {
   status: "queued";
 }
 
+let lastRunIdTimestamp = "";
+let lastRunIdSequence = 0;
+
 export async function scheduleAdminIngestionRunNow(
   request: RunNowRequest,
   dependencies: RunNowDependencies,
@@ -43,7 +48,11 @@ export async function scheduleAdminIngestionRunNow(
   return { runId, bankId, accountFingerprint, status: run.status as "queued" };
 }
 
-function createRunId({ bankId, now }: { bankId: string; now: Date }): string {
-  const timestamp = now.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
-  return `${bankId}-${timestamp}`;
+export function createRunId({ bankId, now }: { bankId: string; now: Date }): string {
+  const timestamp = now.toISOString().replace(/\D/g, "").slice(0, 17);
+  lastRunIdSequence = timestamp === lastRunIdTimestamp ? (lastRunIdSequence + 1) % 36 : 0;
+  lastRunIdTimestamp = timestamp;
+
+  const suffix = `${randomBytes(2).toString("hex").slice(0, 3)}${lastRunIdSequence.toString(36)}`;
+  return `${bankId}-${timestamp}-${suffix}`;
 }

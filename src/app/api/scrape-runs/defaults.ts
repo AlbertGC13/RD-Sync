@@ -1,3 +1,5 @@
+import type { JobsOptions } from "bullmq";
+
 import {
   InMemoryScrapeRunRepository,
   toDashboardScrapeRun,
@@ -113,10 +115,10 @@ export async function listScrapeRunsForPage(
 }
 
 export class InMemoryScheduledIngestionQueue implements QueueLike {
-  readonly jobs: Array<{ name: string; data: IngestionJobData }> = [];
+  readonly jobs: Array<{ name: string; data: IngestionJobData; options: JobsOptions }> = [];
 
-  async add(name: string, data: IngestionJobData): Promise<void> {
-    this.jobs.push({ name, data });
+  async add(name: string, data: IngestionJobData, options: JobsOptions): Promise<void> {
+    this.jobs.push({ name, data, options });
   }
 }
 

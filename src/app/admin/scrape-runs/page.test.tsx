@@ -154,7 +154,11 @@ describe("AdminScrapeRunsDashboard", () => {
         role: "admin",
       });
       expect(resolvePreviewPrincipal({ previewRole: "viewer" })).toBeNull();
+
+      vi.stubEnv("NODE_ENV", "production");
+      expect(resolvePreviewPrincipal({ previewRole: "admin" })).toBeNull();
     } finally {
+      vi.unstubAllEnvs();
       if (previousValue === undefined) {
         delete process.env.RD_SYNC_DEV_PREVIEW;
       } else {
