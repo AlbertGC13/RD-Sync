@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 
 import { assertCanAccessBankSession, type Principal } from "../../../modules/auth";
 import { popularScraperProfile } from "../../../modules/bank-adapters/popular";
+import { createAuditEvent, type AuditSink } from "../../../modules/audit";
 import type { CreateQueuedScrapeRunInput } from "../../../modules/scrape-runs";
 import { scheduleIngestionJob, type QueueLike, type ScrapeRunStatus } from "../../../worker/queues";
 
@@ -16,6 +17,7 @@ export interface RunNowDependencies {
     createQueued(input: CreateQueuedScrapeRunInput): Promise<{ status: ScrapeRunStatus }>;
   };
   queue: QueueLike;
+  auditSink?: Pick<AuditSink, "record">;
   now?: () => Date;
   createRunId?: (input: { bankId: string; now: Date }) => string;
 }
@@ -34,7 +36,7 @@ export async function scheduleAdminIngestionRunNow(
   request: RunNowRequest,
   dependencies: RunNowDependencies,
 ): Promise<RunNowResult> {
-  assertCanAccessBankSession(request.principal);
+  const principal = assertCanAccessBankSession(request.principal);
 
   const now = dependencies.now?.() ?? new Date();
   const bankId = request.bankId ?? popularScraperProfile.bankId;
@@ -44,6 +46,23 @@ export async function scheduleAdminIngestionRunNow(
   const run = await dependencies.scrapeRuns.createQueued({ id: runId, bankId, createdAt: now });
 
   await scheduleIngestionJob(dependencies.queue, { runId, bankId, accountFingerprint });
+
+  if (dependencies.auditSink) {
+    try {
+      await dependencies.auditSink.record(
+        createAuditEvent({
+          actorId: principal.id,
+          actorRole: principal.role,
+          action: "scrape_run.scheduled",
+          target: "scrape_run",
+          targetId: runId,
+          metadata: { bankId, accountFingerprint },
+        }),
+      );
+    } catch {
+      // audit failure must not break the queued run
+    }
+  }
 
   return { runId, bankId, accountFingerprint, status: run.status as "queued" };
 }

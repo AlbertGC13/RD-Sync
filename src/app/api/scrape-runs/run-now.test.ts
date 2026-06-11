@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { InMemoryScrapeRunRepository } from "../../../modules/scrape-runs";
 import { createRunId, scheduleAdminIngestionRunNow } from "./run-now";
 import type { IngestionJobData, QueueLike } from "../../../worker/queues";
+import { InMemoryAuditSink } from "../../../modules/audit";
 
 describe("createRunId", () => {
   it("uses millisecond precision plus a suffix to avoid rapid-click collisions", () => {
@@ -95,6 +96,54 @@ describe("scheduleAdminIngestionRunNow", () => {
 
     expect(await scrapeRuns.list({})).toEqual([]);
     expect(queue.addCalls).toEqual([]);
+  });
+});
+
+describe("scheduleAdminIngestionRunNow — audit events", () => {
+  it("emits scrape_run.scheduled with the admin actor id and bankId metadata", async () => {
+    const auditSink = new InMemoryAuditSink();
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+
+    await scheduleAdminIngestionRunNow(
+      { principal: { id: "admin-1", role: "admin" } },
+      {
+        scrapeRuns,
+        queue,
+        now: () => new Date("2026-06-09T12:00:00.000Z"),
+        createRunId: () => "run-popular-audit",
+        auditSink,
+      },
+    );
+
+    const events = await auditSink.list();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      actorId: "admin-1",
+      actorRole: "admin",
+      action: "scrape_run.scheduled",
+      target: "scrape_run",
+      targetId: "run-popular-audit",
+      metadata: {
+        bankId: "popular",
+        accountFingerprint: "popular-817985690",
+      },
+    });
+  });
+
+  it("does not emit anything when the request is denied", async () => {
+    const auditSink = new InMemoryAuditSink();
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+
+    await expect(
+      scheduleAdminIngestionRunNow(
+        { principal: { id: "viewer-1", role: "viewer" } },
+        { scrapeRuns, queue, auditSink },
+      ),
+    ).rejects.toThrow("Admin role required");
+
+    expect(await auditSink.list()).toEqual([]);
   });
 });
 

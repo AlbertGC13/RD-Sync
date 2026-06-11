@@ -8,6 +8,7 @@ import {
   type ScrapeRunStatus,
 } from "./index";
 import type { BankMovement } from "../../modules/transactions";
+import { InMemoryAuditSink } from "../../modules/audit";
 
 const jobData: IngestionJobData = {
   runId: "run-1",
@@ -129,6 +130,198 @@ describe("ingestion processor", () => {
         safeErrorSummary: "selector missing [REDACTED] [REDACTED] account [REDACTED_ACCOUNT]",
       },
     ]);
+  });
+});
+
+describe("ingestion processor — audit events", () => {
+  it("emits scrape_run.started then scrape_run.succeeded with inserted and skipped counts", async () => {
+    const movements: BankMovement[] = [
+      {
+        bankId: "popular",
+        accountFingerprint: "acct-main",
+        postedAt: "2026-06-07T13:45:00.000Z",
+        amount: "1500.50",
+        currency: "DOP",
+        direction: "credit",
+        reference: "REF-A",
+      },
+    ];
+    const auditSink = new InMemoryAuditSink();
+    const processor = createIngestionProcessor({
+      scrapeRuns: new FakeScrapeRunRepository(),
+      transactions: new FakeTransactionRepository({ inserted: 1, skipped: 0 }),
+      scraper: { collect: async () => ({ status: "collected", movements }) },
+      auditSink,
+    });
+
+    await processor({ data: jobData });
+
+    const events = await auditSink.list();
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      actorId: "system:ingestion-worker",
+      action: "scrape_run.started",
+      target: "scrape_run",
+      targetId: "run-1",
+      metadata: { bankId: "popular" },
+    });
+    expect(events[1]).toMatchObject({
+      actorId: "system:ingestion-worker",
+      action: "scrape_run.succeeded",
+      target: "scrape_run",
+      targetId: "run-1",
+      metadata: { bankId: "popular", inserted: 1, skipped: 0 },
+    });
+  });
+
+  it("emits scrape_run.started then scrape_run.needs_admin_action with safe summary", async () => {
+    const auditSink = new InMemoryAuditSink();
+    const processor = createIngestionProcessor({
+      scrapeRuns: new FakeScrapeRunRepository(),
+      transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      scraper: {
+        collect: async () => ({
+          status: "needs_admin_action",
+          movements: [],
+          safeErrorSummary: "Bank session requires admin MFA action",
+        }),
+      },
+      auditSink,
+    });
+
+    await processor({ data: jobData });
+
+    const events = await auditSink.list();
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({ action: "scrape_run.started", targetId: "run-1" });
+    expect(events[1]).toMatchObject({
+      action: "scrape_run.needs_admin_action",
+      targetId: "run-1",
+      metadata: { bankId: "popular", safeErrorSummary: "Bank session requires admin MFA action" },
+    });
+  });
+
+  it("emits scrape_run.failed without raw secret text", async () => {
+    const auditSink = new InMemoryAuditSink();
+    const processor = createIngestionProcessor({
+      scrapeRuns: new FakeScrapeRunRepository(),
+      transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      scraper: {
+        collect: async () => {
+          throw new Error("selector missing token=secret password=abc account 0012345678901");
+        },
+      },
+      auditSink,
+    });
+
+    await processor({ data: jobData });
+
+    const events = await auditSink.list();
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({
+      action: "scrape_run.failed",
+      targetId: "run-1",
+      metadata: {
+        bankId: "popular",
+        safeErrorSummary: "selector missing [REDACTED] [REDACTED] account [REDACTED_ACCOUNT]",
+      },
+    });
+    const failedMetadata = events[1].metadata as Record<string, unknown>;
+    expect(JSON.stringify(failedMetadata)).not.toContain("secret");
+    expect(JSON.stringify(failedMetadata)).not.toContain("abc");
+  });
+
+  it("does not change the processor result when the audit sink throws", async () => {
+    const throwingSink = {
+      record: async () => {
+        throw new Error("sink unavailable");
+      },
+    };
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions: new FakeTransactionRepository({ inserted: 1, skipped: 0 }),
+      scraper: {
+        collect: async () => ({
+          status: "collected",
+          movements: [
+            {
+              bankId: "popular",
+              accountFingerprint: "acct-main",
+              postedAt: "2026-06-07T13:45:00.000Z",
+              amount: "100.00",
+              currency: "DOP",
+              direction: "credit",
+              reference: "REF-B",
+            },
+          ],
+        }),
+      },
+      auditSink: throwingSink,
+    });
+
+    const result = await processor({ data: jobData });
+
+    expect(result).toEqual({ status: "succeeded", inserted: 1, skipped: 0 });
+    // Run state must also be unaffected — no spurious markFailed transition.
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-1", status: "running" },
+      { runId: "run-1", status: "succeeded", insertedCount: 1, skippedCount: 0 },
+    ]);
+  });
+
+  it("does not propagate a sink throw from the scrape_run.started emission (outside try block)", async () => {
+    // emitAuditEvent for scrape_run.started sits OUTSIDE the processor's try/catch.
+    // Verify that emitAuditEvent's own internal guard covers this placement:
+    // the run must still reach 'succeeded' and markFailed must never be called.
+    const throwingSink = {
+      record: async () => {
+        throw new Error("sink unavailable on started");
+      },
+    };
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions: new FakeTransactionRepository({ inserted: 1, skipped: 1 }),
+      scraper: {
+        collect: async () => ({
+          status: "collected",
+          movements: [
+            {
+              bankId: "popular",
+              accountFingerprint: "acct-main",
+              postedAt: "2026-06-07T13:45:00.000Z",
+              amount: "100.00",
+              currency: "DOP",
+              direction: "credit",
+              reference: "REF-B",
+            },
+          ],
+        }),
+      },
+      auditSink: throwingSink,
+    });
+
+    const result = await processor({ data: jobData });
+
+    expect(result).toEqual({ status: "succeeded", inserted: 1, skipped: 1 });
+    // Only running → succeeded; markFailed must never have been called.
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-1", status: "running" },
+      { runId: "run-1", status: "succeeded", insertedCount: 1, skippedCount: 1 },
+    ]);
+  });
+
+  it("works normally when no audit sink is provided", async () => {
+    const processor = createIngestionProcessor({
+      scrapeRuns: new FakeScrapeRunRepository(),
+      transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      scraper: { collect: async () => ({ status: "collected", movements: [] }) },
+    });
+
+    const result = await processor({ data: jobData });
+
+    expect(result).toEqual({ status: "succeeded", inserted: 0, skipped: 0 });
   });
 });
 

@@ -1,4 +1,5 @@
 import { resolvePrincipalFromTrustedHeaders } from "../../../../modules/auth";
+import { defaultAuditSink } from "../../audit/defaults";
 import { defaultIngestionQueue, defaultScrapeRunRepository } from "../defaults";
 import {
   scheduleAdminIngestionRunNow,
@@ -9,6 +10,7 @@ import {
 const defaultDependencies: RunNowDependencies = {
   scrapeRuns: defaultScrapeRunRepository,
   queue: defaultIngestionQueue,
+  auditSink: defaultAuditSink,
 };
 
 export function createPostScrapeRunNowHandler(dependencies: RunNowDependencies) {

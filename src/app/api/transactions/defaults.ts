@@ -1,4 +1,3 @@
-import { InMemoryAuditSink } from "../../../modules/audit";
 import {
   InMemoryTransactionRepository,
   normalizeBankMovement,
@@ -6,9 +5,11 @@ import {
   type DashboardTransaction,
   type TransactionFilters,
 } from "../../../modules/transactions";
+import { defaultAuditSink } from "../audit/defaults";
+
+export { defaultAuditSink };
 
 export const defaultTransactionRepository = new InMemoryTransactionRepository();
-export const defaultAuditSink = new InMemoryAuditSink();
 
 let e2eFixturesSeeded = false;
 

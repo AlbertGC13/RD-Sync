@@ -44,7 +44,11 @@ export function redactAuditMetadata(metadata: Record<string, unknown>): Record<s
   );
 }
 
-export class InMemoryAuditSink {
+export interface AuditSink {
+  record(event: AuditEvent): Promise<void>;
+}
+
+export class InMemoryAuditSink implements AuditSink {
   private readonly events: AuditEvent[] = [];
 
   async record(event: AuditEvent): Promise<void> {

@@ -1,4 +1,4 @@
-import { createAuditEvent, type InMemoryAuditSink } from "../../../../../modules/audit";
+import { createAuditEvent, type AuditSink } from "../../../../../modules/audit";
 import { requireRole, resolvePrincipalFromTrustedHeaders } from "../../../../../modules/auth";
 import {
   type InMemoryTransactionRepository,
@@ -9,7 +9,7 @@ import { defaultAuditSink, defaultTransactionRepository, seedE2ETransactionFixtu
 
 interface ReviewRouteDependencies {
   repository: Pick<InMemoryTransactionRepository, "updateReviewState">;
-  auditSink: Pick<InMemoryAuditSink, "record">;
+  auditSink: Pick<AuditSink, "record">;
   beforeWrite?: () => Promise<void>;
 }
 

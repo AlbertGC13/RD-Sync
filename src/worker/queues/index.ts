@@ -1,5 +1,6 @@
 import type { JobsOptions } from "bullmq";
 
+import { createAuditEvent, type AuditSink } from "../../modules/audit";
 import { type BankMovement, type TransactionRecord, normalizeBankMovement } from "../../modules/transactions";
 import { redactDiagnosticText, type ScrapeCollectionResult } from "../scraper";
 
@@ -50,6 +51,7 @@ export interface IngestionProcessorDependencies {
   transactions: TransactionUpsertRepository;
   scraper: IngestionScraper;
   adminAlerts?: AdminAlertSink;
+  auditSink?: Pick<AuditSink, "record">;
   now?: () => Date;
 }
 
@@ -58,12 +60,18 @@ export interface QueueLike {
 }
 
 const ingestionJobName = "bank-transaction-ingestion";
+const SYSTEM_INGESTION_ACTOR = "system:ingestion-worker";
 
 export function createIngestionProcessor(dependencies: IngestionProcessorDependencies) {
   const now = dependencies.now ?? (() => new Date());
 
   return async function processIngestionJob(job: IngestionJob): Promise<IngestionResult> {
     await dependencies.scrapeRuns.markRunning(job.data.runId, now());
+    await emitAuditEvent(dependencies.auditSink, {
+      action: "scrape_run.started",
+      runId: job.data.runId,
+      bankId: job.data.bankId,
+    });
 
     try {
       const scrapeResult = await dependencies.scraper.collect();
@@ -76,6 +84,12 @@ export function createIngestionProcessor(dependencies: IngestionProcessorDepende
           now(),
         );
         await notifyAdminAttention(dependencies.adminAlerts, job.data, "needs_admin_action", safeErrorSummary);
+        await emitAuditEvent(dependencies.auditSink, {
+          action: "scrape_run.needs_admin_action",
+          runId: job.data.runId,
+          bankId: job.data.bankId,
+          metadata: { safeErrorSummary },
+        });
 
         return { status: "needs_admin_action", inserted: 0, skipped: 0 };
       }
@@ -88,12 +102,24 @@ export function createIngestionProcessor(dependencies: IngestionProcessorDepende
         { insertedCount: counts.inserted, skippedCount: counts.skipped },
         now(),
       );
+      await emitAuditEvent(dependencies.auditSink, {
+        action: "scrape_run.succeeded",
+        runId: job.data.runId,
+        bankId: job.data.bankId,
+        metadata: { inserted: counts.inserted, skipped: counts.skipped },
+      });
 
       return { status: "succeeded", inserted: counts.inserted, skipped: counts.skipped };
     } catch (error) {
       const safeErrorSummary = redactDiagnosticText(error instanceof Error ? error.message : "Ingestion failed");
       await dependencies.scrapeRuns.markFailed(job.data.runId, safeErrorSummary, now());
       await notifyAdminAttention(dependencies.adminAlerts, job.data, "failed", safeErrorSummary);
+      await emitAuditEvent(dependencies.auditSink, {
+        action: "scrape_run.failed",
+        runId: job.data.runId,
+        bankId: job.data.bankId,
+        metadata: { safeErrorSummary },
+      });
       return { status: "failed", inserted: 0, skipped: 0 };
     }
   };
@@ -129,4 +155,25 @@ async function notifyAdminAttention(
     status,
     safeErrorSummary,
   });
+}
+
+async function emitAuditEvent(
+  auditSink: Pick<AuditSink, "record"> | undefined,
+  input: { action: string; runId: string; bankId: string; metadata?: Record<string, unknown> },
+): Promise<void> {
+  if (!auditSink) return;
+  try {
+    await auditSink.record(
+      createAuditEvent({
+        actorId: SYSTEM_INGESTION_ACTOR,
+        actorRole: null,
+        action: input.action,
+        target: "scrape_run",
+        targetId: input.runId,
+        metadata: { bankId: input.bankId, ...input.metadata },
+      }),
+    );
+  } catch {
+    // Audit failures must never disrupt ingestion
+  }
 }
