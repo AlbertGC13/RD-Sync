@@ -8,5 +8,6 @@ test-results/
 .env*.local
 *.tsbuildinfo
 .atl/
+.engram/
 /src/generated/prisma/
 
