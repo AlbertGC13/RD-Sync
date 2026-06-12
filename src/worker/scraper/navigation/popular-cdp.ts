@@ -22,6 +22,7 @@ export interface CdpPageLike {
   url(): string;
   goto(url: string, options?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
   waitForSelector(selector: string, options?: { timeout?: number; state?: string }): Promise<unknown>;
+  waitForTimeout(ms: number): Promise<void>;
   evaluate<T>(fn: (arg?: unknown) => T, arg?: unknown): Promise<T>;
   close(): Promise<void>;
 }
@@ -141,6 +142,35 @@ class CdpPopularPortalPage implements PopularPortalPage {
       },
     ) as Promise<PortalTableSnapshot | null>;
   }
+
+  async openDashboardAccount(productText: string, currencyText: string): Promise<boolean> {
+    // Uses page.evaluate with explicit args so the function source never has
+    // interpolated strings — the portal values are passed as serialized args.
+    return this.page.evaluate(
+      (args) => {
+        const { product, currency } = args as { product: string; currency: string };
+        // Scoped to table.w-full — the dashboard accounts table carries this class
+        // (verified live); an unscoped scan could hit an unrelated table whose
+        // columns [2]/[3] do not mean Producto/Moneda.
+        const rows = document.querySelectorAll("table.w-full tbody tr");
+        for (const tr of Array.from(rows)) {
+          const cells = tr.querySelectorAll("td");
+          const productCell = cells[2]?.textContent?.trim() ?? "";
+          const currencyCell = cells[3]?.textContent?.trim() ?? "";
+          if (productCell === product && currencyCell === currency) {
+            (tr as HTMLElement).click();
+            return true;
+          }
+        }
+        return false;
+      },
+      { product: productText, currency: currencyText },
+    ) as Promise<boolean>;
+  }
+
+  async pause(ms: number): Promise<void> {
+    await this.page.waitForTimeout(ms);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +182,10 @@ export interface PopularCdpScraperOptions {
   baseUrl?: string;
   itemsPerPage?: number;
   maxPages?: number;
+  warmupPauseMs?: number;
+  settleIntervalMs?: number;
+  settleFloorMs?: number;
+  settleMaxMs?: number;
   /**
    * Provides the current date (used for sDate/eDate).
    * Defaults to () => new Date().
@@ -170,7 +204,17 @@ export interface PopularCdpScraperOptions {
    */
   collectRows?: (
     page: PopularPortalPage,
-    options: { baseUrl: string; sDate: Date; eDate: Date; itemsPerPage?: number; maxPages?: number },
+    options: {
+      baseUrl: string;
+      sDate: Date;
+      eDate: Date;
+      itemsPerPage?: number;
+      maxPages?: number;
+      warmupPauseMs?: number;
+      settleIntervalMs?: number;
+      settleFloorMs?: number;
+      settleMaxMs?: number;
+    },
   ) => Promise<CollectPopularPortalRowsResult>;
 }
 
@@ -195,6 +239,10 @@ export function createPopularCdpScraper(options: PopularCdpScraperOptions = {}):
     baseUrl = DEFAULT_BASE_URL,
     itemsPerPage,
     maxPages,
+    warmupPauseMs,
+    settleIntervalMs,
+    settleFloorMs,
+    settleMaxMs,
     clock = () => new Date(),
     connect = lazyPlaywrightConnect,
     collectRows = collectPopularPortalRows,
@@ -233,6 +281,10 @@ export function createPopularCdpScraper(options: PopularCdpScraperOptions = {}):
           eDate: today,
           itemsPerPage,
           maxPages,
+          warmupPauseMs,
+          settleIntervalMs,
+          settleFloorMs,
+          settleMaxMs,
         });
 
         if (collectResult.kind === "needs_admin_action") {
@@ -284,4 +336,3 @@ async function lazyPlaywrightConnect(cdpUrl: string): Promise<CdpBrowserLike> {
   // connectOverCDP returns a Browser — it is structurally compatible with CdpBrowserLike.
   return chromium.connectOverCDP(cdpUrl) as Promise<CdpBrowserLike>;
 }
-

@@ -57,6 +57,8 @@ interface FakeCdpPageState {
 
 class FakeCdpPage implements CdpPageLike {
   readonly gotoUrls: string[] = [];
+  readonly waitForTimeoutCalls: number[] = [];
+  readonly evaluateCalls: Array<{ fn: (arg?: unknown) => unknown; arg: unknown }> = [];
   closed = false;
 
   constructor(private readonly state: FakeCdpPageState) {}
@@ -78,9 +80,12 @@ class FakeCdpPage implements CdpPageLike {
     return {};
   }
 
+  async waitForTimeout(ms: number): Promise<void> {
+    this.waitForTimeoutCalls.push(ms);
+  }
+
   async evaluate<T>(fn: (arg?: unknown) => T, arg?: unknown): Promise<T> {
-    void fn;
-    void arg;
+    this.evaluateCalls.push({ fn: fn as (arg?: unknown) => unknown, arg });
     return (this.state.evaluateResult ?? null) as T;
   }
 
@@ -334,6 +339,102 @@ describe("createPopularCdpScraper — lazy connect", () => {
       collectRows: async () => ({ kind: "rows" as const, rows: [] }),
     });
     expect(connectCalled).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CDP adapter — openDashboardAccount and pause
+// ---------------------------------------------------------------------------
+
+describe("CdpPopularPortalPage — openDashboardAccount", () => {
+  it("calls page.evaluate with the exact product/currency args and returns the boolean result", async () => {
+    // The evaluate stub returns true (row found) when called
+    const page = makeFakeCdpPage({ evaluateResult: true });
+    const scraper = createPopularCdpScraper({
+      cdpUrl: "http://localhost:9222",
+      clock: () => new Date("2025-01-01T04:00:00Z"),
+      connect: async () => new FakeCdpBrowser(() => page),
+      // Use the real collectRows flow so openDashboardAccount IS called
+      // (inject a collectRows stub that calls the real page methods we care about)
+      collectRows: async (portalPage) => {
+        // Directly call openDashboardAccount to verify the CDP adapter plumbs it correctly
+        const found = await portalPage.openDashboardAccount("Corriente", "RD$");
+        // The page.evaluate stub returns true
+        return found
+          ? { kind: "rows" as const, rows: FIXTURE_ROWS }
+          : { kind: "needs_admin_action" as const, safeErrorSummary: "Bank account row not found on dashboard" };
+      },
+    });
+
+    const result = await scraper.collect();
+
+    expect(result.status).toBe("collected");
+    // Verify evaluate was called with the args
+    expect(page.evaluateCalls).toHaveLength(1);
+    const call = page.evaluateCalls[0];
+    expect(call.arg).toEqual({ product: "Corriente", currency: "RD$" });
+  });
+
+  it("returns false when evaluate returns false (row not found)", async () => {
+    const page = makeFakeCdpPage({ evaluateResult: false });
+    const scraper = createPopularCdpScraper({
+      cdpUrl: "http://localhost:9222",
+      clock: () => new Date("2025-01-01T04:00:00Z"),
+      connect: async () => new FakeCdpBrowser(() => page),
+      collectRows: async (portalPage) => {
+        const found = await portalPage.openDashboardAccount("Corriente", "RD$");
+        return found
+          ? { kind: "rows" as const, rows: [] }
+          : { kind: "needs_admin_action" as const, safeErrorSummary: "Bank account row not found on dashboard" };
+      },
+    });
+
+    const result = await scraper.collect();
+
+    expect(result.status).toBe("needs_admin_action");
+    expect(result.safeErrorSummary).toBe("Bank account row not found on dashboard");
+  });
+
+  it("passes productText and currencyText as args to evaluate (not interpolated into function source)", async () => {
+    // Verify the args object is passed correctly and the evaluate fn receives it.
+    // This guards against string interpolation into the evaluate source (which
+    // would break for inputs containing special characters and prevent sandboxing).
+    const page = makeFakeCdpPage({ evaluateResult: true });
+    const scraper = createPopularCdpScraper({
+      cdpUrl: "http://localhost:9222",
+      clock: () => new Date("2025-01-01T04:00:00Z"),
+      connect: async () => new FakeCdpBrowser(() => page),
+      collectRows: async (portalPage) => {
+        await portalPage.openDashboardAccount("Corriente", "RD$");
+        return { kind: "rows" as const, rows: [] };
+      },
+    });
+
+    await scraper.collect();
+
+    // The arg must be a plain object with product/currency (not undefined/null)
+    expect(page.evaluateCalls).toHaveLength(1);
+    const arg = page.evaluateCalls[0].arg as { product: string; currency: string };
+    expect(arg).toMatchObject({ product: "Corriente", currency: "RD$" });
+  });
+});
+
+describe("CdpPopularPortalPage — pause", () => {
+  it("delegates pause(ms) to page.waitForTimeout(ms)", async () => {
+    const page = makeFakeCdpPage();
+    const scraper = createPopularCdpScraper({
+      cdpUrl: "http://localhost:9222",
+      clock: () => new Date("2025-01-01T04:00:00Z"),
+      connect: async () => new FakeCdpBrowser(() => page),
+      collectRows: async (portalPage) => {
+        await portalPage.pause(1234);
+        return { kind: "rows" as const, rows: [] };
+      },
+    });
+
+    await scraper.collect();
+
+    expect(page.waitForTimeoutCalls).toContain(1234);
   });
 });
 

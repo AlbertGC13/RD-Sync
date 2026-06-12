@@ -9,6 +9,11 @@ import {
 } from "./popular";
 
 // ---------------------------------------------------------------------------
+// Re-export for type checking: ensure openDashboardAccount and pause exist
+// ---------------------------------------------------------------------------
+// (checked structurally via FakePopularPortalPage below)
+
+// ---------------------------------------------------------------------------
 // formatPopularPortalDate
 // ---------------------------------------------------------------------------
 
@@ -60,11 +65,11 @@ describe("buildPopularTransactionsUrl", () => {
     expect(url).toContain("filter=false");
   });
 
-  it("defaults to pageNumber=1 and itemsPerPage=20", () => {
+  it("defaults to pageNumber=1 and itemsPerPage=100", () => {
     const date = new Date("2026-06-12T04:00:00Z");
     const url = buildPopularTransactionsUrl({ baseUrl, sDate: date, eDate: date });
     expect(url).toContain("pageNumber=1");
-    expect(url).toContain("itemsPerPage=20");
+    expect(url).toContain("itemsPerPage=100");
   });
 
   it("accepts custom pageNumber and itemsPerPage", () => {
@@ -92,18 +97,39 @@ describe("buildPopularTransactionsUrl", () => {
 // ---------------------------------------------------------------------------
 
 describe("collectPopularPortalRows — pagination URL construction", () => {
-  it("navigates to page 1 on the first call using the correct date params", async () => {
+  it("navigates to dashboard first, then to page 1 on the transactions URL", async () => {
     const date = new Date("2026-06-12T04:00:00Z");
     const baseUrl = "https://ib.bpd.com.do";
     const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
       currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
+      waitForVisibleTextResults: { Produto: true, "Fecha posteo": true },
+      openDashboardAccountResult: true,
       pageSnapshots: [makeSinglePageSnapshot([SYNTHETIC_ROW_1])],
     });
 
-    await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date });
+    await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
 
-    expect(page.operations[0]).toMatch(/goto:.*pageNumber=1/);
+    // First goto must be the dashboard
+    expect(page.operations[0]).toMatch(/goto:.*\/dashboard/);
+    // Later there must be a goto to the transactions URL with pageNumber=1
+    expect(page.operations.find((op) => /goto:.*pageNumber=1/.test(op))).toBeTruthy();
+  });
+
+  it("uses itemsPerPage=100 by default in the transactions URL", async () => {
+    const date = new Date("2026-06-12T04:00:00Z");
+    const baseUrl = "https://ib.bpd.com.do";
+    const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
+      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
+      waitForVisibleTextResults: { Produto: true, "Fecha posteo": true },
+      openDashboardAccountResult: true,
+      pageSnapshots: [makeSinglePageSnapshot([SYNTHETIC_ROW_1])],
+    });
+
+    await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
+
+    expect(page.operations.find((op) => op.includes("itemsPerPage=100"))).toBeTruthy();
   });
 
   it("paginates to page 2 when page 1 is full (itemsPerPage rows returned)", async () => {
@@ -114,21 +140,23 @@ describe("collectPopularPortalRows — pagination URL construction", () => {
     const page2Rows = [SYNTHETIC_ROW_3];
 
     const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
       currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
+      waitForVisibleTextResults: { Produto: true, "Fecha posteo": true },
+      openDashboardAccountResult: true,
       pageSnapshots: [
         makeSinglePageSnapshot(page1Rows),
         makeSinglePageSnapshot(page2Rows),
       ],
     });
 
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, itemsPerPage });
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, itemsPerPage, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
 
     expect(result.kind).toBe("rows");
     if (result.kind !== "rows") throw new Error("unreachable");
     expect(result.rows).toHaveLength(3);
-    // First goto was page 1, second was page 2
-    expect(page.operations[0]).toMatch(/goto:.*pageNumber=1/);
+    // First goto was dashboard, then page 1, then page 2
+    expect(page.operations[0]).toMatch(/goto:.*\/dashboard/);
     expect(page.operations.find((op) => op.includes("pageNumber=2"))).toBeTruthy();
   });
 
@@ -138,12 +166,14 @@ describe("collectPopularPortalRows — pagination URL construction", () => {
     const itemsPerPage = 3;
     // Only 2 rows on first page → stop
     const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
       currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
+      waitForVisibleTextResults: { Produto: true, "Fecha posteo": true },
+      openDashboardAccountResult: true,
       pageSnapshots: [makeSinglePageSnapshot([SYNTHETIC_ROW_1, SYNTHETIC_ROW_2])],
     });
 
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, itemsPerPage });
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, itemsPerPage, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
 
     expect(result.kind).toBe("rows");
     if (result.kind !== "rows") throw new Error("unreachable");
@@ -159,8 +189,10 @@ describe("collectPopularPortalRows — pagination URL construction", () => {
     const maxPages = 2;
     // Every page is full (1 row = itemsPerPage)
     const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
       currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
+      waitForVisibleTextResults: { Produto: true, "Fecha posteo": true },
+      openDashboardAccountResult: true,
       pageSnapshots: [
         makeSinglePageSnapshot([SYNTHETIC_ROW_1]),
         makeSinglePageSnapshot([SYNTHETIC_ROW_2]),
@@ -168,7 +200,7 @@ describe("collectPopularPortalRows — pagination URL construction", () => {
       ],
     });
 
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, itemsPerPage, maxPages });
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, itemsPerPage, maxPages, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
 
     expect(result.kind).toBe("rows");
     if (result.kind !== "rows") throw new Error("unreachable");
@@ -183,33 +215,73 @@ describe("collectPopularPortalRows — pagination URL construction", () => {
 // ---------------------------------------------------------------------------
 
 describe("collectPopularPortalRows — state detection", () => {
-  it("returns needs_admin_action when redirected away from transactions path (login redirect)", async () => {
+  it("returns needs_admin_action when dashboard redirects away (login redirect during warm-up)", async () => {
     const date = new Date("2026-06-12T04:00:00Z");
     const baseUrl = "https://ib.bpd.com.do";
-    // After goto, current URL is the login page
+    // currentUrl returns the login page (not /dashboard), triggering redirect detection
     const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/login`,
       currentUrl: "https://ib.bpd.com.do/login",
-      waitForVisibleTextResult: false,
+      waitForVisibleTextResults: {},
+      openDashboardAccountResult: false,
       pageSnapshots: [],
     });
 
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date });
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
 
     expect(result.kind).toBe("needs_admin_action");
     if (result.kind !== "needs_admin_action") throw new Error("unreachable");
     expect(result.safeErrorSummary).toBe("Bank session expired or requires verification");
   });
 
-  it("returns needs_admin_action when waitForVisibleText times out and no table is present", async () => {
+  it("returns needs_admin_action when dashboard never renders (Producto wait times out)", async () => {
     const date = new Date("2026-06-12T04:00:00Z");
     const baseUrl = "https://ib.bpd.com.do";
     const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
       currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: false, // timeout
+      waitForVisibleTextResults: { Produto: false }, // "Producto" times out
+      openDashboardAccountResult: false,
+      pageSnapshots: [],
+    });
+
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
+
+    expect(result.kind).toBe("needs_admin_action");
+    if (result.kind !== "needs_admin_action") throw new Error("unreachable");
+    expect(result.safeErrorSummary).toBe("Bank dashboard did not render");
+  });
+
+  it("returns needs_admin_action when openDashboardAccount returns false (row not found)", async () => {
+    const date = new Date("2026-06-12T04:00:00Z");
+    const baseUrl = "https://ib.bpd.com.do";
+    const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
+      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
+      waitForVisibleTextResults: { Produto: true, "Fecha posteo": true },
+      openDashboardAccountResult: false, // no matching row
+      pageSnapshots: [],
+    });
+
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
+
+    expect(result.kind).toBe("needs_admin_action");
+    if (result.kind !== "needs_admin_action") throw new Error("unreachable");
+    expect(result.safeErrorSummary).toBe("Bank account row not found on dashboard");
+  });
+
+  it("returns needs_admin_action when waitForVisibleText('Fecha posteo') times out and no table is present", async () => {
+    const date = new Date("2026-06-12T04:00:00Z");
+    const baseUrl = "https://ib.bpd.com.do";
+    const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
+      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
+      waitForVisibleTextResults: { Produto: true, "Fecha posteo": false }, // transactions page times out
+      openDashboardAccountResult: true,
       pageSnapshots: [], // no table
     });
 
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date });
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
 
     expect(result.kind).toBe("needs_admin_action");
     if (result.kind !== "needs_admin_action") throw new Error("unreachable");
@@ -220,12 +292,14 @@ describe("collectPopularPortalRows — state detection", () => {
     const date = new Date("2026-06-12T04:00:00Z");
     const baseUrl = "https://ib.bpd.com.do";
     const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
       currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
-      pageSnapshots: [makeSinglePageSnapshot([])], // zero rows
+      waitForVisibleTextResults: { Produto: true, "Fecha posteo": true },
+      openDashboardAccountResult: true,
+      pageSnapshots: [makeSinglePageSnapshot([])], // zero rows — settle floor protects from false empty
     });
 
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date });
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
 
     expect(result.kind).toBe("rows");
     if (result.kind !== "rows") throw new Error("unreachable");
@@ -238,6 +312,19 @@ describe("collectPopularPortalRows — state detection", () => {
 // ---------------------------------------------------------------------------
 
 describe("collectPopularPortalRows — header mapping and data extraction", () => {
+  /** Helper: make a page in the happy-path warm-up state with the given snapshot(s). */
+  function makeHappyPage(baseUrl: string, snapshots: PortalTableSnapshot[]): FakePopularPortalPage {
+    return new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
+      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
+      waitForVisibleTextResults: { Produto: true, "Fecha posteo": true },
+      openDashboardAccountResult: true,
+      pageSnapshots: snapshots,
+    });
+  }
+
+  const FAST_OPTS = { warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 };
+
   it("maps columns by header text, not by index position", async () => {
     const date = new Date("2026-06-12T04:00:00Z");
     const baseUrl = "https://ib.bpd.com.do";
@@ -259,13 +346,8 @@ describe("collectPopularPortalRows — header mapping and data extraction", () =
       ],
     );
 
-    const page = new FakePopularPortalPage({
-      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
-      pageSnapshots: [shuffledSnapshot],
-    });
-
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date });
+    const page = makeHappyPage(baseUrl, [shuffledSnapshot]);
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, ...FAST_OPTS });
 
     expect(result.kind).toBe("rows");
     if (result.kind !== "rows") throw new Error("unreachable");
@@ -286,13 +368,8 @@ describe("collectPopularPortalRows — header mapping and data extraction", () =
     expect(snapshot.headers).toContain("Ver imagen");
     expect(snapshot.headers).toContain("Detalle");
 
-    const page = new FakePopularPortalPage({
-      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
-      pageSnapshots: [snapshot],
-    });
-
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date });
+    const page = makeHappyPage(baseUrl, [snapshot]);
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, ...FAST_OPTS });
     expect(result.kind).toBe("rows");
   });
 
@@ -323,13 +400,8 @@ describe("collectPopularPortalRows — header mapping and data extraction", () =
       ],
     };
 
-    const page = new FakePopularPortalPage({
-      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
-      pageSnapshots: [thOnlySnapshot],
-    });
-
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date });
+    const page = makeHappyPage(baseUrl, [thOnlySnapshot]);
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, ...FAST_OPTS });
 
     expect(result.kind).toBe("rows");
     if (result.kind !== "rows") throw new Error("unreachable");
@@ -346,13 +418,8 @@ describe("collectPopularPortalRows — header mapping and data extraction", () =
       { ...SYNTHETIC_ROW_1, checkNumber: "0001000000001 " }, // trailing space
     ]);
 
-    const page = new FakePopularPortalPage({
-      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
-      pageSnapshots: [snapshot],
-    });
-
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date });
+    const page = makeHappyPage(baseUrl, [snapshot]);
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, ...FAST_OPTS });
     expect(result.kind).toBe("rows");
     if (result.kind !== "rows") throw new Error("unreachable");
     expect(result.rows[0].checkNumber).toBe("0001000000001");
@@ -365,13 +432,8 @@ describe("collectPopularPortalRows — header mapping and data extraction", () =
       { ...SYNTHETIC_ROW_1, checkNumber: "0001000000001" },
     ]);
 
-    const page = new FakePopularPortalPage({
-      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
-      pageSnapshots: [snapshot],
-    });
-
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date });
+    const page = makeHappyPage(baseUrl, [snapshot]);
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, ...FAST_OPTS });
     expect(result.kind).toBe("rows");
     if (result.kind !== "rows") throw new Error("unreachable");
     expect(result.rows[0].checkNumber).toBe("0001000000001");
@@ -382,13 +444,8 @@ describe("collectPopularPortalRows — header mapping and data extraction", () =
     const baseUrl = "https://ib.bpd.com.do";
     const snapshot = makeStandardSnapshot([SYNTHETIC_ROW_1]);
 
-    const page = new FakePopularPortalPage({
-      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
-      pageSnapshots: [snapshot],
-    });
-
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date });
+    const page = makeHappyPage(baseUrl, [snapshot]);
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, ...FAST_OPTS });
     expect(result.kind).toBe("rows");
     if (result.kind !== "rows") throw new Error("unreachable");
     const row = result.rows[0];
@@ -407,13 +464,8 @@ describe("collectPopularPortalRows — header mapping and data extraction", () =
       { ...SYNTHETIC_ROW_1, imageAvailable: true, detailAvailable: false },
     ]);
 
-    const page = new FakePopularPortalPage({
-      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
-      pageSnapshots: [snapshot],
-    });
-
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date });
+    const page = makeHappyPage(baseUrl, [snapshot]);
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, ...FAST_OPTS });
     expect(result.kind).toBe("rows");
     if (result.kind !== "rows") throw new Error("unreachable");
     expect(result.rows[0].imageAvailable).toBe(true);
@@ -427,13 +479,8 @@ describe("collectPopularPortalRows — header mapping and data extraction", () =
       { ...SYNTHETIC_ROW_1, imageAvailable: false, detailAvailable: true },
     ]);
 
-    const page = new FakePopularPortalPage({
-      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
-      pageSnapshots: [snapshot],
-    });
-
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date });
+    const page = makeHappyPage(baseUrl, [snapshot]);
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, ...FAST_OPTS });
     expect(result.kind).toBe("rows");
     if (result.kind !== "rows") throw new Error("unreachable");
     expect(result.rows[0].detailAvailable).toBe(true);
@@ -447,17 +494,125 @@ describe("collectPopularPortalRows — header mapping and data extraction", () =
       { ...SYNTHETIC_ROW_1, referenceNumber: "" },
     ]);
 
-    const page = new FakePopularPortalPage({
-      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
-      waitForVisibleTextResult: true,
-      pageSnapshots: [snapshot],
-    });
-
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date });
+    const page = makeHappyPage(baseUrl, [snapshot]);
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, ...FAST_OPTS });
     expect(result.kind).toBe("rows");
     if (result.kind !== "rows") throw new Error("unreachable");
     // The scraper returns the raw text value; parsePopularTransactionRows handles null conversion
     expect(result.rows[0].referenceNumber).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collectPopularPortalRows — warm-up operation order
+// ---------------------------------------------------------------------------
+
+describe("collectPopularPortalRows — warm-up operation order", () => {
+  it("executes: goto(dashboard) → waitForVisibleText('Producto') → openDashboardAccount → pause → goto(transactions)", async () => {
+    const date = new Date("2026-06-12T04:00:00Z");
+    const baseUrl = "https://ib.bpd.com.do";
+    const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
+      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
+      waitForVisibleTextResults: { Produto: true, "Fecha posteo": true },
+      openDashboardAccountResult: true,
+      pageSnapshots: [makeSinglePageSnapshot([SYNTHETIC_ROW_1])],
+    });
+
+    await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, warmupPauseMs: 42, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 100 });
+
+    // Operation 0 must be goto dashboard
+    expect(page.operations[0]).toMatch(/goto:.*\/dashboard/);
+    // currentUrl is called after dashboard goto
+    const currentUrlIdx = page.operations.findIndex((op) => op === "currentUrl");
+    expect(currentUrlIdx).toBeGreaterThan(0);
+    // waitForVisibleText("Producto") happens before openDashboardAccount
+    const waitProductoIdx = page.operations.findIndex((op) => op.includes("waitForVisibleText:Producto"));
+    const openAccountIdx = page.operations.findIndex((op) => op === "openDashboardAccount:Corriente:RD$");
+    expect(waitProductoIdx).toBeGreaterThan(0);
+    expect(openAccountIdx).toBeGreaterThan(waitProductoIdx);
+    // pause(42) happens after openDashboardAccount
+    const pauseIdx = page.operations.findIndex((op) => op === "pause:42");
+    expect(pauseIdx).toBeGreaterThan(openAccountIdx);
+    // transactions goto happens after the warmup
+    const transactionsGotoIdx = page.operations.findIndex((op) => /goto:.*pageNumber=1/.test(op));
+    expect(transactionsGotoIdx).toBeGreaterThan(pauseIdx);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collectPopularPortalRows — settle loop
+// ---------------------------------------------------------------------------
+
+describe("collectPopularPortalRows — settle loop", () => {
+  it("settle: sequence [0, 0, 4, 4] → accepts 4 rows (no false empty)", async () => {
+    const date = new Date("2026-06-12T04:00:00Z");
+    const baseUrl = "https://ib.bpd.com.do";
+    // The fake returns different snapshots per readResultsTable call.
+    // The loop advances past [0,0] because the next snapshot in sequence returns
+    // 4 rows — the floor is not the mechanism here. To test the floor actually
+    // blocking an all-zero sequence, see the separate "settle zero floor" test.
+    const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
+      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
+      waitForVisibleTextResults: { Produto: true, "Fecha posteo": true },
+      openDashboardAccountResult: true,
+      pageSnapshots: [
+        makeSinglePageSnapshot([]),           // poll 1: 0 rows
+        makeSinglePageSnapshot([]),           // poll 2: 0 rows
+        makeSinglePageSnapshot([SYNTHETIC_ROW_1, SYNTHETIC_ROW_2, SYNTHETIC_ROW_3, SYNTHETIC_ROW_1]), // poll 3: 4 rows
+        makeSinglePageSnapshot([SYNTHETIC_ROW_1, SYNTHETIC_ROW_2, SYNTHETIC_ROW_3, SYNTHETIC_ROW_1]), // poll 4: 4 rows (stable)
+        // Extra snapshots (last one is repeated by the fake when exhausted)
+        makeSinglePageSnapshot([SYNTHETIC_ROW_1, SYNTHETIC_ROW_2, SYNTHETIC_ROW_3, SYNTHETIC_ROW_1]),
+      ],
+    });
+
+    const result = await collectPopularPortalRows(page, {
+      baseUrl, sDate: date, eDate: date,
+      itemsPerPage: 100,
+      warmupPauseMs: 0,
+      settleIntervalMs: 0,
+      settleFloorMs: 50,   // irrelevant for this case; non-zero stable row count is accepted immediately
+      settleMaxMs: 10000,
+    });
+
+    expect(result.kind).toBe("rows");
+    if (result.kind !== "rows") throw new Error("unreachable");
+    expect(result.rows).toHaveLength(4);
+  });
+
+  it("settle zero floor: if all reads return 0 rows, accepts empty only after floor elapsed", async () => {
+    const date = new Date("2026-06-12T04:00:00Z");
+    const baseUrl = "https://ib.bpd.com.do";
+    // Unlimited snapshots of 0 rows
+    const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
+      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
+      waitForVisibleTextResults: { Produto: true, "Fecha posteo": true },
+      openDashboardAccountResult: true,
+      pageSnapshots: Array.from({ length: 10 }, () => makeSinglePageSnapshot([])),
+    });
+
+    const result = await collectPopularPortalRows(page, {
+      baseUrl, sDate: date, eDate: date,
+      warmupPauseMs: 0,
+      settleIntervalMs: 0,
+      settleFloorMs: 100,  // floor > 0 → must wait at least once before accepting 0.
+      // NOTE: This test relies on real wall-clock time: settleIntervalMs=0 means
+      // the loop spins on microtasks. The 100ms floor is crossed because Node's
+      // event loop accumulates real elapsed time over many async iterations.
+      // The test is NOT clock-isolated. On a heavily loaded CI runner it may
+      // take longer; it will flap if a future change makes the loop terminate
+      // before 100ms of real time elapses.
+      settleMaxMs: 10000,
+    });
+
+    expect(result.kind).toBe("rows");
+    if (result.kind !== "rows") throw new Error("unreachable");
+    expect(result.rows).toHaveLength(0);
+    // At least one pause call must have been made (the settle floor)
+    const pauseCalls = page.operations.filter((op) => op.startsWith("pause:"));
+    expect(pauseCalls.length).toBeGreaterThan(0);
   });
 });
 
@@ -574,8 +729,17 @@ class FakePopularPortalPage implements PopularPortalPage {
 
   constructor(
     private readonly state: {
+      /** URL returned by currentUrl() when the caller is on the dashboard path */
+      dashboardUrl: string;
+      /** URL returned by currentUrl() at all other times (transactions path) */
       currentUrl: string;
-      waitForVisibleTextResult: boolean;
+      /**
+       * Per-text results for waitForVisibleText.
+       * Key "Produto" matches "Producto" (prefix match for brevity in tests).
+       * Any missing key defaults to true.
+       */
+      waitForVisibleTextResults: Record<string, boolean>;
+      openDashboardAccountResult: boolean;
       pageSnapshots: PortalTableSnapshot[];
     },
   ) {}
@@ -586,12 +750,32 @@ class FakePopularPortalPage implements PopularPortalPage {
 
   async currentUrl(): Promise<string> {
     this.operations.push("currentUrl");
+    // If the last goto was to a dashboard-like URL, return dashboardUrl
+    const lastGoto = [...this.operations].reverse().find((op) => op.startsWith("goto:"));
+    if (lastGoto !== undefined && lastGoto.includes("/dashboard")) {
+      return this.state.dashboardUrl;
+    }
     return this.state.currentUrl;
   }
 
   async waitForVisibleText(text: string, timeoutMs: number): Promise<boolean> {
     this.operations.push(`waitForVisibleText:${text}:${timeoutMs}`);
-    return this.state.waitForVisibleTextResult;
+    // Match by prefix key "Produto" → matches "Producto"
+    for (const [key, value] of Object.entries(this.state.waitForVisibleTextResults)) {
+      if (text.startsWith(key) || key.startsWith(text.substring(0, 5))) {
+        return value;
+      }
+    }
+    return true; // default: visible
+  }
+
+  async openDashboardAccount(productText: string, currencyText: string): Promise<boolean> {
+    this.operations.push(`openDashboardAccount:${productText}:${currencyText}`);
+    return this.state.openDashboardAccountResult;
+  }
+
+  async pause(ms: number): Promise<void> {
+    this.operations.push(`pause:${ms}`);
   }
 
   async readResultsTable(): Promise<PortalTableSnapshot | null> {
@@ -601,6 +785,8 @@ class FakePopularPortalPage implements PopularPortalPage {
       this.snapshotIndex++;
       return snapshot;
     }
-    return null;
+    // When snapshots are exhausted, return last snapshot (for settle loop stability)
+    const last = this.state.pageSnapshots[this.state.pageSnapshots.length - 1];
+    return last ?? null;
   }
 }

@@ -6,15 +6,26 @@ import { popularScraperProfile } from "../../../modules/bank-adapters/popular";
 // ---------------------------------------------------------------------------
 
 const POPULAR_PORTAL_BASE_URL = "https://ib.bpd.com.do";
+const POPULAR_DASHBOARD_PATH = "/dashboard";
 const POPULAR_TRANSACTIONS_PATH = "/accountdetails/transactions";
-const DEFAULT_ITEMS_PER_PAGE = 20;
+const DEFAULT_ITEMS_PER_PAGE = 100;
 const DEFAULT_MAX_PAGES = 25;
 const RESULTS_WAIT_TEXT = "Fecha posteo";
 const RESULTS_WAIT_TIMEOUT_MS = 15_000;
+const DASHBOARD_WAIT_TEXT = "Producto";
+const DASHBOARD_WAIT_TIMEOUT_MS = 15_000;
+
+// Warm-up and settle defaults
+const DEFAULT_WARMUP_PAUSE_MS = 6_000;
+const DEFAULT_SETTLE_INTERVAL_MS = 1_500;
+const DEFAULT_SETTLE_FLOOR_MS = 8_000;
+const DEFAULT_SETTLE_MAX_MS = 25_000;
 
 // These values come from the profile so the profile stops being dead code.
 const ACCOUNT_TYPE = "Corriente";
 const CURRENCY = "DOP";
+const DASHBOARD_PRODUCT_TEXT = "Corriente";
+const DASHBOARD_CURRENCY_TEXT = "RD$";
 
 // Expose the profile so external consumers can reference bankId / accountFingerprint.
 export const { bankId: POPULAR_BANK_ID, accountFingerprint: POPULAR_ACCOUNT_FINGERPRINT } =
@@ -36,11 +47,14 @@ export interface PortalTableSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// PopularPortalPage — read-only page seam
+// PopularPortalPage — navigation-only page seam
 //
-// CONTRACT: This interface intentionally exposes NO click/type/fill/submit
-// methods. Navigation is URL-only (goto). The read-only guarantee is
-// structural: it is impossible to trigger a mutation through this interface.
+// CONTRACT: This interface intentionally exposes NO type/fill/submit methods.
+// The only mutation surface is ONE whitelisted dashboard account-row click
+// (openDashboardAccount), which is required for warm-up navigation.
+// Navigation is URL-only (goto) plus the single whitelisted click.
+// The read-only and navigation-only guarantee is structural: it is impossible
+// to trigger form submission or text input through this interface.
 // ---------------------------------------------------------------------------
 
 export interface PopularPortalPage {
@@ -62,6 +76,19 @@ export interface PopularPortalPage {
    * columns.
    */
   readResultsTable(): Promise<PortalTableSnapshot | null>;
+  /**
+   * Click the dashboard products-table row whose Producto cell (index 2) and
+   * Moneda cell (index 3) EXACTLY equal the given args.
+   * EXACT equality is required — substring matching would hit alias rows like
+   * "Ahorros o Corriente" and produce wrong-account results.
+   * Resolves false when no row matches.
+   */
+  openDashboardAccount(productText: string, currencyText: string): Promise<boolean>;
+  /**
+   * Passive wait for the given number of milliseconds.
+   * Used for warm-up settle (after dashboard click) and result settle polling.
+   */
+  pause(ms: number): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,19 +176,63 @@ export interface CollectPopularPortalRowsOptions {
   eDate: Date;
   itemsPerPage?: number;
   maxPages?: number;
+  /**
+   * How long to pause after clicking the dashboard account row before
+   * navigating to the transactions URL. Defaults to 6000ms.
+   * Pass 0 in tests for fast execution.
+   */
+  warmupPauseMs?: number;
+  /**
+   * How long to wait between settle-loop read attempts. Defaults to 1500ms.
+   * Pass 0 in tests for fast execution.
+   */
+  settleIntervalMs?: number;
+  /**
+   * Minimum elapsed time (ms) before a zero-row result is accepted.
+   * Prevents false-empty reads caused by premature table rendering.
+   * Defaults to 8000ms. Pass 0 in tests to accept zero rows immediately.
+   */
+  settleFloorMs?: number;
+  /**
+   * Maximum elapsed time (ms) for the settle loop before giving up.
+   * Defaults to 25000ms.
+   */
+  settleMaxMs?: number;
 }
 
 /**
- * Drives the Popular portal page through pagination and extracts transaction
- * rows.  Returns a discriminated union so callers can handle admin-action
- * states without exceptions.
+ * Drives the Popular portal page through a warm-up click and pagination,
+ * extracting transaction rows. Returns a discriminated union so callers can
+ * handle admin-action states without exceptions.
+ *
+ * Warm-up phase (before pagination):
+ *  1. goto {baseUrl}/dashboard
+ *  2. currentUrl() does not include "/dashboard" → needs_admin_action
+ *     ("Bank session expired or requires verification")
+ *  3. waitForVisibleText("Producto") false → needs_admin_action
+ *     ("Bank dashboard did not render")
+ *  4. openDashboardAccount("Corriente", "RD$") false → needs_admin_action
+ *     ("Bank account row not found on dashboard")
+ *  5. pause(warmupPauseMs)
+ *
+ * Per-page settle loop:
+ *  - After waitForVisibleText("Fecha posteo"), poll readResultsTable via
+ *    pause(settleIntervalMs) until two consecutive reads have the same
+ *    rowCount, with a settleFloorMs minimum before accepting a ZERO-row result.
+ *    Non-zero stable counts may be accepted before the floor.
+ *    settleMaxMs caps the total settle time.
  *
  * State detection:
- *  - Redirect away from the transactions path → needs_admin_action
+ *  - Redirect away from /dashboard during warm-up → needs_admin_action
  *    ("Bank session expired or requires verification")
- *  - waitForVisibleText times out and table is absent → needs_admin_action
+ *  - "Producto" not visible on dashboard → needs_admin_action
+ *    ("Bank dashboard did not render")
+ *  - openDashboardAccount returns false → needs_admin_action
+ *    ("Bank account row not found on dashboard")
+ *  - waitForVisibleText("Fecha posteo") times out and table absent → needs_admin_action
  *    ("Bank portal did not render transaction results")
- *  - Table present with zero rows → kind "rows" with empty array (legitimate)
+ *  - Redirect away from transactions path during pagination → needs_admin_action
+ *    ("Bank session expired or requires verification")
  *
  * Pagination:
  *  - Increments pageNumber while rows.length === itemsPerPage
@@ -177,7 +248,47 @@ export async function collectPopularPortalRows(
     eDate,
     itemsPerPage = DEFAULT_ITEMS_PER_PAGE,
     maxPages = DEFAULT_MAX_PAGES,
+    warmupPauseMs = DEFAULT_WARMUP_PAUSE_MS,
+    settleIntervalMs = DEFAULT_SETTLE_INTERVAL_MS,
+    settleFloorMs = DEFAULT_SETTLE_FLOOR_MS,
+    settleMaxMs = DEFAULT_SETTLE_MAX_MS,
   } = options;
+
+  // ---------------------------------------------------------------------------
+  // Warm-up phase: navigate to dashboard and click the Corriente/RD$ row
+  // ---------------------------------------------------------------------------
+
+  await page.goto(`${baseUrl}${POPULAR_DASHBOARD_PATH}`);
+
+  const dashboardUrl = await page.currentUrl();
+  if (!dashboardUrl.includes(POPULAR_DASHBOARD_PATH)) {
+    return {
+      kind: "needs_admin_action",
+      safeErrorSummary: "Bank session expired or requires verification",
+    };
+  }
+
+  const dashboardReady = await page.waitForVisibleText(DASHBOARD_WAIT_TEXT, DASHBOARD_WAIT_TIMEOUT_MS);
+  if (!dashboardReady) {
+    return {
+      kind: "needs_admin_action",
+      safeErrorSummary: "Bank dashboard did not render",
+    };
+  }
+
+  const accountFound = await page.openDashboardAccount(DASHBOARD_PRODUCT_TEXT, DASHBOARD_CURRENCY_TEXT);
+  if (!accountFound) {
+    return {
+      kind: "needs_admin_action",
+      safeErrorSummary: "Bank account row not found on dashboard",
+    };
+  }
+
+  await page.pause(warmupPauseMs);
+
+  // ---------------------------------------------------------------------------
+  // Pagination loop
+  // ---------------------------------------------------------------------------
 
   const allRows: PopularTransactionRow[] = [];
 
@@ -196,7 +307,11 @@ export async function collectPopularPortalRows(
 
     // Wait for the results header
     const textVisible = await page.waitForVisibleText(RESULTS_WAIT_TEXT, RESULTS_WAIT_TIMEOUT_MS);
-    const snapshot = await page.readResultsTable();
+    const snapshot = await settleReadResultsTable(page, {
+      settleIntervalMs,
+      settleFloorMs,
+      settleMaxMs,
+    });
 
     if (!textVisible && snapshot === null) {
       return {
@@ -220,6 +335,64 @@ export async function collectPopularPortalRows(
   }
 
   return { kind: "rows", rows: allRows };
+}
+
+// ---------------------------------------------------------------------------
+// settleReadResultsTable — settle-loop for premature-read race condition
+//
+// After "Fecha posteo" becomes visible, the data POST is still in flight.
+// We poll readResultsTable until two consecutive reads have the same rowCount.
+// A zero-row stable result requires settleFloorMs before being accepted.
+// ---------------------------------------------------------------------------
+
+interface SettleOptions {
+  settleIntervalMs: number;
+  settleFloorMs: number;
+  settleMaxMs: number;
+}
+
+async function settleReadResultsTable(
+  page: PopularPortalPage,
+  opts: SettleOptions,
+): Promise<PortalTableSnapshot | null> {
+  const { settleIntervalMs, settleFloorMs, settleMaxMs } = opts;
+  const startMs = Date.now();
+  let prevRowCount: number | null = null;
+  let latestSnapshot: PortalTableSnapshot | null = null;
+
+  while (true) {
+    const snapshot = await page.readResultsTable();
+    const rowCount = snapshot?.rows.length ?? 0;
+    const elapsedMs = Date.now() - startMs;
+
+    if (prevRowCount !== null && rowCount === prevRowCount) {
+      // Stable count observed.
+      if (rowCount > 0) {
+        // Non-zero stable — accept immediately (before floor).
+        return snapshot;
+      }
+      // Zero stable — only accept after the floor has elapsed.
+      if (elapsedMs >= settleFloorMs) {
+        return snapshot;
+      }
+      // Zero stable but floor not yet elapsed — keep polling.
+    }
+
+    prevRowCount = rowCount;
+    latestSnapshot = snapshot;
+
+    if (elapsedMs >= settleMaxMs) {
+      // Timed out — return whatever we have.
+      return latestSnapshot;
+    }
+
+    await page.pause(settleIntervalMs);
+    // Re-check the cap after pausing so the function does not overshoot
+    // settleMaxMs by a full interval when elapsed was just under the cap.
+    if (Date.now() - startMs >= settleMaxMs) {
+      return latestSnapshot;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
