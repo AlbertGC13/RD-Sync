@@ -40,6 +40,7 @@
         "next": "latest",
         "nodemailer": "^8.0.11",
         "pg": "latest",
+        "playwright-core": "^1.60.0",
         "react": "latest",
         "react-dom": "latest",
         "sonner": "^2.0.7",

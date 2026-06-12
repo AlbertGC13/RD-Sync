@@ -3,18 +3,31 @@ import { createIngestionProcessor } from "../../../worker/queues";
 import type { IngestionScraper } from "../../../worker/queues";
 import { createInMemoryIngestionConsumer } from "../../../worker/ingestion-consumer";
 import { resolveDefaultAlertSink } from "../../../worker/alerts/email-alert-sink";
+import { createPopularCdpScraper } from "../../../worker/scraper/navigation/popular-cdp";
 import { defaultAuditSink } from "../audit/defaults";
 import { defaultTransactionRepository } from "../transactions/defaults";
 import { defaultIngestionQueue, defaultScrapeRunRepository } from "./defaults";
 
 /**
- * Resolves the default IngestionScraper for the local/dev server.
+ * Resolves the default IngestionScraper based on env vars read at call time.
  *
+ * Note: this function is also called once at module-load time (line below) to
+ * construct the module-level `defaultProcessor`. Env vars are therefore read at
+ * import time for that instance, not lazily per request.
+ *
+ * - RD_SYNC_SCRAPER=popular-cdp → CDP-attach scraper (Via B: attaches to
+ *   a human-opened Brave session; cdpUrl from RD_SYNC_CDP_URL).
  * - RD_SYNC_DEV_PREVIEW=enabled → fixture-backed scraper (Popular portal fixture).
- * - Otherwise → a scraper that reports needs_admin_action so production never
- *   fabricates data while real bank navigation is not yet wired (PR5+).
+ * - Otherwise → stub that reports needs_admin_action so production never
+ *   fabricates data while real bank navigation is not configured.
  */
-function resolveDefaultScraper(): IngestionScraper {
+export function resolveDefaultScraper(): IngestionScraper {
+  if (process.env.RD_SYNC_SCRAPER === "popular-cdp") {
+    return createPopularCdpScraper({
+      cdpUrl: process.env.RD_SYNC_CDP_URL,
+    });
+  }
+
   if (process.env.RD_SYNC_DEV_PREVIEW === "enabled") {
     return {
       collect: async () => ({

@@ -62,6 +62,9 @@ importers:
       pg:
         specifier: latest
         version: 8.21.0
+      playwright-core:
+        specifier: ^1.60.0
+        version: 1.60.0
       react:
         specifier: latest
         version: 19.2.7
@@ -89,7 +92,7 @@ importers:
         version: 1.60.0
       '@types/node':
         specifier: latest
-        version: 25.9.2
+        version: 25.9.3
       '@types/nodemailer':
         specifier: ^8.0.0
         version: 8.0.0
@@ -122,7 +125,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: latest
-        version: 4.1.8(@types/node@25.9.2)(@vitest/coverage-v8@4.1.8)(vite@8.0.16(@types/node@25.9.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4))
+        version: 4.1.8(@types/node@25.9.3)(@vitest/coverage-v8@4.1.8)(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4))
 
 packages:
 
@@ -1454,6 +1457,9 @@ packages:
 
   '@types/node@25.9.2':
     resolution: {integrity: sha512-G05zqtJhcDLb8uslf5EjCxXg9G1KQxiV8OS0R26IC//Eoyitzqe8z37I7cqvnZlrlSfgocQRfSn/AHBZJJFyGw==}
+
+  '@types/node@25.9.3':
+    resolution: {integrity: sha512-603BddQMv3pUcr4U2dhujk83N2tTDVr/34wII2B6bJy6g+8WD6yUb11jszNs0gdi4PesVWl7ABt8nYMVpnLUcg==}
 
   '@types/nodemailer@8.0.0':
     resolution: {integrity: sha512-fyf8jWULsCo0d0BuoQ75i6IeoHs47qcqxWc7yUdUcV0pOZGjUTTOvwdG1PRXUDqN/8A64yQdQdnA2pZgcdi+cA==}
@@ -4695,6 +4701,10 @@ snapshots:
     dependencies:
       undici-types: 7.24.6
 
+  '@types/node@25.9.3':
+    dependencies:
+      undici-types: 7.24.6
+
   '@types/nodemailer@8.0.0':
     dependencies:
       '@types/node': 25.9.2
@@ -4886,7 +4896,7 @@ snapshots:
       obug: 2.1.2
       std-env: 4.1.0
       tinyrainbow: 3.1.0
-      vitest: 4.1.8(@types/node@25.9.2)(@vitest/coverage-v8@4.1.8)(vite@8.0.16(@types/node@25.9.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4))
+      vitest: 4.1.8(@types/node@25.9.3)(@vitest/coverage-v8@4.1.8)(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4))
 
   '@vitest/expect@4.1.8':
     dependencies:
@@ -4897,13 +4907,13 @@ snapshots:
       chai: 6.2.2
       tinyrainbow: 3.1.0
 
-  '@vitest/mocker@4.1.8(vite@8.0.16(@types/node@25.9.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4))':
+  '@vitest/mocker@4.1.8(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4))':
     dependencies:
       '@vitest/spy': 4.1.8
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 8.0.16(@types/node@25.9.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)
+      vite: 8.0.16(@types/node@25.9.3)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)
 
   '@vitest/pretty-format@4.1.8':
     dependencies:
@@ -6913,7 +6923,7 @@ snapshots:
     optionalDependencies:
       typescript: 6.0.3
 
-  vite@8.0.16(@types/node@25.9.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4):
+  vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4):
     dependencies:
       lightningcss: 1.32.0
       picomatch: 4.0.4
@@ -6921,16 +6931,16 @@ snapshots:
       rolldown: 1.0.3
       tinyglobby: 0.2.17
     optionalDependencies:
-      '@types/node': 25.9.2
+      '@types/node': 25.9.3
       esbuild: 0.28.0
       fsevents: 2.3.3
       jiti: 2.7.0
       tsx: 4.22.4
 
-  vitest@4.1.8(@types/node@25.9.2)(@vitest/coverage-v8@4.1.8)(vite@8.0.16(@types/node@25.9.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)):
+  vitest@4.1.8(@types/node@25.9.3)(@vitest/coverage-v8@4.1.8)(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)):
     dependencies:
       '@vitest/expect': 4.1.8
-      '@vitest/mocker': 4.1.8(vite@8.0.16(@types/node@25.9.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4))
+      '@vitest/mocker': 4.1.8(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4))
       '@vitest/pretty-format': 4.1.8
       '@vitest/runner': 4.1.8
       '@vitest/snapshot': 4.1.8
@@ -6947,10 +6957,10 @@ snapshots:
       tinyexec: 1.2.4
       tinyglobby: 0.2.17
       tinyrainbow: 3.1.0
-      vite: 8.0.16(@types/node@25.9.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)
+      vite: 8.0.16(@types/node@25.9.3)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)
       why-is-node-running: 2.3.0
     optionalDependencies:
-      '@types/node': 25.9.2
+      '@types/node': 25.9.3
       '@vitest/coverage-v8': 4.1.8(vitest@4.1.8)
     transitivePeerDependencies:
       - msw
