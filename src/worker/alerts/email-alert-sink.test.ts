@@ -252,3 +252,138 @@ describe("resolveDefaultAlertSink — env resolution", () => {
     expect(() => resolveDefaultAlertSink()).not.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// notifySessionAttention — email shape
+// ---------------------------------------------------------------------------
+
+describe("createEmailAlertSink — notifySessionAttention: expired", () => {
+  it("uses 'attention required' subject for expired status", async () => {
+    const { transport, messages } = makeTransport();
+    const sink = createEmailAlertSink({ transport, recipient: "ops@example.com" });
+
+    await sink.notifySessionAttention({
+      status: "expired",
+      safeSummary: "Bank session expired or requires verification",
+      checkedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].subject).toBe("RD-Sync: bank session attention required");
+  });
+
+  it("uses 'restored' subject for active status", async () => {
+    const { transport, messages } = makeTransport();
+    const sink = createEmailAlertSink({ transport, recipient: "ops@example.com" });
+
+    await sink.notifySessionAttention({
+      status: "active",
+      safeSummary: "Bank session is active",
+      checkedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(messages[0].subject).toBe("RD-Sync: bank session restored");
+  });
+
+  it("uses 'attention required' subject for browser_unavailable status", async () => {
+    const { transport, messages } = makeTransport();
+    const sink = createEmailAlertSink({ transport, recipient: "ops@example.com" });
+
+    await sink.notifySessionAttention({
+      status: "browser_unavailable",
+      safeSummary: "Bank browser session is not available",
+      checkedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(messages[0].subject).toBe("RD-Sync: bank session attention required");
+  });
+
+  it("includes safeSummary and checkedAt in the body", async () => {
+    const { transport, messages } = makeTransport();
+    const sink = createEmailAlertSink({ transport, recipient: "ops@example.com" });
+
+    await sink.notifySessionAttention({
+      status: "expired",
+      safeSummary: "Bank session expired or requires verification",
+      checkedAt: "2026-06-12T10:00:00.000Z",
+    });
+
+    const body = messages[0].text;
+    expect(body).toContain("Bank session expired or requires verification");
+    expect(body).toContain("2026-06-12T10:00:00.000Z");
+  });
+
+  it("includes a pointer to /admin/bank-connections in the body", async () => {
+    const { transport, messages } = makeTransport();
+    const sink = createEmailAlertSink({ transport, recipient: "ops@example.com" });
+
+    await sink.notifySessionAttention({
+      status: "expired",
+      safeSummary: "Bank session expired or requires verification",
+      checkedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(messages[0].text).toContain("/admin/bank-connections");
+  });
+
+  it("does not include any URL, account, or error interpolation in the body", async () => {
+    const { transport, messages } = makeTransport();
+    const sink = createEmailAlertSink({ transport, recipient: "ops@example.com" });
+
+    await sink.notifySessionAttention({
+      status: "expired",
+      safeSummary: "Bank session expired or requires verification",
+      checkedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const body = messages[0].text;
+    // Body must only contain fixed strings — no dynamic interpolation
+    expect(body).not.toContain("token=");
+    expect(body).not.toContain("password=");
+  });
+
+  it("passes the safeSummary through the existing redaction defense", async () => {
+    const { transport, messages } = makeTransport();
+    const sink = createEmailAlertSink({ transport, recipient: "ops@example.com" });
+
+    await sink.notifySessionAttention({
+      status: "expired",
+      safeSummary: "session token=abc123 expired",
+      checkedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const body = messages[0].text;
+    expect(body).not.toContain("abc123");
+    expect(body).toContain("[REDACTED]");
+  });
+
+  it("does not throw when transport.send rejects", async () => {
+    const throwingTransport: EmailTransport = {
+      send: async () => {
+        throw new Error("SMTP down");
+      },
+    };
+    const sink = createEmailAlertSink({ transport: throwingTransport, recipient: "ops@example.com" });
+
+    await expect(
+      sink.notifySessionAttention({
+        status: "expired",
+        safeSummary: "Bank session expired or requires verification",
+        checkedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("sends to the configured recipient address", async () => {
+    const { transport, messages } = makeTransport();
+    const sink = createEmailAlertSink({ transport, recipient: "team@acme.com" });
+
+    await sink.notifySessionAttention({
+      status: "expired",
+      safeSummary: "Bank session expired or requires verification",
+      checkedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(messages[0].to).toBe("team@acme.com");
+  });
+});
