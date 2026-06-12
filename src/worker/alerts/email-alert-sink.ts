@@ -42,6 +42,30 @@ export function createEmailAlertSink(options: {
         // Transport failures must never propagate — the processor must keep running.
       }
     },
+
+    async notifySessionAttention(event) {
+      const { status, safeSummary, checkedAt } = event;
+      const redactedSummary = redactDiagnosticText(safeSummary);
+
+      const subject =
+        status === "active"
+          ? "RD-Sync: bank session restored"
+          : "RD-Sync: bank session attention required";
+
+      const text = [
+        redactedSummary,
+        ``,
+        `Checked at: ${checkedAt}`,
+        ``,
+        `Review at /admin/bank-connections`,
+      ].join("\n");
+
+      try {
+        await options.transport.send({ to: options.recipient, subject, text });
+      } catch {
+        // Transport failures must never propagate.
+      }
+    },
   };
 }
 

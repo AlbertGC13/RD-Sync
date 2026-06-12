@@ -409,4 +409,8 @@ class FakeAdminAlertSink {
   }): Promise<void> {
     this.events.push(event);
   }
+
+  async notifySessionAttention(): Promise<void> {
+    // no-op in tests that don't exercise session alerts
+  }
 }

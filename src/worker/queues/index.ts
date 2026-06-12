@@ -44,6 +44,11 @@ export interface AdminAlertSink {
     status: "failed" | "needs_admin_action";
     safeErrorSummary: string;
   }): Promise<void>;
+  notifySessionAttention(event: {
+    status: "active" | "expired" | "browser_unavailable";
+    safeSummary: string;
+    checkedAt: string;
+  }): Promise<void>;
 }
 
 export interface IngestionProcessorDependencies {
