@@ -88,7 +88,7 @@ export function extractResultsTableFromDocument(
 // CdpPopularPortalPage — adapts a CDP page to the PopularPortalPage seam
 // ---------------------------------------------------------------------------
 
-class CdpPopularPortalPage implements PopularPortalPage {
+export class CdpPopularPortalPage implements PopularPortalPage {
   constructor(private readonly page: CdpPageLike) {}
 
   async goto(url: string): Promise<void> {
