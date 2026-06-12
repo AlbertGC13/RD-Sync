@@ -9,7 +9,12 @@ import { defaultAuditSink } from "../audit/defaults";
 
 export { defaultAuditSink };
 
-export const defaultTransactionRepository = new InMemoryTransactionRepository();
+const globalRegistry = globalThis as typeof globalThis & {
+  __rdSyncTransactionRepository?: InMemoryTransactionRepository;
+};
+
+export const defaultTransactionRepository =
+  (globalRegistry.__rdSyncTransactionRepository ??= new InMemoryTransactionRepository());
 
 let e2eFixturesSeeded = false;
 

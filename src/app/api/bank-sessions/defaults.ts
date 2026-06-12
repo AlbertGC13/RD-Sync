@@ -83,17 +83,35 @@ export function resolveDefaultSessionMonitor(): BankSessionMonitor | null {
 }
 
 // ---------------------------------------------------------------------------
-// Module-level singletons (constructed once at import time)
+// globalThis anchors
+//
+// Both the checker and the monitor are anchored on globalThis so every Next.js
+// module graph (RSC page, API route handler) shares a single instance.
+// Anchoring the monitor prevents two separate setInterval timers being started
+// when Turbopack creates multiple module graphs in dev.
 // ---------------------------------------------------------------------------
 
-const defaultSessionChecker = resolveDefaultSessionChecker();
-const defaultSessionMonitor = resolveDefaultSessionMonitor();
+const globalRegistry = globalThis as typeof globalThis & {
+  __rdSyncSessionChecker?: CdpSessionChecker;
+  __rdSyncSessionMonitor?: BankSessionMonitor | null;
+};
+
+const defaultSessionChecker =
+  (globalRegistry.__rdSyncSessionChecker ??= resolveDefaultSessionChecker());
+
+// Use a sentinel to distinguish "not yet initialised" from "null (disabled)".
+if (!("__rdSyncSessionMonitor" in globalRegistry)) {
+  globalRegistry.__rdSyncSessionMonitor = resolveDefaultSessionMonitor();
+}
+const defaultSessionMonitor = globalRegistry.__rdSyncSessionMonitor ?? null;
 
 // ---------------------------------------------------------------------------
 // startDefaultSessionMonitorIfEnabled
 //
 // Call from the route module to start the background monitor on first import.
-// Idempotent — BankSessionMonitor.start() is already idempotent.
+// Idempotent — BankSessionMonitor.start() is already idempotent (internal
+// handle guard), and the monitor itself is now a global singleton so multiple
+// call sites all reach the same instance.
 // ---------------------------------------------------------------------------
 
 export function startDefaultSessionMonitorIfEnabled(): void {

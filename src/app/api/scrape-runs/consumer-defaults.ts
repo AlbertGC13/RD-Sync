@@ -1,12 +1,16 @@
 import { popularPortalFixture, parsePopularTransactionRows } from "../../../modules/bank-adapters/popular";
 import { createIngestionProcessor } from "../../../worker/queues";
 import type { IngestionScraper } from "../../../worker/queues";
-import { createInMemoryIngestionConsumer } from "../../../worker/ingestion-consumer";
+import { createInMemoryIngestionConsumer, type InMemoryIngestionConsumer } from "../../../worker/ingestion-consumer";
 import { resolveDefaultAlertSink } from "../../../worker/alerts/email-alert-sink";
 import { createPopularCdpScraper } from "../../../worker/scraper/navigation/popular-cdp";
 import { defaultAuditSink } from "../audit/defaults";
 import { defaultTransactionRepository } from "../transactions/defaults";
 import { defaultIngestionQueue, defaultScrapeRunRepository } from "./defaults";
+
+const globalRegistry = globalThis as typeof globalThis & {
+  __rdSyncIngestionConsumer?: InMemoryIngestionConsumer;
+};
 
 /**
  * Resolves the default IngestionScraper based on env vars read at call time.
@@ -46,15 +50,16 @@ export function resolveDefaultScraper(): IngestionScraper {
   };
 }
 
-const defaultProcessor = createIngestionProcessor({
-  scrapeRuns: defaultScrapeRunRepository,
-  transactions: defaultTransactionRepository,
-  auditSink: defaultAuditSink,
-  adminAlerts: resolveDefaultAlertSink(),
-  scraper: resolveDefaultScraper(),
-});
+function createDefaultIngestionConsumer(): InMemoryIngestionConsumer {
+  const processor = createIngestionProcessor({
+    scrapeRuns: defaultScrapeRunRepository,
+    transactions: defaultTransactionRepository,
+    auditSink: defaultAuditSink,
+    adminAlerts: resolveDefaultAlertSink(),
+    scraper: resolveDefaultScraper(),
+  });
+  return createInMemoryIngestionConsumer({ queue: defaultIngestionQueue, processor });
+}
 
-export const defaultIngestionConsumer = createInMemoryIngestionConsumer({
-  queue: defaultIngestionQueue,
-  processor: defaultProcessor,
-});
+export const defaultIngestionConsumer =
+  (globalRegistry.__rdSyncIngestionConsumer ??= createDefaultIngestionConsumer());

@@ -1,3 +1,8 @@
 import { InMemoryAuditSink } from "../../../modules/audit";
 
-export const defaultAuditSink = new InMemoryAuditSink();
+const globalRegistry = globalThis as typeof globalThis & {
+  __rdSyncAuditSink?: InMemoryAuditSink;
+};
+
+export const defaultAuditSink =
+  (globalRegistry.__rdSyncAuditSink ??= new InMemoryAuditSink());

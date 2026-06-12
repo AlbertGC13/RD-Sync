@@ -9,9 +9,38 @@ import {
 } from "../../../modules/scrape-runs";
 import type { IngestionJobData, QueueLike } from "../../../worker/queues";
 
-export const defaultScrapeRunRepository = new InMemoryScrapeRunRepository();
+// ---------------------------------------------------------------------------
+// InMemoryScheduledIngestionQueue
+// (declared before globalRegistry so the type is available below)
+// ---------------------------------------------------------------------------
 
-let previewScrapeRunsSeeded = false;
+export class InMemoryScheduledIngestionQueue implements QueueLike {
+  readonly jobs: Array<{ name: string; data: IngestionJobData; options: JobsOptions }> = [];
+
+  async add(name: string, data: IngestionJobData, options: JobsOptions): Promise<void> {
+    this.jobs.push({ name, data, options });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// globalThis anchors — one instance shared across all Next.js module graphs
+// ---------------------------------------------------------------------------
+
+const globalRegistry = globalThis as typeof globalThis & {
+  __rdSyncScrapeRunRepository?: InMemoryScrapeRunRepository;
+  __rdSyncIngestionQueue?: InMemoryScheduledIngestionQueue;
+  __rdSyncPreviewScrapeRunsSeeded?: boolean;
+};
+
+export const defaultScrapeRunRepository =
+  (globalRegistry.__rdSyncScrapeRunRepository ??= new InMemoryScrapeRunRepository());
+
+export const defaultIngestionQueue =
+  (globalRegistry.__rdSyncIngestionQueue ??= new InMemoryScheduledIngestionQueue());
+
+// ---------------------------------------------------------------------------
+// Preview seeding helpers
+// ---------------------------------------------------------------------------
 
 export function createPreviewScrapeRunRecords(now = new Date()): ScrapeRunRecord[] {
   return [
@@ -67,11 +96,12 @@ export function createPreviewScrapeRunRecords(now = new Date()): ScrapeRunRecord
 }
 
 export async function seedPreviewScrapeRunsIfEnabled() {
-  if (process.env.RD_SYNC_DEV_PREVIEW !== "enabled" || previewScrapeRunsSeeded) {
+  // Use a globalThis flag so the seed runs at most once across all module graphs.
+  if (process.env.RD_SYNC_DEV_PREVIEW !== "enabled" || globalRegistry.__rdSyncPreviewScrapeRunsSeeded) {
     return;
   }
 
-  previewScrapeRunsSeeded = true;
+  globalRegistry.__rdSyncPreviewScrapeRunsSeeded = true;
 
   for (const run of createPreviewScrapeRunRecords()) {
     await defaultScrapeRunRepository.createQueued({
@@ -113,13 +143,3 @@ export async function listScrapeRunsForPage(
   const records = await defaultScrapeRunRepository.list(filters);
   return records.map(toDashboardScrapeRun);
 }
-
-export class InMemoryScheduledIngestionQueue implements QueueLike {
-  readonly jobs: Array<{ name: string; data: IngestionJobData; options: JobsOptions }> = [];
-
-  async add(name: string, data: IngestionJobData, options: JobsOptions): Promise<void> {
-    this.jobs.push({ name, data, options });
-  }
-}
-
-export const defaultIngestionQueue = new InMemoryScheduledIngestionQueue();
