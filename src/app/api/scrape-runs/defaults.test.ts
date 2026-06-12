@@ -47,7 +47,7 @@ describe("InMemoryScheduledIngestionQueue", () => {
     await queue.add("bank-transaction-ingestion", {
       runId: "run-1",
       bankId: "popular",
-      accountFingerprint: "popular-817985690",
+      accountFingerprint: "popular-0000000000",
     }, {
       jobId: "run-1",
       attempts: 3,
@@ -59,7 +59,7 @@ describe("InMemoryScheduledIngestionQueue", () => {
         data: {
           runId: "run-1",
           bankId: "popular",
-          accountFingerprint: "popular-817985690",
+          accountFingerprint: "popular-0000000000",
         },
         options: {
           jobId: "run-1",

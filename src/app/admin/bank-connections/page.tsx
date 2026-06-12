@@ -20,9 +20,9 @@ export interface AdminBankConnection {
 }
 
 export const popularBankConnection: AdminBankConnection = {
-  id: "popular-817985690",
+  id: "popular-0000000000",
   bankName: "Banco Popular",
-  accountNumber: "817985690",
+  accountNumber: "0000000000",
   accountType: "Corriente",
   currency: "DOP",
   sessionStatus: "needs_admin_action",

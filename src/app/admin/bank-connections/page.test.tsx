@@ -15,10 +15,10 @@ describe("AdminBankConnectionsDashboard", () => {
     [
       "Bank connections",
       "Banco Popular",
-      "817985690",
+      "0000000000",
       "Corriente",
       "Session action required",
-      'href="/admin/bank-connections/popular-817985690/session"',
+      'href="/admin/bank-connections/popular-0000000000/session"',
     ].forEach((text) => expect(html).toContain(text));
     ["password=", "cookie=", "token="].forEach((text) => expect(html).not.toContain(text));
   });
@@ -29,6 +29,6 @@ describe("AdminBankConnectionsDashboard", () => {
     );
 
     expect(html).toContain("Admin access required");
-    ["817985690", "Renew session", "Token", "MFA"].forEach((text) => expect(html).not.toContain(text));
+    ["0000000000", "Renew session", "Token", "MFA"].forEach((text) => expect(html).not.toContain(text));
   });
 });

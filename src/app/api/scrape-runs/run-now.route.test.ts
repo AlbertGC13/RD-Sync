@@ -31,7 +31,7 @@ describe("POST /api/scrape-runs/run-now", () => {
       run: {
         runId: "popular-manual-run",
         bankId: "popular",
-        accountFingerprint: "popular-817985690",
+        accountFingerprint: "popular-0000000000",
         status: "queued",
       },
     });
@@ -44,7 +44,7 @@ describe("POST /api/scrape-runs/run-now", () => {
         data: {
           runId: "popular-manual-run",
           bankId: "popular",
-          accountFingerprint: "popular-817985690",
+          accountFingerprint: "popular-0000000000",
         },
       },
     ]);

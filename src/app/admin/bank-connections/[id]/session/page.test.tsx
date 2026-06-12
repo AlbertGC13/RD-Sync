@@ -9,12 +9,12 @@ const viewer = { id: "viewer-1", role: "viewer" } as const;
 describe("BankSessionShell", () => {
   it("explains the admin-only physical token boundary for Popular sessions", () => {
     const html = renderToStaticMarkup(
-      <BankSessionShell connectionId="popular-817985690" principal={admin} />,
+      <BankSessionShell connectionId="popular-0000000000" principal={admin} />,
     );
 
     [
       "Popular session setup",
-      "817985690",
+      "0000000000",
       "Token entry is admin-only",
       "Physical token device",
       "needs_admin_action",
@@ -24,10 +24,10 @@ describe("BankSessionShell", () => {
 
   it("denies viewers without showing account or token instructions", () => {
     const html = renderToStaticMarkup(
-      <BankSessionShell connectionId="popular-817985690" principal={viewer} />,
+      <BankSessionShell connectionId="popular-0000000000" principal={viewer} />,
     );
 
     expect(html).toContain("Admin access required");
-    ["817985690", "Token entry is admin-only", "Physical token device", "MFA"].forEach((text) => expect(html).not.toContain(text));
+    ["0000000000", "Token entry is admin-only", "Physical token device", "MFA"].forEach((text) => expect(html).not.toContain(text));
   });
 });

@@ -1,8 +1,8 @@
 import type { BankMovement, TransactionDirection } from "../transactions";
 
 const POPULAR_BANK_ID = "popular";
-const POPULAR_ACCOUNT_NUMBER = "817985690";
-const POPULAR_ACCOUNT_FINGERPRINT = "popular-817985690";
+const POPULAR_ACCOUNT_NUMBER = "0000000000";
+const POPULAR_ACCOUNT_FINGERPRINT = "popular-0000000000";
 const POPULAR_CURRENCY = "DOP";
 const SANTO_DOMINGO_OFFSET = "-04:00";
 
@@ -13,7 +13,6 @@ export interface PopularTransactionRow {
   referenceNumber?: string | null;
   description: string;
   amount: string;
-  balance?: string | null;
   imageAvailable?: boolean;
   detailAvailable?: boolean;
 }
@@ -56,43 +55,39 @@ export const popularPortalFixture = {
   },
   search: {
     defaultSearchMode: "current-day",
-    fromDate: "09/mayo/2026",
-    toDate: "08/junio/2026",
+    fromDate: "01/enero/2025",
+    toDate: "01/enero/2025",
   },
   transactions: [
     {
-      postedDate: "11/05/2026",
-      effectiveDate: "09/05/2026",
-      description: "Devolucion Jueves TOKE RD$ .00",
+      postedDate: "01/01/2025",
+      effectiveDate: "01/01/2025",
+      description: "PAGO FICTICIO 001",
       amount: "$100.00",
-      balance: "$2,031.49",
       detailAvailable: true,
     },
     {
-      postedDate: "11/05/2026",
-      effectiveDate: "09/05/2026",
-      checkNumber: "0612915426447",
-      description: "BANCO POPULAR OFICINA EL SANTIAGO 612915426447 090526 DEP C TACTE BPD0344",
+      postedDate: "01/01/2025",
+      effectiveDate: "01/01/2025",
+      checkNumber: "0001000000001",
+      description: "DEPOSITO FICTICIO 002",
       amount: "$97,000.00",
-      balance: "$99,031.49",
       detailAvailable: true,
     },
     {
-      postedDate: "11/05/2026",
-      effectiveDate: "09/05/2026",
-      checkNumber: "0612915426452",
-      description: "BANCO POPULAR OFICINA EL SANTIAGO 612915426452 090526 DEP C TACTE BPD0344",
+      postedDate: "01/01/2025",
+      effectiveDate: "01/01/2025",
+      checkNumber: "0002000000002",
+      description: "DEPOSITO FICTICIO 003",
       amount: "$17,000.00",
-      balance: "$116,031.49",
       detailAvailable: true,
     },
     {
-      postedDate: "11/05/2026",
-      effectiveDate: "09/05/2026",
-      checkNumber: "0000816840623",
-      description: "MB a 0816840623 lovely",
+      postedDate: "01/01/2025",
+      effectiveDate: "01/01/2025",
+      checkNumber: "0003000000003",
+      description: "PAGO FICTICIO 004",
       amount: "$-115,500.00",
-      balance: "$531.49",
       detailAvailable: true,
     },
   ] satisfies PopularTransactionRow[],
@@ -132,7 +127,7 @@ export function parsePopularTransactionRows(
 
 function parsePopularDate(value: string): string {
   const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(value.trim());
-  if (!match) throw new Error(`Invalid Popular date: ${value}`);
+  if (!match) throw new Error("Invalid Popular date format");
 
   const [, day, month, year] = match;
   return `${year}-${month}-${day}T00:00:00${SANTO_DOMINGO_OFFSET}`;
@@ -145,7 +140,7 @@ function parsePopularAmount(value: string): { value: number; direction: Transact
     .replace(/,/g, "")
     .trim();
   const amount = Number(normalized);
-  if (!Number.isFinite(amount)) throw new Error(`Invalid Popular amount: ${value}`);
+  if (!Number.isFinite(amount)) throw new Error("Invalid Popular amount format");
 
   return {
     value: amount,

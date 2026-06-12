@@ -9,12 +9,12 @@ import {
 describe("popularScraperProfile", () => {
   it("models the screenshot flow for account selection and date-based search", () => {
     expect(popularPortalFixture.dashboard.accounts).toContainEqual({
-      accountNumber: "817985690",
+      accountNumber: "0000000000",
       accountType: "Corriente",
       currency: "DOP",
     });
     expect(popularScraperProfile.selectors).toMatchObject({
-      accountNumberText: "817985690",
+      accountNumberText: "0000000000",
       fromDateInput: "input[name='sDate']",
       toDateInput: "input[name='eDate']",
       searchButtonText: "Buscar",
@@ -30,19 +30,19 @@ describe("parsePopularTransactionRows", () => {
 
     expect(movements[1]).toMatchObject({
       bankId: "popular",
-      accountFingerprint: "popular-817985690",
-      postedAt: "2026-05-11T00:00:00-04:00",
+      accountFingerprint: "popular-0000000000",
+      postedAt: "2025-01-01T00:00:00-04:00",
       amount: "97000.00",
       currency: "DOP",
       direction: "credit",
-      reference: "0612915426447",
-      concept: "BANCO POPULAR OFICINA EL SANTIAGO 612915426447 090526 DEP C TACTE BPD0344",
+      reference: "0001000000001",
+      concept: "DEPOSITO FICTICIO 002",
     });
     expect(movements[3]).toMatchObject({
       amount: "115500.00",
       direction: "debit",
-      reference: "0000816840623",
-      concept: "MB a 0816840623 lovely",
+      reference: "0003000000003",
+      concept: "PAGO FICTICIO 004",
     });
   });
 
@@ -50,23 +50,24 @@ describe("parsePopularTransactionRows", () => {
     const [movement] = parsePopularTransactionRows([popularPortalFixture.transactions[1]]);
 
     expect(movement.metadata).toEqual({
-      effectiveAt: "2026-05-09T00:00:00-04:00",
-      checkNumber: "0612915426447",
+      effectiveAt: "2025-01-01T00:00:00-04:00",
+      checkNumber: "0001000000001",
       referenceNumber: null,
       imageAvailable: false,
       detailAvailable: true,
     });
-    expect(JSON.stringify(movement)).not.toContain("$99,031.49");
+    // balance must not appear anywhere in the serialized movement
+    expect(JSON.stringify(movement)).not.toContain("balance");
   });
 
   it("rejects malformed Popular dates and amounts", () => {
     expect(() =>
       parsePopularTransactionRows([
-        { ...popularPortalFixture.transactions[0], postedDate: "2026-05-11" },
+        { ...popularPortalFixture.transactions[0], postedDate: "2025-01-01" },
       ]),
-    ).toThrow("Invalid Popular date");
+    ).toThrow("Invalid Popular date format");
     expect(() =>
       parsePopularTransactionRows([{ ...popularPortalFixture.transactions[0], amount: "RD$ --" }]),
-    ).toThrow("Invalid Popular amount");
+    ).toThrow("Invalid Popular amount format");
   });
 });

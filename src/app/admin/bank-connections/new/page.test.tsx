@@ -13,7 +13,7 @@ describe("NewBankConnectionShell", () => {
     [
       "New bank connection",
       "Banco Popular",
-      "817985690",
+      "0000000000",
       "Current-day date search",
       "Continue to session setup",
     ].forEach((text) => expect(html).toContain(text));
@@ -24,6 +24,6 @@ describe("NewBankConnectionShell", () => {
     const html = renderToStaticMarkup(<NewBankConnectionShell principal={viewer} />);
 
     expect(html).toContain("Admin access required");
-    ["817985690", "Continue to session setup", "Token", "MFA"].forEach((text) => expect(html).not.toContain(text));
+    ["0000000000", "Continue to session setup", "Token", "MFA"].forEach((text) => expect(html).not.toContain(text));
   });
 });

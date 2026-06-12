@@ -39,7 +39,7 @@ describe("scheduleAdminIngestionRunNow", () => {
     expect(result).toEqual({
       runId: "run-popular-now",
       bankId: "popular",
-      accountFingerprint: "popular-817985690",
+      accountFingerprint: "popular-0000000000",
       status: "queued",
     });
     expect(await scrapeRuns.list({})).toMatchObject([
@@ -51,7 +51,7 @@ describe("scheduleAdminIngestionRunNow", () => {
         data: {
           runId: "run-popular-now",
           bankId: "popular",
-          accountFingerprint: "popular-817985690",
+          accountFingerprint: "popular-0000000000",
         },
         options: {
           jobId: "run-popular-now",
@@ -126,7 +126,7 @@ describe("scheduleAdminIngestionRunNow — audit events", () => {
       targetId: "run-popular-audit",
       metadata: {
         bankId: "popular",
-        accountFingerprint: "popular-817985690",
+        accountFingerprint: "popular-0000000000",
       },
     });
   });
