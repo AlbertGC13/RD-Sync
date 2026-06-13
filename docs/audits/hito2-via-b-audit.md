@@ -417,3 +417,90 @@ configured sends a real alert email.
 - **Roadmap pivot:** the original PR6 (`SecretProvider` + encrypted session
   restore) is **obsolete under Via B** — no secrets are stored. If the project
   ever moves to worker-controlled login (Via A), that design revives.
+
+---
+
+## 11. PR7 — Prisma persistence (addendum, added after §1–§10)
+
+> This section supersedes the "not yet wired" claim in §10 and the 332-test
+> count in §2. Commits: `519ecca` (schema), `20301d7` (repositories + wiring).
+> Test count is now **358 passed + 25 skipped** (the 25 are the gated Prisma
+> contract tests). **A migration against a live database has NOT been run yet —
+> see "Pending" below.**
+
+**Design decision (user-approved): relax the schema to the opaque-string domain.**
+The schema modeled `bankId`/reviewer/audit-actor as FKs to `Bank`/`User`, but the
+domain uses opaque strings with no populated Users. Chosen over (a) provisioning
+fake Users for every reviewer/actor string, and (b) scoping PR7 to
+Transaction+ScrapeRun only.
+
+**Schema changes (`prisma/schema.prisma`, commit `519ecca`):**
+- `Transaction`: dropped `reviewedById` + the `reviewedBy User?` relation; added
+  a plain `reviewedBy String?` column.
+- `AuditEvent`: dropped the `actor User?` relation (kept `actorId`/`actorRole`
+  as plain `String?` scalars).
+- Dropped the `EncryptedSessionRef` model entirely (dead under Via B) and the
+  `Bank.sessions` back-reference.
+- Removed the dangling `User.reviews` / `User.auditEvents` back-relations.
+  `User`/`Role`/`UserRole` are **kept** (seeded roles, future PR9 auth).
+- Kept the `Bank` FK on `Transaction`/`ScrapeRun`; repos auto-provision the Bank
+  by `code`. `BankSessionStatus` enum kept (model-less) with an explanatory
+  comment.
+
+**New module `src/modules/persistence/` (commit `20301d7`):**
+- `prisma-client.ts`: globalThis-anchored, **lazily** constructed `PrismaClient`
+  (PrismaPg adapter, `DATABASE_URL` read at access time — never at import, so
+  importing is always safe). Plus domain↔Prisma enum mappers and
+  `upsertBankByCode` (Bank auto-provision).
+- `prisma-transaction-repository.ts` / `prisma-scrape-run-repository.ts` /
+  `prisma-audit-sink.ts`: implement the **exact existing interfaces**.
+  - `bankId` round-trips via `Bank.code` (consumers never see the cuid).
+  - `amount` ↔ `Decimal(18,2)`, returned via `toFixed(2)` to equal
+    `normalizeAmount` output.
+  - dedup via `createMany({ skipDuplicates: true })` on the `sourceHash @unique`
+    constraint; `inserted = count`, `skipped = records.length - inserted`.
+  - not-found semantics matched (`updateReviewState` → null; `createQueued`
+    duplicate / `mark*` missing → throw, same messages as in-memory).
+- Env-switch in `src/app/api/{transactions,scrape-runs,audit}/defaults.ts`:
+  `DATABASE_URL` set → Prisma repo, else in-memory; both anchored on globalThis.
+
+**Contract tests (`src/modules/persistence/contracts/*.contract.ts`):** one
+shared suite per repo, run against the **in-memory** impls always
+(`in-memory-contracts.test.ts`) and against **Prisma** only when
+`RD_SYNC_TEST_DATABASE_URL` is set (`prisma-contracts.test.ts`,
+`describe.skipIf`). Includes a `sourceHash` unique-constraint dedup test and the
+same-day same-amount review-target test. Default `pnpm test` is **DB-free**
+(the 25 Prisma cases skip).
+
+**To exercise the Prisma side (developer command):**
+```bash
+# Use a THROWAWAY database, never the dev DATABASE_URL.
+RD_SYNC_TEST_DATABASE_URL="postgresql://user:pass@localhost:5432/rdsynctest" pnpm db:push
+RD_SYNC_TEST_DATABASE_URL="postgresql://user:pass@localhost:5432/rdsynctest" pnpm test
+```
+*(The contract test sets `DATABASE_URL = RD_SYNC_TEST_DATABASE_URL` in `beforeAll`
+so the repos' `getPrismaClient()` targets the test DB; restored in `afterAll`.)*
+
+**Scrutinize (highest value):**
+- The Prisma repos have **only been verified to compile and pass typecheck/lint**
+  — the 25 contract tests against a real Postgres **have not been executed**
+  (the local DB was down at audit time). The repos' actual runtime behavior
+  against Postgres is unverified. **This is the #1 thing to verify.**
+- `list()` Prisma where/order must reproduce `filterTransactions` /
+  `filterScrapeRuns` exactly — confirm against the contract.
+- `scrapeRunId` is a nullable FK in Prisma but a free string in-memory: a
+  non-existent `scrapeRunId` throws P2003 in Prisma but is silently stored
+  in-memory (a known behavioral difference the judge flagged as low; documented,
+  not yet covered by a contract test).
+- The judge's two high findings were fixed (amount-filter `undefined` OR-branch;
+  the test-DB env wiring). Re-confirm both.
+
+**Pending (requires a running PostgreSQL):**
+1. Run the initial migration (`prisma migrate dev` / `db push`) against the dev
+   DB — **no migration history exists yet** (`prisma/migrations/` absent).
+2. Execute the 25 gated Prisma contract tests against a throwaway test DB.
+3. Live persistence proof: with `DATABASE_URL` set, do a real `run-now`, restart
+   the server, confirm transactions survive (the acceptance criterion).
+
+**Env var added:** `RD_SYNC_TEST_DATABASE_URL` (test-only; points at a throwaway
+DB; never the dev `DATABASE_URL`).
