@@ -39,6 +39,11 @@ enum ScrapeRunStatus {
   NEEDS_ADMIN_ACTION @map("needs_admin_action")
 }
 
+// BankSessionStatus is not referenced by any Prisma model field.
+// It is kept here so that Prisma generates the enum into src/generated/prisma/enums.ts,
+// giving the domain layer (src/modules/bank-sessions/) a single canonical source of
+// truth for status values if it ever needs to persist them. The domain currently uses
+// its own hand-rolled union type (src/modules/bank-sessions/index.ts) instead.
 enum BankSessionStatus {
   ACTIVE             @map("active")
   NEEDS_ADMIN_ACTION @map("needs_admin_action")
@@ -46,14 +51,14 @@ enum BankSessionStatus {
   REVOKED            @map("revoked")
 }
 
+// Change 5: Remove back-relations for reviews and auditEvents from User.
+// User/Role/UserRole remain for future auth (PR9).
 model User {
   id          String     @id @default(cuid())
   email       String     @unique
   displayName String
   status      UserStatus @default(ACTIVE)
   roles       UserRole[]
-  reviews     Transaction[] @relation("TransactionReviewer")
-  auditEvents AuditEvent[]
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 }
@@ -80,17 +85,17 @@ model UserRole {
   @@index([roleId])
 }
 
+// Change 4: DROP sessions EncryptedSessionRef[] from Bank (EncryptedSessionRef model removed).
 model Bank {
-  id          String                @id @default(cuid())
-  code        String                @unique
-  name        String
-  isActive    Boolean               @default(true)
-  accounts    BankAccount[]
-  sessions    EncryptedSessionRef[]
-  scrapeRuns  ScrapeRun[]
+  id           String        @id @default(cuid())
+  code         String        @unique
+  name         String
+  isActive     Boolean       @default(true)
+  accounts     BankAccount[]
+  scrapeRuns   ScrapeRun[]
   transactions Transaction[]
-  createdAt   DateTime              @default(now())
-  updatedAt   DateTime              @updatedAt
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
 }
 
 model BankAccount {
@@ -109,6 +114,7 @@ model BankAccount {
   @@index([bankId])
 }
 
+// Change 2: Remove reviewedById/reviewedBy User relation; add plain reviewedBy String?.
 model Transaction {
   id                 String               @id @default(cuid())
   bankId             String
@@ -124,8 +130,7 @@ model Transaction {
   concept            String?
   originator         String?
   reviewState        ReviewState          @default(NEW)
-  reviewedById       String?
-  reviewedBy         User?                @relation("TransactionReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedBy         String?
   reviewedAt         DateTime?
   scrapeRunId        String?
   scrapeRun          ScrapeRun?           @relation(fields: [scrapeRunId], references: [id], onDelete: SetNull)
@@ -157,25 +162,12 @@ model ScrapeRun {
   @@index([status])
 }
 
-model EncryptedSessionRef {
-  id            String            @id @default(cuid())
-  bankId        String
-  bank          Bank              @relation(fields: [bankId], references: [id], onDelete: Restrict)
-  label         String
-  secretRef     String            @unique
-  status        BankSessionStatus @default(NEEDS_ADMIN_ACTION)
-  expiresAt     DateTime?
-  lastRenewedAt DateTime?
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
+// Change 4: EncryptedSessionRef model DROPPED entirely.
 
-  @@index([bankId, status])
-}
-
+// Change 3: Remove actor User relation from AuditEvent; actorId/actorRole remain as plain String?.
 model AuditEvent {
   id        String   @id @default(cuid())
   actorId   String?
-  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
   actorRole String?
   action    String
   target    String
@@ -187,5 +179,3 @@ model AuditEvent {
   @@index([action, createdAt])
   @@index([target, targetId])
 }
-
-
