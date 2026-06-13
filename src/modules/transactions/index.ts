@@ -76,8 +76,7 @@ interface NormalizeOptions {
 }
 
 export function normalizeBankMovement(movement: BankMovement, options: NormalizeOptions = {}): TransactionRecord {
-  const recordWithoutHash = {
-    id: options.id ?? createSyntheticId(movement),
+  const identity = {
     bankId: normalizeText(movement.bankId) ?? "",
     accountFingerprint: normalizeText(movement.accountFingerprint) ?? "",
     postedAt: normalizeDate(movement.postedAt),
@@ -87,16 +86,22 @@ export function normalizeBankMovement(movement: BankMovement, options: Normalize
     reference: normalizeText(movement.reference),
     concept: normalizeText(movement.concept),
     originator: normalizeText(movement.originator),
+  };
+
+  // Derive the id from the source hash so two movements that differ only in
+  // direction/reference/concept (e.g. a same-day credit and debit of equal
+  // amount) get distinct ids. createSourceHash does not depend on id.
+  const sourceHash = createSourceHash(identity);
+
+  return {
+    ...identity,
+    id: options.id ?? createSyntheticId(sourceHash),
     reviewState: options.reviewState ?? "new",
     reviewedBy: options.reviewedBy ?? null,
     reviewedAt: options.reviewedAt ?? null,
     scrapeRunId: options.scrapeRunId ?? null,
     metadata: options.metadata ?? movement.metadata ?? null,
-  } satisfies Omit<TransactionRecord, "sourceHash">;
-
-  return {
-    ...recordWithoutHash,
-    sourceHash: createSourceHash(recordWithoutHash),
+    sourceHash,
   };
 }
 
@@ -219,10 +224,8 @@ function transactionSearchText(record: TransactionRecord): string {
     .toLowerCase();
 }
 
-function createSyntheticId(movement: BankMovement): string {
-  const postedAt = normalizeDate(movement.postedAt).toISOString();
-  return createHash("sha256")
-    .update(`${movement.bankId}|${movement.accountFingerprint}|${postedAt}|${normalizeAmount(movement.amount)}`)
-    .digest("hex")
-    .slice(0, 16);
+function createSyntheticId(sourceHash: string): string {
+  // sourceHash is "sha256:<hex>"; slice the hex for a stable short id that
+  // inherits the full uniqueness of the source hash inputs.
+  return sourceHash.replace(/^sha256:/, "").slice(0, 16);
 }
