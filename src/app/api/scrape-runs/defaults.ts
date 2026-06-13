@@ -1,3 +1,16 @@
+/**
+ * Default scrape-run repository singleton.
+ *
+ * Env-switch: When DATABASE_URL is set (read at module-load time, consistent
+ * with the existing pattern), the Prisma-backed repository is used instead of
+ * the in-memory one. Both implementations satisfy the same interface so no
+ * consumer code changes are required.
+ *
+ * The instances are anchored on globalThis so that Next.js dev module-graph
+ * hot-reloads and multiple module graphs within the same process share a
+ * single instance.
+ */
+
 import type { JobsOptions } from "bullmq";
 
 import {
@@ -6,8 +19,9 @@ import {
   type DashboardScrapeRun,
   type ScrapeRunFilters,
   type ScrapeRunRecord,
-} from "../../../modules/scrape-runs";
-import type { IngestionJobData, QueueLike } from "../../../worker/queues";
+} from "../../../modules/scrape-runs/index.js";
+import { PrismaScrapeRunRepository } from "../../../modules/persistence/prisma-scrape-run-repository.js";
+import type { IngestionJobData, QueueLike } from "../../../worker/queues/index.js";
 
 // ---------------------------------------------------------------------------
 // InMemoryScheduledIngestionQueue
@@ -26,14 +40,23 @@ export class InMemoryScheduledIngestionQueue implements QueueLike {
 // globalThis anchors — one instance shared across all Next.js module graphs
 // ---------------------------------------------------------------------------
 
+type AnyScrapeRunRepository = InMemoryScrapeRunRepository | PrismaScrapeRunRepository;
+
 const globalRegistry = globalThis as typeof globalThis & {
-  __rdSyncScrapeRunRepository?: InMemoryScrapeRunRepository;
+  __rdSyncScrapeRunRepository?: AnyScrapeRunRepository;
   __rdSyncIngestionQueue?: InMemoryScheduledIngestionQueue;
   __rdSyncPreviewScrapeRunsSeeded?: boolean;
 };
 
-export const defaultScrapeRunRepository =
-  (globalRegistry.__rdSyncScrapeRunRepository ??= new InMemoryScrapeRunRepository());
+function createScrapeRunRepository(): AnyScrapeRunRepository {
+  if (process.env.DATABASE_URL) {
+    return new PrismaScrapeRunRepository();
+  }
+  return new InMemoryScrapeRunRepository();
+}
+
+export const defaultScrapeRunRepository: AnyScrapeRunRepository =
+  (globalRegistry.__rdSyncScrapeRunRepository ??= createScrapeRunRepository());
 
 export const defaultIngestionQueue =
   (globalRegistry.__rdSyncIngestionQueue ??= new InMemoryScheduledIngestionQueue());
