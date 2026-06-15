@@ -423,10 +423,12 @@ configured sends a real alert email.
 ## 11. PR7 — Prisma persistence (addendum, added after §1–§10)
 
 > This section supersedes the "not yet wired" claim in §10 and the 332-test
-> count in §2. Commits: `519ecca` (schema), `20301d7` (repositories + wiring).
-> Test count is now **358 passed + 25 skipped** (the 25 are the gated Prisma
-> contract tests). **A migration against a live database has NOT been run yet —
-> see "Pending" below.**
+> count in §2. Commits: `519ecca` (schema), `20301d7` (repositories + wiring),
+> `ef1e02f` (Turbopack import fix), `79846c8` (docker-compose + initial
+> migration). Test count: **358 passed + 25 skipped** without a DB; **383 passed
+> (0 skipped)** with `RD_SYNC_TEST_DATABASE_URL` set. The migration HAS now been
+> applied and the Prisma path verified live against a real Postgres — see
+> "Verification done" below.
 
 **Design decision (user-approved): relax the schema to the opaque-string domain.**
 The schema modeled `bankId`/reviewer/audit-actor as FKs to `Bank`/`User`, but the
@@ -481,11 +483,18 @@ RD_SYNC_TEST_DATABASE_URL="postgresql://user:pass@localhost:5432/rdsynctest" pnp
 *(The contract test sets `DATABASE_URL = RD_SYNC_TEST_DATABASE_URL` in `beforeAll`
 so the repos' `getPrismaClient()` targets the test DB; restored in `afterAll`.)*
 
+**Turbopack import bug (found + fixed live, commit `ef1e02f`):** PR7 added
+explicit `.js` extensions to relative imports in the persistence layer and the
+three `defaults.ts` files. `tsc`, vitest, and eslint all resolve `.js`→`.ts`, so
+every gate stayed green — but **Next's Turbopack does not**, and the dev server
++ `next build` failed with "Module not found" the instant `DATABASE_URL`
+selected the Prisma repos. This was invisible until a real Postgres was up
+(the Prisma path had never been compiled by Next before). Fixed by matching the
+repo-wide extensionless convention (41 specifiers across 12 files). **Lesson for
+the auditor: the green test/typecheck/lint gates do not exercise the Next
+bundler — the Prisma path must be smoke-tested via `pnpm dev`/`next build`.**
+
 **Scrutinize (highest value):**
-- The Prisma repos have **only been verified to compile and pass typecheck/lint**
-  — the 25 contract tests against a real Postgres **have not been executed**
-  (the local DB was down at audit time). The repos' actual runtime behavior
-  against Postgres is unverified. **This is the #1 thing to verify.**
 - `list()` Prisma where/order must reproduce `filterTransactions` /
   `filterScrapeRuns` exactly — confirm against the contract.
 - `scrapeRunId` is a nullable FK in Prisma but a free string in-memory: a
@@ -495,12 +504,32 @@ so the repos' `getPrismaClient()` targets the test DB; restored in `afterAll`.)*
 - The judge's two high findings were fixed (amount-filter `undefined` OR-branch;
   the test-DB env wiring). Re-confirm both.
 
-**Pending (requires a running PostgreSQL):**
-1. Run the initial migration (`prisma migrate dev` / `db push`) against the dev
-   DB — **no migration history exists yet** (`prisma/migrations/` absent).
-2. Execute the 25 gated Prisma contract tests against a throwaway test DB.
-3. Live persistence proof: with `DATABASE_URL` set, do a real `run-now`, restart
-   the server, confirm transactions survive (the acceptance criterion).
+**Verification done (2026-06-15, against Dockerized Postgres 17):**
+1. ✅ `docker compose up -d` → Postgres healthy; initdb created `rd_sync` +
+   throwaway `rd_sync_test`.
+2. ✅ Initial migration `20260615164511_init` created via `prisma migrate dev`
+   (applied to `rd_sync`) and `prisma migrate deploy` (applied to `rd_sync_test`);
+   `prisma migrate status` → "Database schema is up to date".
+3. ✅ The 25 gated Prisma contract tests **ran against real Postgres and passed**
+   (383/383, 0 skipped). The repos' runtime behavior against Postgres is now
+   verified — not just compiled.
+4. ✅ Live persistence proof through the app: with `DATABASE_URL` set the dev
+   server uses the Prisma repos; a row inserted via `PrismaTransactionRepository`
+   was read back through `GET /api/transactions`, **survived a full server
+   restart**, and carried no `balance` field. Synthetic row truncated afterward.
+
+**Still pending (needs the human Brave session, not the DB):**
+- Full real-bank persistence loop: `run-now` against a live logged-in session →
+  restart → `/api/transactions` still shows the scraped movements. Deferred only
+  because the bank session was `browser_unavailable` at verification time; the
+  DB half of this is already proven by step 4.
+
+**Local dev workflow (committed in `79846c8`):**
+```bash
+docker compose up -d                     # start Postgres (matches dev DATABASE_URL)
+pnpm db:push        # or: pnpm exec prisma migrate deploy   # apply schema
+RD_SYNC_TEST_DATABASE_URL="postgresql://rd_sync:rd_sync@localhost:5432/rd_sync_test" pnpm test
+```
 
 **Env var added:** `RD_SYNC_TEST_DATABASE_URL` (test-only; points at a throwaway
 DB; never the dev `DATABASE_URL`).
