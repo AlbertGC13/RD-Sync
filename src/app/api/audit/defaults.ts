@@ -11,8 +11,8 @@
  * single instance.
  */
 
-import { InMemoryAuditSink } from "../../../modules/audit/index.js";
-import { PrismaAuditSink } from "../../../modules/persistence/prisma-audit-sink.js";
+import { InMemoryAuditSink } from "../../../modules/audit/index";
+import { PrismaAuditSink } from "../../../modules/persistence/prisma-audit-sink";
 
 type AnyAuditSink = InMemoryAuditSink | PrismaAuditSink;
 

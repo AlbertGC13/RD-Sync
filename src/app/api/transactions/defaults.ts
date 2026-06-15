@@ -17,9 +17,9 @@ import {
   toDashboardTransaction,
   type DashboardTransaction,
   type TransactionFilters,
-} from "../../../modules/transactions/index.js";
-import { PrismaTransactionRepository } from "../../../modules/persistence/prisma-transaction-repository.js";
-import { defaultAuditSink } from "../audit/defaults.js";
+} from "../../../modules/transactions/index";
+import { PrismaTransactionRepository } from "../../../modules/persistence/prisma-transaction-repository";
+import { defaultAuditSink } from "../audit/defaults";
 
 export { defaultAuditSink };
 

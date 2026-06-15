@@ -2,14 +2,14 @@
  * Reusable contract suite for audit sink implementations.
  *
  * Usage:
- *   import { runAuditRepositoryContract } from "./contracts/audit-repository.contract.js";
+ *   import { runAuditRepositoryContract } from "./contracts/audit-repository.contract";
  *
  *   runAuditRepositoryContract(() => Promise.resolve({ sink: new InMemoryAuditSink(), cleanup: async () => {} }));
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createAuditEvent } from "../../audit/index.js";
-import type { AuditEvent } from "../../audit/index.js";
+import { createAuditEvent } from "../../audit/index";
+import type { AuditEvent } from "../../audit/index";
 
 export interface AuditSinkHandle {
   sink: {

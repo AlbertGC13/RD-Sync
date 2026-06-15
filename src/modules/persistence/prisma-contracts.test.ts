@@ -21,15 +21,15 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../../generated/prisma/client.js";
+import { PrismaClient } from "../../generated/prisma/client";
 
-import { PrismaTransactionRepository } from "./prisma-transaction-repository.js";
-import { PrismaScrapeRunRepository } from "./prisma-scrape-run-repository.js";
-import { PrismaAuditSink } from "./prisma-audit-sink.js";
+import { PrismaTransactionRepository } from "./prisma-transaction-repository";
+import { PrismaScrapeRunRepository } from "./prisma-scrape-run-repository";
+import { PrismaAuditSink } from "./prisma-audit-sink";
 
-import { runTransactionRepositoryContract } from "./contracts/transaction-repository.contract.js";
-import { runScrapeRunRepositoryContract } from "./contracts/scrape-run-repository.contract.js";
-import { runAuditRepositoryContract } from "./contracts/audit-repository.contract.js";
+import { runTransactionRepositoryContract } from "./contracts/transaction-repository.contract";
+import { runScrapeRunRepositoryContract } from "./contracts/scrape-run-repository.contract";
+import { runAuditRepositoryContract } from "./contracts/audit-repository.contract";
 
 const TEST_DB_URL = process.env.RD_SYNC_TEST_DATABASE_URL;
 const hasTestDb = Boolean(TEST_DB_URL);

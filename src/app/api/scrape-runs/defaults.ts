@@ -19,9 +19,9 @@ import {
   type DashboardScrapeRun,
   type ScrapeRunFilters,
   type ScrapeRunRecord,
-} from "../../../modules/scrape-runs/index.js";
-import { PrismaScrapeRunRepository } from "../../../modules/persistence/prisma-scrape-run-repository.js";
-import type { IngestionJobData, QueueLike } from "../../../worker/queues/index.js";
+} from "../../../modules/scrape-runs/index";
+import { PrismaScrapeRunRepository } from "../../../modules/persistence/prisma-scrape-run-repository";
+import type { IngestionJobData, QueueLike } from "../../../worker/queues/index";
 
 // ---------------------------------------------------------------------------
 // InMemoryScheduledIngestionQueue

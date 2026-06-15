@@ -6,9 +6,9 @@
  * does not re-redact.
  */
 
-import type { Prisma } from "../../generated/prisma/client.js";
-import type { AuditSink, AuditEvent } from "../audit/index.js";
-import { getPrismaClient } from "./prisma-client.js";
+import type { Prisma } from "../../generated/prisma/client";
+import type { AuditSink, AuditEvent } from "../audit/index";
+import { getPrismaClient } from "./prisma-client";
 
 export class PrismaAuditSink implements AuditSink {
   private get prisma() {

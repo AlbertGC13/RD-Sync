@@ -14,13 +14,13 @@
  *   which exactly matches normalizeAmount output ("5424.00").
  */
 
-import type { Prisma } from "../../generated/prisma/client.js";
+import type { Prisma } from "../../generated/prisma/client";
 import type {
   TransactionRecord,
   TransactionFilters,
   ReviewState,
   UpsertResult,
-} from "../transactions/index.js";
+} from "../transactions/index";
 import {
   getPrismaClient,
   toDbDirection,
@@ -28,7 +28,7 @@ import {
   toDbReviewState,
   fromDbReviewState,
   upsertBankByCode,
-} from "./prisma-client.js";
+} from "./prisma-client";
 
 // Type for a Transaction row joined with its Bank (for code lookup).
 type TransactionWithBank = {

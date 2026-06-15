@@ -2,7 +2,7 @@
  * Reusable contract suite for transaction repository implementations.
  *
  * Usage:
- *   import { runTransactionRepositoryContract } from "./contracts/transaction-repository.contract.js";
+ *   import { runTransactionRepositoryContract } from "./contracts/transaction-repository.contract";
  *
  *   runTransactionRepositoryContract(() => Promise.resolve({ repo: new InMemoryTransactionRepository(), cleanup: async () => {} }));
  *
@@ -10,11 +10,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { normalizeBankMovement } from "../../transactions/index.js";
+import { normalizeBankMovement } from "../../transactions/index";
 import type {
   TransactionRecord,
   ReviewState,
-} from "../../transactions/index.js";
+} from "../../transactions/index";
 
 export interface TransactionRepoHandle {
   repo: {

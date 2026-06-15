@@ -12,12 +12,12 @@
  */
 
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../../generated/prisma/client.js";
+import { PrismaClient } from "../../generated/prisma/client";
 import type {
   TransactionDirection as PrismaTransactionDirection,
   ReviewState as PrismaReviewState,
   ScrapeRunStatus as PrismaScrapeRunStatus,
-} from "../../generated/prisma/enums.js";
+} from "../../generated/prisma/enums";
 
 // Re-export enum types for use in repository implementations.
 export type { PrismaTransactionDirection, PrismaReviewState, PrismaScrapeRunStatus };
@@ -55,7 +55,7 @@ export function getPrismaClient(): PrismaClient {
 // ---------------------------------------------------------------------------
 // Prisma enums use UPPERCASE keys that @map to lowercase DB values.
 
-import { TransactionDirection, ReviewState, ScrapeRunStatus } from "../../generated/prisma/enums.js";
+import { TransactionDirection, ReviewState, ScrapeRunStatus } from "../../generated/prisma/enums";
 
 export { TransactionDirection, ReviewState, ScrapeRunStatus };
 

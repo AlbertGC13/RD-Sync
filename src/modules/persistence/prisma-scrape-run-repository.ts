@@ -10,18 +10,18 @@
  * - Sorting: filterScrapeRuns sorts by updatedAt desc; we replicate that.
  */
 
-import type { Prisma } from "../../generated/prisma/client.js";
+import type { Prisma } from "../../generated/prisma/client";
 import type {
   ScrapeRunRecord,
   ScrapeRunFilters,
   CreateQueuedScrapeRunInput,
-} from "../scrape-runs/index.js";
+} from "../scrape-runs/index";
 import {
   getPrismaClient,
   toDbScrapeRunStatus,
   fromDbScrapeRunStatus,
   upsertBankByCode,
-} from "./prisma-client.js";
+} from "./prisma-client";
 
 type ScrapeRunRow = {
   id: string;

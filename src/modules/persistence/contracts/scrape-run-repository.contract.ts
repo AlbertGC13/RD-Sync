@@ -2,13 +2,13 @@
  * Reusable contract suite for scrape-run repository implementations.
  *
  * Usage:
- *   import { runScrapeRunRepositoryContract } from "./contracts/scrape-run-repository.contract.js";
+ *   import { runScrapeRunRepositoryContract } from "./contracts/scrape-run-repository.contract";
  *
  *   runScrapeRunRepositoryContract(() => Promise.resolve({ repo: new InMemoryScrapeRunRepository(), cleanup: async () => {} }));
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import type { ScrapeRunRecord, ScrapeRunFilters } from "../../scrape-runs/index.js";
+import type { ScrapeRunRecord, ScrapeRunFilters } from "../../scrape-runs/index";
 
 export interface ScrapeRunRepoHandle {
   repo: {
