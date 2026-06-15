@@ -518,11 +518,12 @@ bundler — the Prisma path must be smoke-tested via `pnpm dev`/`next build`.**
    was read back through `GET /api/transactions`, **survived a full server
    restart**, and carried no `balance` field. Synthetic row truncated afterward.
 
-**Still pending (needs the human Brave session, not the DB):**
-- Full real-bank persistence loop: `run-now` against a live logged-in session →
-  restart → `/api/transactions` still shows the scraped movements. Deferred only
-  because the bank session was `browser_unavailable` at verification time; the
-  DB half of this is already proven by step 4.
+5. ✅ Full real-bank persistence loop (2026-06-15, live logged-in session):
+   `run-now` ingested 3 real movements into Postgres (confirmed via API and a
+   direct `SELECT count(*)`), they **survived a full server restart**
+   (`countAfterRestart: 3`; in-memory would be 0), and a second `run-now`
+   left the count at 3 — the `sourceHash @unique` dedup holds against the real
+   database. No `balance` field on any row. **PR7 acceptance fully met.**
 
 **Local dev workflow (committed in `79846c8`):**
 ```bash
