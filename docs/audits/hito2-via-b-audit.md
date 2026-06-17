@@ -534,3 +534,75 @@ RD_SYNC_TEST_DATABASE_URL="postgresql://rd_sync:rd_sync@localhost:5432/rd_sync_t
 
 **Env var added:** `RD_SYNC_TEST_DATABASE_URL` (test-only; points at a throwaway
 DB; never the dev `DATABASE_URL`).
+
+---
+
+## 12. PR9 — Real authentication + audit feed (addendum)
+
+> Commits: `04bf258` (auth primitives), `f64766e` (user repo + login/logout),
+> `18dec22` (gating: middleware + layouts + login page), `eb9bf62` (audit feed +
+> seed + runbook), `9b6ce78` (passwordHash migration), `4f67793` (security-review
+> fixes), `dd3ce60` (seed config fix). Replaces blind trusted-header auth with a
+> verified cookie session. Test count: **441 passed + 37 skipped** DB-free;
+> **478 passed (0 skipped)** with `RD_SYNC_TEST_DATABASE_URL`. typecheck + lint clean.
+
+**Model.** node:crypto only (no new deps). Passwords: async `scrypt` + per-user
+random salt, `timingSafeEqual`, stored `scrypt:salt:hash`. Session: stateless
+HMAC-SHA256 signed token (compared over **raw digest bytes**), HttpOnly +
+SameSite=Lax + Secure-in-prod cookie, 8h expiry, secret from
+`RD_SYNC_AUTH_SECRET` (fail-fast at call time). `resolvePrincipal()` verifies the
+cookie first and trusts `x-rd-sync-*` headers ONLY when
+`RD_SYNC_TRUST_PROXY_HEADERS=enabled` (default off) — the unverified-header hole
+is closed by default, with a test proving it.
+
+**Enforcement (two layers).** Edge `middleware.ts` does a cookie-PRESENCE check
+(redirect pages to `/login`, 401 protected APIs) — no crypto on the edge. The
+real boundary is Node-runtime: `(private)/layout.tsx` and `admin/layout.tsx` call
+`getCurrentPrincipal()` (verifies the signed cookie via `next/headers`) and
+redirect/deny; admin requires role `admin`. Protected API routes resolve the
+principal from the cookie. `/admin/audit` is now gated (was the one ungated
+admin route) and shows a paginated, newest-first events table.
+
+**Built incrementally inline + small delegated agents** because the platform API
+was returning 529 Overloaded and killed two full-PR writer agents mid-run; each
+slice was committed so no work was lost. A two-judge adversarial security review
+then ran over the committed diff.
+
+**Security review outcome (9 medium+ findings, all fixed — commit `4f67793`):**
+- HIGH login user-enumeration via timing (scrypt skipped for unknown email) →
+  always verify against a module-level decoy hash.
+- HIGH `scryptSync` blocked the event loop (DoS) → async `scrypt`.
+- HIGH runbook documented the wrong proxy header name → corrected to `x-rd-sync-role`.
+- CRITICAL `passwordHash` column had no migration → added
+  `20260616000000_add_user_password_hash` (additive `ALTER TABLE`).
+- MEDIUM HMAC compared base64url strings → raw bytes; audit page rendered a
+  denial card instead of redirecting unauthenticated → `redirect('/login')`;
+  audit pagination off-by-one → fetch `PAGE_SIZE+1`; added explicit 401 tests
+  for run-now and review routes.
+
+**Live verification (2026-06-16, Dockerized Postgres + dev server):**
+- Migration applied to `rd_sync` + `rd_sync_test`; `passwordHash` column present;
+  478/478 tests green with the test DB (the new `PrismaUserRepository` contract —
+  findByEmail, case-insensitive, highest-role — ran against real Postgres).
+- Admin seeded from `RD_SYNC_ADMIN_EMAIL` (real) + a temporary password.
+- End-to-end through the running app: `GET /login` 200 (middleware/layouts
+  compile under Turbopack); `GET /api/transactions` without cookie → 401; login
+  with correct creds → 200 + signed HttpOnly cookie; wrong password → 401 generic;
+  cookie grants `GET /api/transactions` (3 rows) and `GET /admin/audit` (200,
+  admin); logout clears the cookie.
+
+**Operator setup (the human must do — agents cannot edit `.env`):**
+1. Add to `.env`: `RD_SYNC_AUTH_SECRET=<48+ random bytes>` (generate:
+   `node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'))"`),
+   `RD_SYNC_ADMIN_PASSWORD=<your password>`. `RD_SYNC_ADMIN_EMAIL` already set.
+   Keep `RD_SYNC_TRUST_PROXY_HEADERS` unset/disabled unless a trusted proxy is in front.
+2. `docker compose up -d` → `pnpm exec prisma migrate deploy` → `pnpm prisma:seed`
+   (now wired via `prisma.config.ts`) → restart the server → log in at `/login`.
+
+**Scrutinize / known limits:**
+- A **temporary admin password** was seeded for the live test; the operator must
+  re-seed with their own `RD_SYNC_ADMIN_PASSWORD` (the seed is idempotent).
+- Sessions are **stateless** (cannot be revoked before 8h expiry; rotating
+  `RD_SYNC_AUTH_SECRET` invalidates all). DB-backed sessions are a future upgrade.
+- No login **rate limiting** yet (brute-force throttling is a follow-up).
+- Employees/reviewers are created via seed/DB only; no user-management UI.
