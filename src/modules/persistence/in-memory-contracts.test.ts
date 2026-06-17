@@ -25,3 +25,47 @@ runAuditRepositoryContract(async () => ({
   sink: new InMemoryAuditSink(),
   cleanup: async () => {},
 }));
+
+import { InMemoryUserRepository } from "../auth/user-repository";
+import type { UserAccount } from "../auth/user-repository";
+import { runUserRepositoryContract } from "./contracts/user-repository.contract";
+
+const userSeeds: UserAccount[] = [
+  {
+    id: "u-alice",
+    email: "alice@example.com",
+    displayName: "Alice",
+    role: "admin",
+    status: "active",
+    passwordHash: "hash1",
+  },
+  {
+    id: "u-reviewer",
+    email: "reviewer@example.com",
+    displayName: "Reviewer",
+    role: "reviewer",
+    status: "active",
+    passwordHash: null,
+  },
+  {
+    id: "u-admin",
+    email: "admin@example.com",
+    displayName: "Admin",
+    role: "admin",
+    status: "active",
+    passwordHash: "hash3",
+  },
+  {
+    id: "u-norole",
+    email: "norole@example.com",
+    displayName: "NoRole",
+    role: "viewer",
+    status: "active",
+    passwordHash: null,
+  },
+];
+
+runUserRepositoryContract(async () => ({
+  repo: new InMemoryUserRepository(userSeeds),
+  cleanup: async () => {},
+}));

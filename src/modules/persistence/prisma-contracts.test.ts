@@ -30,6 +30,9 @@ import { PrismaAuditSink } from "./prisma-audit-sink";
 import { runTransactionRepositoryContract } from "./contracts/transaction-repository.contract";
 import { runScrapeRunRepositoryContract } from "./contracts/scrape-run-repository.contract";
 import { runAuditRepositoryContract } from "./contracts/audit-repository.contract";
+import { PrismaUserRepository } from "./prisma-user-repository";
+import { runUserRepositoryContract } from "./contracts/user-repository.contract";
+import { RoleKey } from "../../generated/prisma/enums";
 
 const TEST_DB_URL = process.env.RD_SYNC_TEST_DATABASE_URL;
 const hasTestDb = Boolean(TEST_DB_URL);
@@ -74,6 +77,9 @@ async function truncateTables(): Promise<void> {
   await prisma.transaction.deleteMany();
   await prisma.scrapeRun.deleteMany();
   await prisma.bank.deleteMany();
+  await prisma.userRole.deleteMany();
+  await prisma.user.deleteMany();
+  await prisma.role.deleteMany();
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +113,82 @@ describe.skipIf(!hasTestDb)("Prisma audit sink (requires RD_SYNC_TEST_DATABASE_U
     sink: new PrismaAuditSink(),
     cleanup: truncateTables,
   }));
+});
+
+// ---------------------------------------------------------------------------
+// Prisma user repository contract
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!hasTestDb)("Prisma user repository (requires RD_SYNC_TEST_DATABASE_URL)", () => {
+  runUserRepositoryContract(async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+
+    // Ensure base roles exist (idempotent upsert).
+    const adminRole = await prisma.role.upsert({
+      where: { key: RoleKey.ADMIN },
+      create: { key: RoleKey.ADMIN, name: "Admin", description: "Administrator" },
+      update: {},
+    });
+    const reviewerRole = await prisma.role.upsert({
+      where: { key: RoleKey.REVIEWER },
+      create: { key: RoleKey.REVIEWER, name: "Reviewer", description: "Reviewer" },
+      update: {},
+    });
+
+    // alice — admin role only
+    await prisma.user.create({
+      data: {
+        id: "u-alice",
+        email: "alice@example.com",
+        displayName: "Alice",
+        passwordHash: "hash1",
+        roles: { create: { roleId: adminRole.id } },
+      },
+    });
+
+    // reviewer — reviewer + viewer roles (highest = reviewer)
+    // Note: viewer role not in DB for this seed; reviewer alone is sufficient for the test.
+    await prisma.user.create({
+      data: {
+        id: "u-reviewer",
+        email: "reviewer@example.com",
+        displayName: "Reviewer",
+        passwordHash: null,
+        roles: { create: { roleId: reviewerRole.id } },
+      },
+    });
+
+    // admin — admin + reviewer roles (highest = admin)
+    await prisma.user.create({
+      data: {
+        id: "u-admin",
+        email: "admin@example.com",
+        displayName: "Admin",
+        passwordHash: "hash3",
+        roles: {
+          create: [
+            { roleId: adminRole.id },
+            { roleId: reviewerRole.id },
+          ],
+        },
+      },
+    });
+
+    // norole — no roles assigned (highest = viewer default)
+    await prisma.user.create({
+      data: {
+        id: "u-norole",
+        email: "norole@example.com",
+        displayName: "NoRole",
+        passwordHash: null,
+      },
+    });
+
+    return {
+      repo: new PrismaUserRepository(),
+      cleanup: truncateTables,
+    };
+  });
 });
 
 // ---------------------------------------------------------------------------

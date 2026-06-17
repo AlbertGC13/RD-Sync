@@ -54,13 +54,14 @@ enum BankSessionStatus {
 // Change 5: Remove back-relations for reviews and auditEvents from User.
 // User/Role/UserRole remain for future auth (PR9).
 model User {
-  id          String     @id @default(cuid())
-  email       String     @unique
-  displayName String
-  status      UserStatus @default(ACTIVE)
-  roles       UserRole[]
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+  id            String     @id @default(cuid())
+  email         String     @unique
+  displayName   String
+  status        UserStatus @default(ACTIVE)
+  passwordHash  String?
+  roles         UserRole[]
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
 }
 
 model Role {
