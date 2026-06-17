@@ -72,6 +72,13 @@ function reviewerHeaders(): Record<string, string> {
 // ---------------------------------------------------------------------------
 
 describe("GET /api/bank-sessions/status — auth matrix", () => {
+  beforeEach(() => {
+    process.env.RD_SYNC_TRUST_PROXY_HEADERS = "enabled";
+  });
+
+  afterEach(() => {
+    delete process.env.RD_SYNC_TRUST_PROXY_HEADERS;
+  });
   it("returns 401 when no headers are provided", async () => {
     const handler = createGetBankSessionStatusHandler({
       checker: makeStubChecker(ACTIVE_RESULT),
@@ -163,6 +170,13 @@ describe("GET /api/bank-sessions/status — dev preview principal", () => {
 // ---------------------------------------------------------------------------
 
 describe("GET /api/bank-sessions/status — response shape", () => {
+  beforeEach(() => {
+    process.env.RD_SYNC_TRUST_PROXY_HEADERS = "enabled";
+  });
+
+  afterEach(() => {
+    delete process.env.RD_SYNC_TRUST_PROXY_HEADERS;
+  });
   it("includes session with live check result", async () => {
     const handler = createGetBankSessionStatusHandler({
       checker: makeStubChecker(EXPIRED_RESULT),

@@ -1,10 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { InMemoryAuditSink } from "../../../../../modules/audit";
 import { InMemoryTransactionRepository, normalizeBankMovement } from "../../../../../modules/transactions";
 import { createPatchTransactionReviewHandler } from "./route";
 
 describe("PATCH /api/transactions/[id]/review", () => {
+  beforeEach(() => {
+    process.env.RD_SYNC_TRUST_PROXY_HEADERS = "enabled";
+  });
+
+  afterEach(() => {
+    delete process.env.RD_SYNC_TRUST_PROXY_HEADERS;
+  });
+
   it("denies viewer review updates", async () => {
     const handler = createPatchTransactionReviewHandler({
       auditSink: new InMemoryAuditSink(),

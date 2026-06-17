@@ -1,4 +1,3 @@
-import { headers } from "next/headers";
 import {
   Activity,
   AlertTriangle,
@@ -13,9 +12,9 @@ import {
 
 import {
   assertCanAccessBankSession,
-  resolvePrincipalFromTrustedHeaders,
   type Principal,
 } from "../../../modules/auth";
+import { getCurrentPrincipal } from "../../../modules/auth/server";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../../../components/ui/card";
 import { Badge } from "../../../components/ui/badge";
 import { PageHeader } from "../../../components/ui/page-header";
@@ -48,7 +47,7 @@ export default async function AdminScrapeRunsPage({ searchParams }: AdminScrapeR
   const resolvedSearchParams = searchParams ? await searchParams : {};
   const principal =
     resolvePreviewPrincipal(resolvedSearchParams) ??
-    resolvePrincipalFromTrustedHeaders(await headers());
+    await getCurrentPrincipal();
   const runs = await listScrapeRunsForPage({});
 
   return <AdminScrapeRunsDashboard principal={principal} runs={runs} />;

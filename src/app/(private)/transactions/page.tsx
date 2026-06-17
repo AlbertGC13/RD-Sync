@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
-import { headers } from "next/headers";
 import Link from "next/link";
 import { Inbox, Receipt, Sparkles } from "lucide-react";
 
 import { listTransactionsForPage } from "../../api/transactions/defaults";
-import { canReviewTransactions, resolvePrincipalFromTrustedHeaders } from "../../../modules/auth";
+import { canReviewTransactions } from "../../../modules/auth";
+import { getCurrentPrincipal } from "../../../modules/auth/server";
 import {
   type DashboardTransaction,
   type TransactionFilters,
@@ -30,10 +30,9 @@ export default async function TransactionsPage({ searchParams }: TransactionsPag
   const filters = toTransactionFilters(resolvedSearchParams);
   const transactions = await listTransactionsForPage(filters);
 
-  // Authorization happens at the trusted-header level. The (private) layout
-  // already gates the route, so here we only decide whether to surface
-  // reviewer affordances (FR-011) for the current principal.
-  const principal = resolvePrincipalFromTrustedHeaders(await headers());
+  // The (private) layout already gates this route via getCurrentPrincipal().
+  // Here we only decide whether to surface reviewer affordances (FR-011).
+  const principal = await getCurrentPrincipal();
   const reviewerMode = canReviewTransactions(principal);
 
   const activeCount = countActiveFilters(filters);

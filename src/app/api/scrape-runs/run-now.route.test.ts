@@ -1,10 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { InMemoryScrapeRunRepository } from "../../../modules/scrape-runs";
 import type { IngestionJobData, QueueLike } from "../../../worker/queues";
 import { createPostScrapeRunNowHandler } from "./run-now/route";
 
 describe("POST /api/scrape-runs/run-now", () => {
+  beforeEach(() => {
+    process.env.RD_SYNC_TRUST_PROXY_HEADERS = "enabled";
+  });
+
+  afterEach(() => {
+    delete process.env.RD_SYNC_TRUST_PROXY_HEADERS;
+  });
+
   it("schedules a Popular ingestion run for admins", async () => {
     const scrapeRuns = new InMemoryScrapeRunRepository();
     const queue = new FakeQueue();

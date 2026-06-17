@@ -1,8 +1,7 @@
-import { headers } from "next/headers";
 import Link from "next/link";
 import { Plus } from "lucide-react";
 
-import { resolvePrincipalFromTrustedHeaders } from "../../../modules/auth";
+import { getCurrentPrincipal } from "../../../modules/auth/server";
 import { Badge } from "../../../components/ui/badge";
 import { Button } from "../../../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../../components/ui/card";
@@ -30,7 +29,7 @@ export const popularBankConnection: AdminBankConnection = {
 };
 
 export default async function AdminBankConnectionsPage() {
-  const principal = resolvePrincipalFromTrustedHeaders(await headers());
+  const principal = await getCurrentPrincipal();
 
   return (
     <AdminBankConnectionsDashboard

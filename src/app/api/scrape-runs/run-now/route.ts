@@ -1,4 +1,4 @@
-import { resolvePrincipalFromTrustedHeaders } from "../../../../modules/auth";
+import { resolvePrincipal } from "../../../../modules/auth";
 import { defaultAuditSink } from "../../audit/defaults";
 import { defaultIngestionQueue, defaultScrapeRunRepository } from "../defaults";
 import { defaultIngestionConsumer } from "../consumer-defaults";
@@ -24,7 +24,7 @@ export function createPostScrapeRunNowHandler(dependencies: RunNowHandlerDepende
   return async function postScrapeRunNow(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const principal =
-      resolveApiPreviewPrincipal(url.searchParams) ?? resolvePrincipalFromTrustedHeaders(request.headers);
+      resolveApiPreviewPrincipal(url.searchParams) ?? resolvePrincipal(request);
     const payload = await readOptionalJson(request);
 
     try {

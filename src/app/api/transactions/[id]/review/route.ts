@@ -1,5 +1,5 @@
 import { createAuditEvent, type AuditSink } from "../../../../../modules/audit";
-import { requireRole, resolvePrincipalFromTrustedHeaders } from "../../../../../modules/auth";
+import { requireRole, resolvePrincipal } from "../../../../../modules/auth";
 import {
   type InMemoryTransactionRepository,
   type ReviewState,
@@ -27,7 +27,7 @@ const allowedReviewStates = new Set<ReviewState>(["seen", "internally_validated"
 
 export function createPatchTransactionReviewHandler(dependencies: ReviewRouteDependencies) {
   return async function patchTransactionReview(request: Request, context: ReviewRouteContext): Promise<Response> {
-    const principal = resolvePrincipalFromTrustedHeaders(request.headers);
+    const principal = resolvePrincipal(request);
 
     let authorizedPrincipal;
     try {

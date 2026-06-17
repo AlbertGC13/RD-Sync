@@ -1,4 +1,4 @@
-import { resolvePrincipalFromTrustedHeaders, requireRole } from "../../../../modules/auth";
+import { resolvePrincipal, requireRole } from "../../../../modules/auth";
 import type { CdpSessionChecker, BankSessionCheckResult, BankSessionMonitor } from "../../../../modules/bank-sessions";
 import {
   defaultSessionChecker,
@@ -30,7 +30,7 @@ export function createGetBankSessionStatusHandler(
     const url = new URL(request.url);
     const principal =
       resolveApiPreviewPrincipal(url.searchParams) ??
-      resolvePrincipalFromTrustedHeaders(request.headers);
+      resolvePrincipal(request);
 
     try {
       requireRole(principal, ["admin"]);

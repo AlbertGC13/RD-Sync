@@ -1,8 +1,7 @@
-import { headers } from "next/headers";
 import Link from "next/link";
 import { TriangleAlert } from "lucide-react";
 
-import { resolvePrincipalFromTrustedHeaders } from "../../../../../modules/auth";
+import { getCurrentPrincipal } from "../../../../../modules/auth/server";
 import { Badge } from "../../../../../components/ui/badge";
 import { Button } from "../../../../../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../../../../components/ui/card";
@@ -19,7 +18,7 @@ export default async function BankConnectionSessionPage({
 }: BankConnectionSessionPageProps) {
   const [{ id }, principal] = await Promise.all([
     params,
-    headers().then(resolvePrincipalFromTrustedHeaders),
+    getCurrentPrincipal(),
   ]);
 
   return <BankSessionShell connectionId={id} principal={principal} />;

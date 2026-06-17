@@ -1,5 +1,4 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { headers } from "next/headers";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -9,9 +8,25 @@ import {
   summarizeScrapeRuns,
   type AdminScrapeRun,
 } from "./page";
+import { signSession } from "../../../modules/auth/session";
 
+const TEST_SECRET = "test-secret-for-page-test";
+
+function makeAdminToken() {
+  return signSession(
+    { userId: "admin-1", role: "admin", expiresAt: Date.now() + 86_400_000 },
+    TEST_SECRET,
+  );
+}
+
+// Mock next/headers: cookies() returns an admin session cookie.
+// getCurrentPrincipal() will call getAuthSecret() then verifySession().
 vi.mock("next/headers", () => ({
   headers: vi.fn(),
+  cookies: vi.fn().mockImplementation(async () => ({
+    get: (name: string) =>
+      name === "rd_sync_session" ? { value: makeAdminToken() } : undefined,
+  })),
 }));
 
 const runs: AdminScrapeRun[] = [
@@ -49,15 +64,12 @@ const runs: AdminScrapeRun[] = [
 
 describe("AdminScrapeRunsDashboard", () => {
   it("does not render hard-coded preview runs from the page when local preview is disabled", async () => {
-    const previousValue = process.env.RD_SYNC_DEV_PREVIEW;
-    vi.mocked(headers).mockResolvedValue(
-      new Headers({
-        "x-rd-sync-user-id": "admin-1",
-        "x-rd-sync-role": "admin",
-      }) as never,
-    );
+    const previousSecret = process.env.RD_SYNC_AUTH_SECRET;
+    const previousPreview = process.env.RD_SYNC_DEV_PREVIEW;
 
     try {
+      // Provide the auth secret so getCurrentPrincipal can verify the cookie.
+      process.env.RD_SYNC_AUTH_SECRET = TEST_SECRET;
       delete process.env.RD_SYNC_DEV_PREVIEW;
 
       const html = renderToStaticMarkup(
@@ -68,11 +80,15 @@ describe("AdminScrapeRunsDashboard", () => {
       expect(html).not.toContain("Bank session requires admin MFA action");
       expect(html).not.toContain("preview-run-");
     } finally {
-      vi.mocked(headers).mockReset();
-      if (previousValue === undefined) {
+      if (previousSecret === undefined) {
+        delete process.env.RD_SYNC_AUTH_SECRET;
+      } else {
+        process.env.RD_SYNC_AUTH_SECRET = previousSecret;
+      }
+      if (previousPreview === undefined) {
         delete process.env.RD_SYNC_DEV_PREVIEW;
       } else {
-        process.env.RD_SYNC_DEV_PREVIEW = previousValue;
+        process.env.RD_SYNC_DEV_PREVIEW = previousPreview;
       }
     }
   });

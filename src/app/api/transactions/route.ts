@@ -1,5 +1,5 @@
 import { createAuditEvent, type AuditSink } from "../../../modules/audit";
-import { requireRole, resolvePrincipalFromTrustedHeaders } from "../../../modules/auth";
+import { requireRole, resolvePrincipal } from "../../../modules/auth";
 import {
   type InMemoryTransactionRepository,
   type TransactionFilters,
@@ -21,7 +21,7 @@ const defaultDependencies: TransactionsRouteDependencies = {
 
 export function createGetTransactionsHandler(dependencies: TransactionsRouteDependencies) {
   return async function getTransactions(request: Request): Promise<Response> {
-    const principal = resolvePrincipalFromTrustedHeaders(request.headers);
+    const principal = resolvePrincipal(request);
 
     let authorizedPrincipal;
     try {
