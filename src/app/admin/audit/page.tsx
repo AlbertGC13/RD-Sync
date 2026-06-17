@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import Link from "next/link";
 import { ScrollText, ShieldAlert, ShieldCheck } from "lucide-react";
 
 import { getCurrentPrincipal } from "../../../modules/auth/server";
@@ -181,12 +182,12 @@ export default async function AdminAuditPage({ searchParams }: AdminAuditPagePro
             >
               <div>
                 {hasPrev ? (
-                  <a
+                  <Link
                     href={`?page=${page - 1}`}
                     className="rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted/40 transition-colors"
                   >
                     ← Previous
-                  </a>
+                  </Link>
                 ) : (
                   <span aria-hidden className="invisible rounded-md border border-border px-3 py-1.5 text-sm font-medium">
                     ← Previous
@@ -196,12 +197,12 @@ export default async function AdminAuditPage({ searchParams }: AdminAuditPagePro
               <span className="text-xs text-muted-foreground">Page {page}</span>
               <div>
                 {hasNext ? (
-                  <a
+                  <Link
                     href={`?page=${page + 1}`}
                     className="rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted/40 transition-colors"
                   >
                     Next →
-                  </a>
+                  </Link>
                 ) : (
                   <span aria-hidden className="invisible rounded-md border border-border px-3 py-1.5 text-sm font-medium">
                     Next →

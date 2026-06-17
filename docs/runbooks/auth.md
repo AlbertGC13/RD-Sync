@@ -89,3 +89,30 @@ Pagination: append `?page=N` (N ≥ 1) to the URL. Each page returns up to 50 ev
 - **Restart after auth/env changes.** Next.js dev server caches module state. If you change `RD_SYNC_AUTH_SECRET` or any auth-related env var, restart the dev server to pick up the new value.
 - **Middleware vs. server-side check.** The middleware (`middleware.ts`) checks for the presence of the session cookie to gate routes at the edge. The full cryptographic verification happens server-side (in `getCurrentPrincipal()` / `verifySession()`). A forged or expired cookie will pass the middleware gate but fail the server-side check — the page will render the access-denied state.
 - **DB migration before login.** The `passwordHash` column (and the `User`, `Role`, `UserRole` tables) must be present before login works. Run `pnpm db:push` or `pnpm prisma migrate deploy` before attempting to seed or log in.
+
+---
+
+## Login protection
+
+### IP-based rate limiting
+
+Login attempts are rate-limited by **client IP address** (not by email). Keying by email would allow an attacker to lock out a specific account via DoS.
+
+| Setting | Default |
+|---|---|
+| Max failed attempts | 5 |
+| Window | 15 minutes |
+| Storage | In-memory per-process |
+| Reset | On process restart |
+
+A throttled request receives **429** with a `Retry-After` header (seconds). The 429 fires **before** the user lookup, so the response is email-agnostic and does not leak whether an address exists.
+
+**Proxy requirement:** The IP is derived from `x-forwarded-for` (first hop), then `x-real-ip`, falling back to `"unknown"` (a single shared bucket). For correct per-client IP isolation, a trusted reverse proxy or load balancer **must** set one of these headers.
+
+**Limitation:** In-memory state is per-process and resets on restart. For multi-instance or serverless deployments, replace `InMemoryRateLimiter` with a shared backend (Redis, etc.) via the `RateLimiter` interface in `src/modules/auth/rate-limiter.ts`.
+
+### Response-time floor
+
+A minimum response time of **250 ms** is enforced on the **200 success** and **401 invalid-credentials** paths. This masks the database hit/miss timing delta that can otherwise let an attacker distinguish known from unknown email addresses even after the constant-time scrypt decoy-hash fix.
+
+The 429 throttled path is exempt (no floor applied).

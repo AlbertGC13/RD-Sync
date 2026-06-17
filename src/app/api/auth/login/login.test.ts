@@ -12,6 +12,14 @@ import { hashPassword } from "../../../../modules/auth/password";
 import { verifySession } from "../../../../modules/auth/session";
 import { SESSION_COOKIE_NAME } from "../../../../modules/auth/cookie";
 import type { UserAccount } from "../../../../modules/auth/user-repository";
+import type { RateLimiter } from "../../../../modules/auth/rate-limiter";
+
+// Pass-through rate limiter so existing tests are unaffected by the shared
+// module-level bucket state accumulated during other test runs.
+const passThroughLimiter: RateLimiter = {
+  check: () => ({ allowed: true }),
+  recordFailure: () => { /* no-op */ },
+};
 
 const TEST_SECRET = "test-secret-for-login-handler-x9z";
 const FIXED_NOW = 1_000_000;
@@ -60,6 +68,11 @@ function makeHandler(users?: UserAccount[]) {
     secret: TEST_SECRET,
     clock: () => FIXED_NOW,
     decoyHash: testDecoyHash,
+    // Inject a pass-through limiter and no-op delay so these tests stay
+    // isolated from module-level state and run without sleeping.
+    rateLimiter: passThroughLimiter,
+    delay: () => Promise.resolve(),
+    floorMs: 0,
   });
 }
 
