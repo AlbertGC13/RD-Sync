@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { createLoginHandler } from "./route";
 import { InMemoryUserRepository } from "../../../../modules/auth/user-repository";
-import { hashPassword } from "../../../../modules/auth/password";
+import { hashPassword, verifyPassword as realVerifyPassword } from "../../../../modules/auth/password";
 import type { UserAccount } from "../../../../modules/auth/user-repository";
 import type { RateLimiter } from "../../../../modules/auth/rate-limiter";
 
@@ -499,86 +499,90 @@ describe("createLoginHandler — response-time floor", () => {
 // ---------------------------------------------------------------------------
 
 describe("createLoginHandler — constant-work regression", () => {
-  it("runs verifyPassword (via decoyHash) for unknown email", async () => {
-    let verifyCalled = false;
+  // A counting verify that delegates to the real scrypt verifyPassword so the
+  // login outcome stays realistic (correct password → true, wrong → false),
+  // while recording exactly which (password, storedHash) pairs were checked.
+  // This proves verifyPassword runs ONCE on every path; a future short-circuit
+  // that skipped it for, say, unknown emails would drop the count to 0 and fail.
+  function makeCountingVerify(): {
+    verify: (plain: string, stored: string) => Promise<boolean>;
+    calls: Array<{ plain: string; stored: string }>;
+  } {
+    const calls: Array<{ plain: string; stored: string }> = [];
+    return {
+      verify: async (plain, stored) => {
+        calls.push({ plain, stored });
+        return realVerifyPassword(plain, stored);
+      },
+      calls,
+    };
+  }
 
-    // We detect verify ran by using a decoyHash that only resolves after being "checked"
-    const sentinelDecoyHash = hashPassword("sentinel-decoy");
-    // We can't intercept verifyPassword directly without vi.mock, so we instead
-    // observe that the decoyHash promise is awaited by measuring behavior:
-    // unknown email → candidateHash === decoy → verifyPassword(plain, decoy) is called.
-    // We verify this indirectly: the response must be 401, not an exception or short-circuit.
-    // The decoy hash test below verifies that the flow completes correctly.
-
-    const handler = createLoginHandler({
-      users: new InMemoryUserRepository([alice]),
-      secret: TEST_SECRET,
-      clock: () => FIXED_NOW,
-      decoyHash: (async () => {
-        verifyCalled = true;
-        return sentinelDecoyHash;
-      })(),
-      rateLimiter: makePassLimiter(),
-      delay: () => Promise.resolve(),
-      floorMs: 0,
-    });
-
-    const res = await handler(makeRequest({ email: "unknown@example.com", password: "any" }));
-    expect(res.status).toBe(401);
-    // The decoy promise was awaited (getDecoyHash() path was taken for unknown email)
-    expect(verifyCalled).toBe(true);
-  });
-
-  it("runs verifyPassword for disabled user (uses user hash, not decoy)", async () => {
-    // Disabled user has a real passwordHash — scrypt runs against it.
-    // We just assert the result is 401, not an exception or 200.
-    const handler = createLoginHandler({
-      users: new InMemoryUserRepository([alice, disabledUser]),
+  function makeHandler(
+    users: UserAccount[],
+    verify: (plain: string, stored: string) => Promise<boolean>,
+  ) {
+    return createLoginHandler({
+      users: new InMemoryUserRepository(users),
       secret: TEST_SECRET,
       clock: () => FIXED_NOW,
       decoyHash: testDecoyHash,
       rateLimiter: makePassLimiter(),
       delay: () => Promise.resolve(),
       floorMs: 0,
+      verify,
     });
+  }
 
-    const res = await handler(makeRequest({ email: "disabled@example.com", password: "some-password" }));
+  it("verifies exactly once against the DECOY hash for an unknown email", async () => {
+    const { verify, calls } = makeCountingVerify();
+    const decoy = await testDecoyHash;
+    const res = await makeHandler([alice], verify)(
+      makeRequest({ email: "unknown@example.com", password: "any" }),
+    );
     expect(res.status).toBe(401);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ plain: "any", stored: decoy });
   });
 
-  it("runs verifyPassword for null-hash user (uses decoy)", async () => {
-    let decoyAwaited = false;
-    const handler = createLoginHandler({
-      users: new InMemoryUserRepository([alice, noHashUser]),
-      secret: TEST_SECRET,
-      clock: () => FIXED_NOW,
-      decoyHash: (async () => {
-        decoyAwaited = true;
-        return testDecoyHash;
-      })(),
-      rateLimiter: makePassLimiter(),
-      delay: () => Promise.resolve(),
-      floorMs: 0,
-    });
-
-    const res = await handler(makeRequest({ email: "nohash@example.com", password: "any" }));
+  it("verifies exactly once against the DECOY hash for a null-hash user", async () => {
+    const { verify, calls } = makeCountingVerify();
+    const decoy = await testDecoyHash;
+    const res = await makeHandler([alice, noHashUser], verify)(
+      makeRequest({ email: "nohash@example.com", password: "any" }),
+    );
     expect(res.status).toBe(401);
-    expect(decoyAwaited).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].stored).toBe(decoy);
   });
 
-  it("runs verifyPassword for wrong password (uses user hash)", async () => {
-    // Wrong password → passwordValid = false → 401. Scrypt ran.
-    const handler = createLoginHandler({
-      users: new InMemoryUserRepository([alice]),
-      secret: TEST_SECRET,
-      clock: () => FIXED_NOW,
-      decoyHash: testDecoyHash,
-      rateLimiter: makePassLimiter(),
-      delay: () => Promise.resolve(),
-      floorMs: 0,
-    });
-
-    const res = await handler(makeRequest({ email: "alice@example.com", password: "bad-pw" }));
+  it("verifies exactly once against the USER hash for a disabled user", async () => {
+    const { verify, calls } = makeCountingVerify();
+    const res = await makeHandler([alice, disabledUser], verify)(
+      makeRequest({ email: "disabled@example.com", password: "some-password" }),
+    );
     expect(res.status).toBe(401);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].stored).toBe(disabledUser.passwordHash);
+  });
+
+  it("verifies exactly once against the USER hash for a wrong password", async () => {
+    const { verify, calls } = makeCountingVerify();
+    const res = await makeHandler([alice], verify)(
+      makeRequest({ email: "alice@example.com", password: "bad-pw" }),
+    );
+    expect(res.status).toBe(401);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ plain: "bad-pw", stored: alice.passwordHash });
+  });
+
+  it("verifies exactly once against the USER hash on a successful login", async () => {
+    const { verify, calls } = makeCountingVerify();
+    const res = await makeHandler([alice], verify)(
+      makeRequest({ email: "alice@example.com", password: "correct-password" }),
+    );
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].stored).toBe(alice.passwordHash);
   });
 });

@@ -129,12 +129,19 @@ export interface LoginHandlerDeps {
   delay?: (ms: number) => Promise<void>;
   /** Minimum response time (ms) for 200 and 401 paths. Default: 250. */
   floorMs?: number;
+  /**
+   * Password verification function. Default: the real scrypt verifyPassword.
+   * Injectable so tests can assert it runs on every path (constant-work
+   * guarantee) without mocking the module.
+   */
+  verify?: (plain: string, stored: string) => Promise<boolean>;
 }
 
 export function createLoginHandler(deps: LoginHandlerDeps) {
   const rateLimiter = deps.rateLimiter ?? defaultRateLimiter;
   const delay = deps.delay ?? realDelay;
   const floorMs = deps.floorMs ?? DEFAULT_FLOOR_MS;
+  const verify = deps.verify ?? verifyPassword;
 
   return async function POST(request: Request): Promise<Response> {
     // --- Rate limit check (before user lookup, IP-scoped, email-agnostic) ---
@@ -183,7 +190,7 @@ export function createLoginHandler(deps: LoginHandlerDeps) {
     // not possible.
     const decoy = await (deps.decoyHash ?? getDecoyHash());
     const candidateHash = user?.passwordHash ?? decoy;
-    const passwordValid = await verifyPassword(password, candidateHash);
+    const passwordValid = await verify(password, candidateHash);
 
     if (
       !user ||
