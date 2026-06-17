@@ -44,8 +44,14 @@ export function redactAuditMetadata(metadata: Record<string, unknown>): Record<s
   );
 }
 
+export interface AuditListOptions {
+  limit?: number;
+  offset?: number;
+}
+
 export interface AuditSink {
   record(event: AuditEvent): Promise<void>;
+  list(options?: AuditListOptions): Promise<AuditEvent[]>;
 }
 
 export class InMemoryAuditSink implements AuditSink {
@@ -55,8 +61,14 @@ export class InMemoryAuditSink implements AuditSink {
     this.events.push(event);
   }
 
-  async list(): Promise<AuditEvent[]> {
-    return [...this.events];
+  async list(options?: AuditListOptions): Promise<AuditEvent[]> {
+    // Sort newest-first; for equal timestamps preserve insertion order (desc index).
+    const sorted = [...this.events].sort(
+      (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+    );
+    const offset = options?.offset ?? 0;
+    const sliced = offset > 0 ? sorted.slice(offset) : sorted;
+    return options?.limit !== undefined ? sliced.slice(0, options.limit) : sliced;
   }
 }
 

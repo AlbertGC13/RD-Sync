@@ -14,7 +14,7 @@ import type { AuditEvent } from "../../audit/index";
 export interface AuditSinkHandle {
   sink: {
     record(event: AuditEvent): Promise<void>;
-    list(): Promise<AuditEvent[]>;
+    list(options?: { limit?: number; offset?: number }): Promise<AuditEvent[]>;
   };
   cleanup(): Promise<void>;
 }
@@ -60,9 +60,9 @@ export function runAuditRepositoryContract(
     });
 
     // -------------------------------------------------------------------------
-    // list — ordered by insertion / createdAt
+    // list — ordered newest-first
     // -------------------------------------------------------------------------
-    it("lists events in insertion order (in-memory) or createdAt ascending (DB)", async () => {
+    it("lists events newest-first (createdAt DESC)", async () => {
       const earlier: AuditEvent = {
         ...createAuditEvent({
           actorId: "u-1",
@@ -84,17 +84,64 @@ export function runAuditRepositoryContract(
         createdAt: new Date("2026-06-07T13:00:00.000Z"),
       };
 
-      // Insert in chronological order — both in-memory (insertion-order) and
-      // Prisma (createdAt-order) should then return them in the same order.
       await handle.sink.record(earlier);
       await handle.sink.record(later);
 
       const events = await handle.sink.list();
       const actions = events.map((e) => e.action);
 
-      expect(actions.indexOf("transaction.reviewed")).toBeLessThan(
-        actions.indexOf("transaction.ignored"),
+      // Newer event (ignored, 13:00) must come before older event (reviewed, 12:00).
+      expect(actions.indexOf("transaction.ignored")).toBeLessThan(
+        actions.indexOf("transaction.reviewed"),
       );
+    });
+
+    // -------------------------------------------------------------------------
+    // list — no options returns all events
+    // -------------------------------------------------------------------------
+    it("returns all events when called with no options", async () => {
+      const e1 = createAuditEvent({ actorId: null, actorRole: null, action: "a1", target: "t" });
+      const e2 = createAuditEvent({ actorId: null, actorRole: null, action: "a2", target: "t" });
+      const e3 = createAuditEvent({ actorId: null, actorRole: null, action: "a3", target: "t" });
+      await handle.sink.record(e1);
+      await handle.sink.record(e2);
+      await handle.sink.record(e3);
+      const events = await handle.sink.list();
+      expect(events).toHaveLength(3);
+    });
+
+    // -------------------------------------------------------------------------
+    // list — limit
+    // -------------------------------------------------------------------------
+    it("honours limit option", async () => {
+      const base = new Date("2026-06-07T10:00:00.000Z");
+      for (let i = 0; i < 5; i++) {
+        const e: AuditEvent = {
+          ...createAuditEvent({ actorId: null, actorRole: null, action: `action-${i}`, target: "t" }),
+          createdAt: new Date(base.getTime() + i * 1000),
+        };
+        await handle.sink.record(e);
+      }
+      const events = await handle.sink.list({ limit: 3 });
+      expect(events).toHaveLength(3);
+    });
+
+    // -------------------------------------------------------------------------
+    // list — offset
+    // -------------------------------------------------------------------------
+    it("honours offset option", async () => {
+      const base = new Date("2026-06-07T10:00:00.000Z");
+      for (let i = 0; i < 5; i++) {
+        const e: AuditEvent = {
+          ...createAuditEvent({ actorId: null, actorRole: null, action: `ev-${i}`, target: "t" }),
+          createdAt: new Date(base.getTime() + i * 1000),
+        };
+        await handle.sink.record(e);
+      }
+      const all = await handle.sink.list();
+      const paged = await handle.sink.list({ offset: 2 });
+      expect(paged).toHaveLength(3);
+      expect(paged[0].action).toBe(all[2].action);
     });
 
     // -------------------------------------------------------------------------

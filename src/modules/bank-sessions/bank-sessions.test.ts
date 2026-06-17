@@ -83,6 +83,9 @@ function makeAuditSink(): { sink: AuditSink; events: AuditEvent[] } {
     async record(event: AuditEvent): Promise<void> {
       events.push(event);
     },
+    async list(): Promise<AuditEvent[]> {
+      return [...events];
+    },
   };
   return { sink, events };
 }
@@ -91,6 +94,9 @@ function makeThrowingAuditSink(): AuditSink {
   return {
     async record(): Promise<void> {
       throw new Error("audit failed");
+    },
+    async list(): Promise<AuditEvent[]> {
+      return [];
     },
   };
 }

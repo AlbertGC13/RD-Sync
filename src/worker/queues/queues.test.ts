@@ -158,14 +158,17 @@ describe("ingestion processor — audit events", () => {
 
     const events = await auditSink.list();
     expect(events).toHaveLength(2);
-    expect(events[0]).toMatchObject({
+    // list() returns newest-first; find by action to remain order-independent.
+    const startedEvent = events.find((e) => e.action === "scrape_run.started");
+    const succeededEvent = events.find((e) => e.action === "scrape_run.succeeded");
+    expect(startedEvent).toMatchObject({
       actorId: "system:ingestion-worker",
       action: "scrape_run.started",
       target: "scrape_run",
       targetId: "run-1",
       metadata: { bankId: "popular" },
     });
-    expect(events[1]).toMatchObject({
+    expect(succeededEvent).toMatchObject({
       actorId: "system:ingestion-worker",
       action: "scrape_run.succeeded",
       target: "scrape_run",
@@ -193,9 +196,9 @@ describe("ingestion processor — audit events", () => {
 
     const events = await auditSink.list();
     expect(events).toHaveLength(2);
-    expect(events[0]).toMatchObject({ action: "scrape_run.started", targetId: "run-1" });
-    expect(events[1]).toMatchObject({
-      action: "scrape_run.needs_admin_action",
+    // list() returns newest-first; find by action to remain order-independent.
+    expect(events.find((e) => e.action === "scrape_run.started")).toMatchObject({ targetId: "run-1" });
+    expect(events.find((e) => e.action === "scrape_run.needs_admin_action")).toMatchObject({
       targetId: "run-1",
       metadata: { bankId: "popular", safeErrorSummary: "Bank session requires admin MFA action" },
     });
@@ -218,7 +221,9 @@ describe("ingestion processor — audit events", () => {
 
     const events = await auditSink.list();
     expect(events).toHaveLength(2);
-    expect(events[1]).toMatchObject({
+    // list() returns newest-first; find by action to remain order-independent.
+    const failedEvent = events.find((e) => e.action === "scrape_run.failed");
+    expect(failedEvent).toMatchObject({
       action: "scrape_run.failed",
       targetId: "run-1",
       metadata: {
@@ -226,7 +231,7 @@ describe("ingestion processor — audit events", () => {
         safeErrorSummary: "selector missing [REDACTED] [REDACTED] account [REDACTED_ACCOUNT]",
       },
     });
-    const failedMetadata = events[1].metadata as Record<string, unknown>;
+    const failedMetadata = failedEvent?.metadata as Record<string, unknown>;
     expect(JSON.stringify(failedMetadata)).not.toContain("secret");
     expect(JSON.stringify(failedMetadata)).not.toContain("abc");
   });

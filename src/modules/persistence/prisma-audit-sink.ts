@@ -7,7 +7,7 @@
  */
 
 import type { Prisma } from "../../generated/prisma/client";
-import type { AuditSink, AuditEvent } from "../audit/index";
+import type { AuditSink, AuditEvent, AuditListOptions } from "../audit/index";
 import { getPrismaClient } from "./prisma-client";
 
 export class PrismaAuditSink implements AuditSink {
@@ -31,12 +31,14 @@ export class PrismaAuditSink implements AuditSink {
   }
 
   /**
-   * List all audit events ordered by createdAt ascending.
-   * Provided for parity with InMemoryAuditSink.list() and for contract tests.
+   * List audit events ordered newest-first (createdAt DESC, id DESC for
+   * stable tie-breaking). Supports optional offset/limit pagination.
    */
-  async list(): Promise<AuditEvent[]> {
+  async list(options?: AuditListOptions): Promise<AuditEvent[]> {
     const rows = await this.prisma.auditEvent.findMany({
-      orderBy: { createdAt: "asc" },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      ...(options?.offset !== undefined ? { skip: options.offset } : {}),
+      ...(options?.limit !== undefined ? { take: options.limit } : {}),
     });
 
     return rows.map((row) => ({

@@ -43,4 +43,68 @@ describe("audit events", () => {
       }),
     ]);
   });
+
+  describe("InMemoryAuditSink.list() — pagination and ordering", () => {
+    function makeEvent(action: string): Parameters<typeof createAuditEvent>[0] {
+      return { actorId: null, actorRole: null, action, target: "t" };
+    }
+
+    it("returns events newest-first when no options provided", async () => {
+      const sink = new InMemoryAuditSink();
+      const base = new Date("2026-06-07T10:00:00.000Z");
+
+      const older = { ...createAuditEvent(makeEvent("older")), createdAt: base };
+      const newer = { ...createAuditEvent(makeEvent("newer")), createdAt: new Date(base.getTime() + 60_000) };
+
+      await sink.record(older);
+      await sink.record(newer);
+
+      const events = await sink.list();
+      expect(events[0].action).toBe("newer");
+      expect(events[1].action).toBe("older");
+    });
+
+    it("returns all events when called with no options (backward compat)", async () => {
+      const sink = new InMemoryAuditSink();
+      for (let i = 0; i < 4; i++) {
+        await sink.record(createAuditEvent({ actorId: null, actorRole: null, action: `a${i}`, target: "t" }));
+      }
+      expect((await sink.list()).length).toBe(4);
+    });
+
+    it("limits the result to the requested count", async () => {
+      const sink = new InMemoryAuditSink();
+      const base = new Date("2026-06-07T10:00:00.000Z");
+      for (let i = 0; i < 5; i++) {
+        const e = { ...createAuditEvent({ actorId: null, actorRole: null, action: `ev${i}`, target: "t" }), createdAt: new Date(base.getTime() + i * 1000) };
+        await sink.record(e);
+      }
+      const events = await sink.list({ limit: 2 });
+      expect(events).toHaveLength(2);
+    });
+
+    it("skips the requested number of events (offset)", async () => {
+      const sink = new InMemoryAuditSink();
+      const base = new Date("2026-06-07T10:00:00.000Z");
+      for (let i = 0; i < 5; i++) {
+        const e = { ...createAuditEvent({ actorId: null, actorRole: null, action: `ev${i}`, target: "t" }), createdAt: new Date(base.getTime() + i * 1000) };
+        await sink.record(e);
+      }
+      const all = await sink.list();
+      const paged = await sink.list({ offset: 2 });
+      expect(paged).toHaveLength(3);
+      expect(paged[0].action).toBe(all[2].action);
+    });
+
+    it("applies both offset and limit together", async () => {
+      const sink = new InMemoryAuditSink();
+      const base = new Date("2026-06-07T10:00:00.000Z");
+      for (let i = 0; i < 6; i++) {
+        const e = { ...createAuditEvent({ actorId: null, actorRole: null, action: `ev${i}`, target: "t" }), createdAt: new Date(base.getTime() + i * 1000) };
+        await sink.record(e);
+      }
+      const events = await sink.list({ offset: 2, limit: 3 });
+      expect(events).toHaveLength(3);
+    });
+  });
 });

@@ -1,23 +1,64 @@
-import { ScrollText, ShieldCheck } from "lucide-react";
+import { ScrollText, ShieldAlert, ShieldCheck } from "lucide-react";
 
+import { getCurrentPrincipal } from "../../../modules/auth/server";
+import { defaultAuditSink } from "../../api/audit/defaults";
 import { PageHeader } from "../../../components/ui/page-header";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../../../components/ui/card";
 import { Badge } from "../../../components/ui/badge";
+import { EmptyState } from "../../../components/ui/empty-state";
 
 export const metadata = {
   title: "Audit log · RD-Sync",
   description: "Append-only audit trail of access and review actions.",
 };
 
-/**
- * Audit log placeholder (REQ-AUD-UX-001).
- *
- * The data feed for this view lands in a follow-up change that wires
- * `InMemoryAuditSink.list()` into a paginated table. For this change the
- * page exists with the new design system in place so the admin nav can
- * reach it and the empty state is honest.
- */
-export default function AdminAuditPage() {
+const PAGE_SIZE = 50;
+
+interface AdminAuditPageProps {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+}
+
+export default async function AdminAuditPage({ searchParams }: AdminAuditPageProps) {
+  // Defense-in-depth: admin layout already gates this route, but we verify here too.
+  const principal = await getCurrentPrincipal();
+
+  if (principal?.role !== "admin") {
+    return (
+      <div className="grid gap-6">
+        <PageHeader
+          eyebrow="Restricted operations"
+          title="Admin access required"
+          description="Only admins can view the audit log."
+        />
+        <Card>
+          <CardContent className="grid gap-3 p-8 text-center">
+            <ShieldAlert className="mx-auto h-8 w-8 text-warning" aria-hidden />
+            <p className="text-sm text-muted-foreground">
+              If you believe you should have access, contact the workspace owner and ask for
+              the{" "}
+              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">admin</code>{" "}
+              role.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  const resolvedSearchParams = searchParams ? await searchParams : {};
+  const rawPage = resolvedSearchParams["page"];
+  const pageParam = Array.isArray(rawPage) ? rawPage[0] : rawPage;
+  const parsedPage = parseInt(pageParam ?? "1", 10);
+  const page = Number.isFinite(parsedPage) && parsedPage >= 1 ? parsedPage : 1;
+
+  const events = await defaultAuditSink.list({
+    limit: PAGE_SIZE,
+    offset: (page - 1) * PAGE_SIZE,
+  });
+
+  const hasPrev = page > 1;
+  const hasNext = events.length >= PAGE_SIZE;
+
   return (
     <div className="grid gap-6">
       <PageHeader
@@ -34,32 +75,131 @@ export default function AdminAuditPage() {
 
       <Card>
         <CardHeader>
-          <div className="flex items-start gap-3">
-            <div className="grid h-10 w-10 place-items-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/30">
-              <ScrollText className="h-5 w-5" aria-hidden />
+          <div className="flex items-center justify-between">
+            <div className="flex items-start gap-3">
+              <div className="grid h-10 w-10 place-items-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/30">
+                <ScrollText className="h-5 w-5" aria-hidden />
+              </div>
+              <div className="grid gap-1">
+                <CardTitle>Audit events</CardTitle>
+                <CardDescription>
+                  Newest-first · page {page}
+                  {events.length === 0 && page === 1 ? " · no events yet" : ""}
+                </CardDescription>
+              </div>
             </div>
-            <div className="grid gap-1">
-              <CardTitle>No events yet</CardTitle>
-              <CardDescription>
-                The audit log surface is reachable today; the data feed will be wired in a
-                follow-up change.
-              </CardDescription>
-            </div>
+            <Badge variant="secondary" className="gap-1.5 self-start">
+              {events.length} on this page
+            </Badge>
           </div>
         </CardHeader>
-        <CardContent className="grid gap-3 text-sm text-muted-foreground">
-          <p>
-            Visit again after the first review-state change or ingestion run. Events are
-            redacted at write time: tokens, passwords, cookies, account numbers, and
-            screenshots are never persisted.
-          </p>
-          <ul className="grid list-disc gap-1.5 pl-5 text-foreground/80">
-            <li>User logins and role changes</li>
-            <li>Transaction views and review-state transitions</li>
-            <li>Bank connection lifecycle (create, edit, disable, renew)</li>
-            <li>Scraping start, success, failure, MFA prompts</li>
-            <li>Access denials and audit-log reads</li>
-          </ul>
+        <CardContent>
+          {events.length === 0 ? (
+            <EmptyState
+              icon={<ScrollText className="h-6 w-6" aria-hidden />}
+              title="No audit events recorded yet"
+              description="Events will appear here after the first login, ingestion run, or review action."
+            />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    <th className="py-2 pr-4 whitespace-nowrap">Timestamp (UTC)</th>
+                    <th className="py-2 pr-4 whitespace-nowrap">Actor</th>
+                    <th className="py-2 pr-4 whitespace-nowrap">Role</th>
+                    <th className="py-2 pr-4 whitespace-nowrap">Action</th>
+                    <th className="py-2 pr-4 whitespace-nowrap">Target</th>
+                    <th className="py-2 pr-4 whitespace-nowrap">Target ID</th>
+                    <th className="py-2">Metadata</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/60">
+                  {events.map((event) => {
+                    const metaStr = event.metadata
+                      ? JSON.stringify(event.metadata)
+                      : "—";
+                    const metaTruncated =
+                      metaStr.length > 120 ? `${metaStr.slice(0, 120)}…` : metaStr;
+                    return (
+                      <tr
+                        key={event.id}
+                        className="text-foreground/90 hover:bg-muted/30 transition-colors"
+                      >
+                        <td className="py-2 pr-4 font-mono text-xs whitespace-nowrap text-muted-foreground">
+                          {event.createdAt.toISOString()}
+                        </td>
+                        <td className="py-2 pr-4 font-mono text-xs">
+                          {event.actorId ?? (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td className="py-2 pr-4">
+                          {event.actorRole ? (
+                            <Badge variant="outline" className="text-xs">
+                              {event.actorRole}
+                            </Badge>
+                          ) : (
+                            <span className="text-muted-foreground text-xs">—</span>
+                          )}
+                        </td>
+                        <td className="py-2 pr-4 font-mono text-xs whitespace-nowrap">
+                          {event.action}
+                        </td>
+                        <td className="py-2 pr-4 text-xs">{event.target}</td>
+                        <td className="py-2 pr-4 font-mono text-xs text-muted-foreground">
+                          {event.targetId ?? "—"}
+                        </td>
+                        <td
+                          className="py-2 font-mono text-xs text-muted-foreground max-w-xs truncate"
+                          title={metaStr === "—" ? undefined : metaStr}
+                        >
+                          {metaTruncated}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {(hasPrev || hasNext) && (
+            <nav
+              className="mt-4 flex items-center justify-between border-t border-border/60 pt-4"
+              aria-label="Audit log pagination"
+            >
+              <div>
+                {hasPrev ? (
+                  <a
+                    href={`?page=${page - 1}`}
+                    className="rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted/40 transition-colors"
+                  >
+                    ← Previous
+                  </a>
+                ) : (
+                  <span aria-hidden className="invisible rounded-md border border-border px-3 py-1.5 text-sm font-medium">
+                    ← Previous
+                  </span>
+                )}
+              </div>
+              <span className="text-xs text-muted-foreground">Page {page}</span>
+              <div>
+                {hasNext ? (
+                  <a
+                    href={`?page=${page + 1}`}
+                    className="rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted/40 transition-colors"
+                  >
+                    Next →
+                  </a>
+                ) : (
+                  <span aria-hidden className="invisible rounded-md border border-border px-3 py-1.5 text-sm font-medium">
+                    Next →
+                  </span>
+                )}
+              </div>
+            </nav>
+          )}
         </CardContent>
       </Card>
     </div>
