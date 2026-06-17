@@ -4,9 +4,15 @@
  * Stored format: "scrypt:<saltHex>:<hashHex>"
  * Salt: 32 random bytes (64 hex chars)
  * Hash: 64 bytes (128 hex chars)
+ *
+ * Both hashPassword and verifyPassword are async (use scrypt, not scryptSync)
+ * so they do not block the Node.js event loop on login.
  */
 
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
+
+const scryptAsync = promisify(scrypt);
 
 const SALT_BYTES = 32;
 const KEY_LEN = 64;
@@ -16,9 +22,9 @@ const PREFIX = "scrypt";
  * Hash a plaintext password using scrypt with a random salt.
  * Returns a stored string in the format "scrypt:<saltHex>:<hashHex>".
  */
-export function hashPassword(plain: string): string {
+export async function hashPassword(plain: string): Promise<string> {
   const salt = randomBytes(SALT_BYTES);
-  const hash = scryptSync(plain, salt, KEY_LEN);
+  const hash = await scryptAsync(plain, salt, KEY_LEN) as Buffer;
   return `${PREFIX}:${salt.toString("hex")}:${hash.toString("hex")}`;
 }
 
@@ -27,7 +33,7 @@ export function hashPassword(plain: string): string {
  * Returns false (never throws) on malformed input or length mismatch.
  * Uses timingSafeEqual for constant-time comparison.
  */
-export function verifyPassword(plain: string, stored: string): boolean {
+export async function verifyPassword(plain: string, stored: string): Promise<boolean> {
   try {
     const parts = stored.split(":");
     if (parts.length !== 3 || parts[0] !== PREFIX) return false;
@@ -41,7 +47,7 @@ export function verifyPassword(plain: string, stored: string): boolean {
     if (salt.length !== SALT_BYTES) return false;
     if (storedHash.length !== KEY_LEN) return false;
 
-    const candidateHash = scryptSync(plain, salt, KEY_LEN);
+    const candidateHash = await scryptAsync(plain, salt, KEY_LEN) as Buffer;
 
     if (candidateHash.length !== storedHash.length) return false;
 

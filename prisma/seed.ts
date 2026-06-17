@@ -55,7 +55,7 @@ async function main() {
   }
 
   const normalizedEmail = adminEmail.toLowerCase();
-  const passwordHash = hashPassword(adminPassword);
+  const passwordHash = await hashPassword(adminPassword);
 
   const adminUser = await prisma.user.upsert({
     where: { email: normalizedEmail },

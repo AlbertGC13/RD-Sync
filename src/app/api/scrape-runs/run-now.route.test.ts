@@ -111,6 +111,22 @@ describe("POST /api/scrape-runs/run-now", () => {
     expect(await scrapeRuns.list({})).toEqual([]);
     expect(queue.addCalls).toEqual([]);
   });
+
+  it("returns 401 when no identity is provided", async () => {
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+    const handler = createPostScrapeRunNowHandler({ scrapeRuns, queue });
+
+    const response = await handler(
+      new Request("http://localhost/api/scrape-runs/run-now", {
+        method: "POST",
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(await scrapeRuns.list({})).toEqual([]);
+    expect(queue.addCalls).toEqual([]);
+  });
 });
 
 class FakeQueue implements QueueLike {

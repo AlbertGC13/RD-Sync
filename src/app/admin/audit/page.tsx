@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import { ScrollText, ShieldAlert, ShieldCheck } from "lucide-react";
 
 import { getCurrentPrincipal } from "../../../modules/auth/server";
@@ -22,7 +23,13 @@ export default async function AdminAuditPage({ searchParams }: AdminAuditPagePro
   // Defense-in-depth: admin layout already gates this route, but we verify here too.
   const principal = await getCurrentPrincipal();
 
-  if (principal?.role !== "admin") {
+  // Unauthenticated: redirect to login (matches what admin/layout.tsx does).
+  if (!principal) {
+    redirect("/login");
+  }
+
+  // Authenticated but not admin: show inline denial card.
+  if (principal.role !== "admin") {
     return (
       <div className="grid gap-6">
         <PageHeader
@@ -51,13 +58,16 @@ export default async function AdminAuditPage({ searchParams }: AdminAuditPagePro
   const parsedPage = parseInt(pageParam ?? "1", 10);
   const page = Number.isFinite(parsedPage) && parsedPage >= 1 ? parsedPage : 1;
 
-  const events = await defaultAuditSink.list({
-    limit: PAGE_SIZE,
+  // Fetch one extra row so we can detect whether a next page exists without a
+  // separate count query. We display only the first PAGE_SIZE rows.
+  const rawEvents = await defaultAuditSink.list({
+    limit: PAGE_SIZE + 1,
     offset: (page - 1) * PAGE_SIZE,
   });
 
+  const hasNext = rawEvents.length > PAGE_SIZE;
+  const events = hasNext ? rawEvents.slice(0, PAGE_SIZE) : rawEvents;
   const hasPrev = page > 1;
-  const hasNext = events.length >= PAGE_SIZE;
 
   return (
     <div className="grid gap-6">

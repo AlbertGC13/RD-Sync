@@ -7,10 +7,14 @@
  * Returns 200 + Set-Cookie on success, 401 with generic error on any failure.
  * NEVER reveals whether the email exists (no user enumeration).
  * NEVER logs passwords or tokens.
+ *
+ * Timing-safe enumeration resistance: verifyPassword (scrypt) always runs,
+ * even when the email is unknown or the account has no password hash.
+ * A module-level DECOY_HASH is initialised once at startup for this purpose.
  */
 
 import type { UserRepository } from "../../../../modules/auth/user-repository";
-import { verifyPassword } from "../../../../modules/auth/password";
+import { hashPassword, verifyPassword } from "../../../../modules/auth/password";
 import { signSession } from "../../../../modules/auth/session";
 import {
   serializeSessionCookie,
@@ -22,10 +26,28 @@ import { defaultUserRepository } from "../defaults";
 
 const INVALID_CREDENTIALS = "Invalid email or password";
 
+/**
+ * Pre-computed decoy hash used when the email is unknown or the account has
+ * no password hash. Ensures scrypt always runs so response time is constant
+ * regardless of whether the email exists in the database.
+ *
+ * Initialised lazily on first use to avoid blocking import time.
+ */
+let _decoyHashPromise: Promise<string> | null = null;
+
+function getDecoyHash(): Promise<string> {
+  if (!_decoyHashPromise) {
+    _decoyHashPromise = hashPassword("rd-sync-decoy-constant-work");
+  }
+  return _decoyHashPromise;
+}
+
 export interface LoginHandlerDeps {
   users: UserRepository;
   secret: string;
   clock: () => number;
+  /** Override decoy hash for deterministic tests. */
+  decoyHash?: Promise<string>;
 }
 
 export function createLoginHandler(deps: LoginHandlerDeps) {
@@ -49,11 +71,18 @@ export function createLoginHandler(deps: LoginHandlerDeps) {
 
     const user = await deps.users.findByEmail(email);
 
+    // Always run scrypt — even when the user is unknown or has no password hash —
+    // so that response latency is constant and email enumeration via timing is
+    // not possible.
+    const decoy = await (deps.decoyHash ?? getDecoyHash());
+    const candidateHash = user?.passwordHash ?? decoy;
+    const passwordValid = await verifyPassword(password, candidateHash);
+
     if (
       !user ||
       user.passwordHash === null ||
       user.status === "disabled" ||
-      !verifyPassword(password, user.passwordHash)
+      !passwordValid
     ) {
       return Response.json({ error: INVALID_CREDENTIALS }, { status: 401 });
     }

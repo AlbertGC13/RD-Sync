@@ -42,6 +42,11 @@ function hmacPart(payloadPart: string, secret: string): string {
     .replace(/=+$/, "");
 }
 
+/** Returns the raw 32-byte HMAC-SHA256 digest for constant-time comparison. */
+function hmacDigest(payloadPart: string, secret: string): Buffer {
+  return createHmac("sha256", secret).update(payloadPart).digest();
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -76,11 +81,11 @@ export function verifySession(token: string, secret: string, now: number): Princ
 
     if (!payloadPart || !receivedSig) return null;
 
-    // Recompute HMAC and compare with constant-time equality
-    const expectedSig = hmacPart(payloadPart, secret);
-
-    const expectedBuf = Buffer.from(expectedSig, "utf8");
-    const receivedBuf = Buffer.from(receivedSig, "utf8");
+    // Recompute HMAC and compare raw digest bytes with constant-time equality.
+    // Comparing 32 raw bytes (not base64url strings) is the idiomatic approach
+    // and avoids any alphabet-level timing signals.
+    const expectedBuf = hmacDigest(payloadPart, secret);
+    const receivedBuf = Buffer.from(receivedSig, "base64url");
 
     if (expectedBuf.length !== receivedBuf.length) return null;
     if (!timingSafeEqual(expectedBuf, receivedBuf)) return null;

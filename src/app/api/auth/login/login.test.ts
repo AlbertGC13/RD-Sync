@@ -5,7 +5,7 @@
  * Never relies on env vars for the secret.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import { createLoginHandler } from "./route";
 import { InMemoryUserRepository } from "../../../../modules/auth/user-repository";
 import { hashPassword } from "../../../../modules/auth/password";
@@ -16,38 +16,50 @@ import type { UserAccount } from "../../../../modules/auth/user-repository";
 const TEST_SECRET = "test-secret-for-login-handler-x9z";
 const FIXED_NOW = 1_000_000;
 
-const alice: UserAccount = {
-  id: "u-alice",
-  email: "alice@example.com",
-  displayName: "Alice",
-  role: "admin",
-  status: "active",
-  passwordHash: hashPassword("correct-password"),
-};
+// Fixtures are populated in beforeAll so hashPassword (async) can be awaited.
+let alice: UserAccount;
+let disabledUser: UserAccount;
+let noHashUser: UserAccount;
+// Deterministic decoy hash for tests — avoids running a real scrypt derivation per test.
+let testDecoyHash: Promise<string>;
 
-const disabledUser: UserAccount = {
-  id: "u-disabled",
-  email: "disabled@example.com",
-  displayName: "Disabled",
-  role: "viewer",
-  status: "disabled",
-  passwordHash: hashPassword("some-password"),
-};
+beforeAll(async () => {
+  alice = {
+    id: "u-alice",
+    email: "alice@example.com",
+    displayName: "Alice",
+    role: "admin",
+    status: "active",
+    passwordHash: await hashPassword("correct-password"),
+  };
 
-const noHashUser: UserAccount = {
-  id: "u-nohash",
-  email: "nohash@example.com",
-  displayName: "NoHash",
-  role: "viewer",
-  status: "active",
-  passwordHash: null,
-};
+  disabledUser = {
+    id: "u-disabled",
+    email: "disabled@example.com",
+    displayName: "Disabled",
+    role: "viewer",
+    status: "disabled",
+    passwordHash: await hashPassword("some-password"),
+  };
 
-function makeHandler(users: UserAccount[] = [alice, disabledUser, noHashUser]) {
+  noHashUser = {
+    id: "u-nohash",
+    email: "nohash@example.com",
+    displayName: "NoHash",
+    role: "viewer",
+    status: "active",
+    passwordHash: null,
+  };
+
+  testDecoyHash = hashPassword("rd-sync-decoy-constant-work");
+});
+
+function makeHandler(users?: UserAccount[]) {
   return createLoginHandler({
-    users: new InMemoryUserRepository(users),
+    users: new InMemoryUserRepository(users ?? [alice, disabledUser, noHashUser]),
     secret: TEST_SECRET,
     clock: () => FIXED_NOW,
+    decoyHash: testDecoyHash,
   });
 }
 

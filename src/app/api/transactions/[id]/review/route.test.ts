@@ -13,6 +13,21 @@ describe("PATCH /api/transactions/[id]/review", () => {
     delete process.env.RD_SYNC_TRUST_PROXY_HEADERS;
   });
 
+  it("returns 401 when no identity is provided", async () => {
+    const handler = createPatchTransactionReviewHandler({
+      auditSink: new InMemoryAuditSink(),
+      repository: new InMemoryTransactionRepository(),
+    });
+    const request = new Request("http://localhost/api/transactions/tx-1/review", {
+      method: "PATCH",
+      body: JSON.stringify({ reviewState: "seen" }),
+    });
+
+    const response = await handler(request, { params: Promise.resolve({ id: "tx-1" }) });
+
+    expect(response.status).toBe(401);
+  });
+
   it("denies viewer review updates", async () => {
     const handler = createPatchTransactionReviewHandler({
       auditSink: new InMemoryAuditSink(),

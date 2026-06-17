@@ -63,7 +63,7 @@ The seed is idempotent: re-running it updates the password hash and keeps the AD
 
 ## `RD_SYNC_TRUST_PROXY_HEADERS`
 
-When set to `"enabled"`, the app will trust `x-rd-sync-user-id` and `x-rd-sync-user-role` headers forwarded by an upstream proxy. This allows a trusted internal gateway (e.g. an SSO sidecar) to inject the authenticated identity without a separate cookie.
+When set to `"enabled"`, the app will trust `x-rd-sync-user-id` and `x-rd-sync-role` headers forwarded by an upstream proxy. This allows a trusted internal gateway (e.g. an SSO sidecar) to inject the authenticated identity without a separate cookie.
 
 **Security note:** only enable this when a verified, trusted proxy is guaranteed to be the sole entry point. If the app is directly reachable from the public internet with this flag enabled, any client can forge these headers and impersonate any user.
 
