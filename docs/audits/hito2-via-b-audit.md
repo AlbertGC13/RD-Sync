@@ -604,5 +604,31 @@ then ran over the committed diff.
   re-seed with their own `RD_SYNC_ADMIN_PASSWORD` (the seed is idempotent).
 - Sessions are **stateless** (cannot be revoked before 8h expiry; rotating
   `RD_SYNC_AUTH_SECRET` invalidates all). DB-backed sessions are a future upgrade.
-- No login **rate limiting** yet (brute-force throttling is a follow-up).
 - Employees/reviewers are created via seed/DB only; no user-management UI.
+
+### 12.1 Hardening addendum (commit `35080b8`)
+
+An ultra multi-agent adversarial validation of the 9 security fixes returned
+**14/16 verdicts resolved** with high confidence; the two `partially_resolved`
+both concerned login user-enumeration (the decoy-hash fix equalized scrypt work
+but a residual DB hit/miss timing gap and a test-coverage gap remained). A
+false-positive "preview escape hatch" was dismissed (`resolvePreviewPrincipal`
+is gated on `NODE_ENV`/`RD_SYNC_DEV_PREVIEW`). The recommended cheap batch was
+then implemented and re-reviewed (all 5 medium+ review findings fixed):
+- **IP-based in-memory rate limiter** (5 / 15 min) → 429 + Retry-After **before**
+  the user lookup (no email-validity leak; keyed by IP so it can't lock out a
+  specific account); all 401 paths consume the budget.
+- **Response-time floor** on success + invalid-credential paths → masks the DB
+  hit/miss timing, closing the enumeration oracle.
+- `?next` sanitizer rejects raw control characters (explicit `\x00-\x1f\x7f`).
+- `getCurrentPrincipal` returns null (no throw) when the secret is unset.
+- constant-work login test; audit pagination uses `next/link`.
+- 484 tests + 37 skipped; typecheck + lint clean. Limiter/floor are injectable
+  (tests never sleep).
+
+**Still open / known limits:** rate limiting is in-memory (per-process, resets
+on restart; a real client IP needs a trusted proxy setting `x-forwarded-for` —
+without one, all direct clients share an `"unknown"` bucket — a startup warning
+fires). The constant-work test's sentinels are weak (LOW — flagged, not yet
+strengthened). Session revocation (e.g. a `tokenVersion` column) and a
+user-management UI remain deferred to the VPS phase.
