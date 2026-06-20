@@ -16,7 +16,8 @@
         "prisma:generate": "prisma generate",
         "prisma:migrate": "prisma migrate dev",
         "prisma:seed": "prisma db seed",
-        "db:push": "prisma db push"
+        "db:push": "prisma db push",
+        "worker": "tsx src/worker/ingestion-worker.ts"
     },
     "prisma": {
         "seed": "tsx prisma/seed.ts"

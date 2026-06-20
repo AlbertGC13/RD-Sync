@@ -1,13 +1,19 @@
-# Local development PostgreSQL for RD-Sync.
+# Local development services for RD-Sync.
 #
-# Credentials and database name match the dev DATABASE_URL:
-#   postgresql://rd_sync:rd_sync@localhost:5432/rd_sync
-# These are LOCAL DEV credentials only and must never be used in production.
+# Postgres:
+#   Credentials and database name match the dev DATABASE_URL:
+#     postgresql://rd_sync:rd_sync@localhost:5432/rd_sync
+#   These are LOCAL DEV credentials only and must never be used in production.
+#
+# Redis:
+#   Dev URL (no auth): redis://localhost:6379
+#   Set RD_SYNC_REDIS_URL=redis://localhost:6379 to enable the durable BullMQ
+#   queue and run the separate worker process (pnpm worker).
 #
 # Usage:
-#   docker compose up -d         # start Postgres
+#   docker compose up -d         # start Postgres + Redis
 #   pnpm db:push                 # apply the Prisma schema to rd_sync
-#   docker compose down          # stop (keeps data in the named volume)
+#   docker compose down          # stop (keeps data in named volumes)
 #   docker compose down -v       # stop and wipe all data
 #
 # The initdb script also creates a throwaway `rd_sync_test` database used by
@@ -33,5 +39,23 @@ services:
       timeout: 5s
       retries: 12
 
+  # Redis — durable BullMQ job queue backend.
+  # Data is persisted via appendonly AOF so jobs survive a container restart.
+  redis:
+    image: redis:7-alpine
+    container_name: rd-sync-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - rd-sync-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
 volumes:
   rd-sync-pgdata:
+  rd-sync-redis-data:
