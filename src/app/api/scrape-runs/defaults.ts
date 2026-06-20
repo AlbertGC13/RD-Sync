@@ -6,6 +6,10 @@
  * the in-memory one. Both implementations satisfy the same interface so no
  * consumer code changes are required.
  *
+ * Queue env-switch: When RD_SYNC_REDIS_URL is set, the default ingestion queue
+ * is a real BullMQ-backed queue connected to Redis.  Otherwise the
+ * InMemoryScheduledIngestionQueue is used (dev/test default, no Redis needed).
+ *
  * The instances are anchored on globalThis so that Next.js dev module-graph
  * hot-reloads and multiple module graphs within the same process share a
  * single instance.
@@ -22,6 +26,7 @@ import {
 } from "../../../modules/scrape-runs/index";
 import { PrismaScrapeRunRepository } from "../../../modules/persistence/prisma-scrape-run-repository";
 import type { IngestionJobData, QueueLike } from "../../../worker/queues/index";
+import { buildRedisConnectionOptions, createBullmqIngestionQueue } from "../../../worker/queues/bullmq-queue";
 
 // ---------------------------------------------------------------------------
 // InMemoryScheduledIngestionQueue
@@ -42,9 +47,20 @@ export class InMemoryScheduledIngestionQueue implements QueueLike {
 
 type AnyScrapeRunRepository = InMemoryScrapeRunRepository | PrismaScrapeRunRepository;
 
+/**
+ * The ingestion queue is always an InMemoryScheduledIngestionQueue when
+ * RD_SYNC_REDIS_URL is not set (dev/test default), or a BullMQ-backed
+ * QueueLike when it is set (production/staging).
+ *
+ * Exported as the minimal QueueLike interface so callers are not misled into
+ * believing .jobs is always available.  The .jobs accessor only exists on
+ * InMemoryScheduledIngestionQueue; code that needs it must narrow with
+ * instanceof InMemoryScheduledIngestionQueue first.
+ */
+
 const globalRegistry = globalThis as typeof globalThis & {
   __rdSyncScrapeRunRepository?: AnyScrapeRunRepository;
-  __rdSyncIngestionQueue?: InMemoryScheduledIngestionQueue;
+  __rdSyncIngestionQueue?: QueueLike;
   __rdSyncPreviewScrapeRunsSeeded?: boolean;
 };
 
@@ -55,11 +71,32 @@ function createScrapeRunRepository(): AnyScrapeRunRepository {
   return new InMemoryScrapeRunRepository();
 }
 
+/**
+ * When RD_SYNC_REDIS_URL is set, return a BullMQ-backed queue.
+ * Otherwise fall back to the in-memory queue (dev/test default).
+ *
+ * The BullMQ queue is created with `maxRetriesPerRequest: null` as required
+ * by BullMQ for blocking Redis connections.  No actual Redis connection is
+ * opened here — BullMQ connects lazily on the first operation.
+ */
+function createIngestionQueue(): QueueLike {
+  const redisUrl = process.env.RD_SYNC_REDIS_URL;
+  if (redisUrl) {
+    return createBullmqIngestionQueue({
+      connection: buildRedisConnectionOptions(redisUrl),
+    });
+  }
+  return new InMemoryScheduledIngestionQueue();
+}
+
 export const defaultScrapeRunRepository: AnyScrapeRunRepository =
   (globalRegistry.__rdSyncScrapeRunRepository ??= createScrapeRunRepository());
 
-export const defaultIngestionQueue =
-  (globalRegistry.__rdSyncIngestionQueue ??= new InMemoryScheduledIngestionQueue());
+// Changing RD_SYNC_REDIS_URL requires a full process restart — the queue
+// backend is chosen once at first module load and cached for the lifetime of
+// the Node.js process (matching the DATABASE_URL pattern).
+export const defaultIngestionQueue: QueueLike =
+  (globalRegistry.__rdSyncIngestionQueue ??= createIngestionQueue());
 
 // ---------------------------------------------------------------------------
 // Preview seeding helpers

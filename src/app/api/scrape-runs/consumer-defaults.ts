@@ -6,10 +6,11 @@ import { resolveDefaultAlertSink } from "../../../worker/alerts/email-alert-sink
 import { createPopularCdpScraper } from "../../../worker/scraper/navigation/popular-cdp";
 import { defaultAuditSink } from "../audit/defaults";
 import { defaultTransactionRepository } from "../transactions/defaults";
-import { defaultIngestionQueue, defaultScrapeRunRepository } from "./defaults";
+import { defaultIngestionQueue, defaultScrapeRunRepository, InMemoryScheduledIngestionQueue } from "./defaults";
 
 const globalRegistry = globalThis as typeof globalThis & {
-  __rdSyncIngestionConsumer?: InMemoryIngestionConsumer;
+  __rdSyncIngestionConsumer?: InMemoryIngestionConsumer | undefined;
+  __rdSyncIngestionConsumerInitialized?: boolean;
 };
 
 /**
@@ -50,7 +51,32 @@ export function resolveDefaultScraper(): IngestionScraper {
   };
 }
 
-function createDefaultIngestionConsumer(): InMemoryIngestionConsumer {
+/**
+ * When RD_SYNC_REDIS_URL is set, a separate worker process consumes the
+ * BullMQ queue — there is no in-process consumer and drainPending() must NOT
+ * be called from within the API process.  Return undefined so the run-now
+ * route skips the drain step.
+ *
+ * Without RD_SYNC_REDIS_URL the existing in-memory consumer is wired up as
+ * before (dev default, no Redis required).
+ */
+function createDefaultIngestionConsumer(): InMemoryIngestionConsumer | undefined {
+  if (process.env.RD_SYNC_REDIS_URL) {
+    // BullMQ mode — consumer runs in the separate worker process.
+    return undefined;
+  }
+
+  if (!(defaultIngestionQueue instanceof InMemoryScheduledIngestionQueue)) {
+    // Defensive guard against module-load ordering edge cases: if the
+    // globalThis-cached queue was populated in a prior module graph (where
+    // RD_SYNC_REDIS_URL was absent) and the env var is now absent but the
+    // cached value is a BullMQ adapter, this guard catches the mismatch
+    // instead of passing a QueueLike to createInMemoryIngestionConsumer which
+    // requires InMemoryScheduledIngestionQueue.  Also serves as a narrowing
+    // assertion so TypeScript knows the type at line below.
+    return undefined;
+  }
+
   const processor = createIngestionProcessor({
     scrapeRuns: defaultScrapeRunRepository,
     transactions: defaultTransactionRepository,
@@ -61,5 +87,13 @@ function createDefaultIngestionConsumer(): InMemoryIngestionConsumer {
   return createInMemoryIngestionConsumer({ queue: defaultIngestionQueue, processor });
 }
 
-export const defaultIngestionConsumer =
-  (globalRegistry.__rdSyncIngestionConsumer ??= createDefaultIngestionConsumer());
+function getOrCreateDefaultIngestionConsumer(): InMemoryIngestionConsumer | undefined {
+  if (!globalRegistry.__rdSyncIngestionConsumerInitialized) {
+    globalRegistry.__rdSyncIngestionConsumer = createDefaultIngestionConsumer();
+    globalRegistry.__rdSyncIngestionConsumerInitialized = true;
+  }
+  return globalRegistry.__rdSyncIngestionConsumer;
+}
+
+export const defaultIngestionConsumer: InMemoryIngestionConsumer | undefined =
+  getOrCreateDefaultIngestionConsumer();

@@ -159,7 +159,11 @@ describe("defaultIngestionQueue — globalThis sharing", () => {
     );
 
     expect(queueB).toBe(queueA);
-    expect(queueA.jobs).toHaveLength(1);
+    // Access .jobs via type assertion — this test runs without RD_SYNC_REDIS_URL
+    // so the queue is always InMemoryScheduledIngestionQueue at runtime.
+    // We cannot use instanceof after vi.resetModules() because the class
+    // identity changes across module graph resets.
+    expect((queueA as { jobs?: unknown[] }).jobs).toHaveLength(1);
   });
 });
 
