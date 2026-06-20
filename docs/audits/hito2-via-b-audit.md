@@ -632,3 +632,57 @@ without one, all direct clients share an `"unknown"` bucket — a startup warnin
 fires). The constant-work test's sentinels are weak (LOW — flagged, not yet
 strengthened). Session revocation (e.g. a `tokenVersion` column) and a
 user-management UI remain deferred to the VPS phase.
+
+---
+
+## 13. PR8 — BullMQ + Redis durable queue + separate worker (addendum)
+
+> Commits: `33b40f2` (redis service + worker script + serverExternalPackages),
+> `ac72735` (env-switched BullMQ queue), `80b3210` (worker entrypoint + factory +
+> runbook + gated integration test), `c14746c` (ESM require fix). Test count:
+> **511 passed + 38 skipped** DB/Redis-free; **512 passed** with
+> `RD_SYNC_TEST_REDIS_URL` (the real-Redis integration test runs). typecheck +
+> lint clean.
+
+**What.** The dev-only in-process queue is replaced by a real durable BullMQ+Redis
+queue plus a SEPARATE worker process, behind an env switch:
+- `RD_SYNC_REDIS_URL` set → API enqueues to a BullMQ queue (lazy ioredis,
+  `maxRetriesPerRequest: null`) and the in-process consumer is ABSENT, so only
+  the separate `pnpm worker` process drains — no double processing.
+- unset → the existing in-memory queue + in-process consumer (default dev/test).
+- `bullmq`/`ioredis` were already deps; `next.config.ts` marks them
+  `serverExternalPackages` so Turbopack does not bundle their native modules.
+- Retry semantics: terminal `needs_admin_action`/`failed` are returned (no
+  retry); only unexpected throws get BullMQ's 3 attempts + exponential backoff.
+- Worker: loads `.env`, fails fast without `RD_SYNC_REDIS_URL`, graceful
+  shutdown with a 25s `close()` timeout.
+
+**Adversarial review (6 medium+ findings, all fixed):** removed an unsafe
+`as InMemoryScheduledIngestionQueue` cast (export is now `QueueLike`); added the
+`serverExternalPackages` guard; added the shutdown timeout; comment/runbook fixes.
+
+**Critical bug caught by LIVE verification (commit `c14746c`), NOT by the suite:**
+the worker factory defaulted `WorkerCtor` to `require("bullmq")`, which is
+undefined in an ESM module → `pnpm worker` crashed on startup
+(`require is not defined in ES module scope`). The unit tests inject a fake
+`WorkerCtor` and the integration test constructs `Worker` directly, so the
+green suite hid it. Fix: `WorkerCtor` is now required and the real `bullmq.Worker`
+is imported at the entrypoint composition root (factory stays bullmq-free).
+**Lesson (again): the test suite does not exercise the worker entrypoint or the
+Next bundler — smoke-boot `pnpm worker` and `pnpm dev` after queue/worker changes.**
+
+**Live verification (2026-06-20, Docker Redis + Postgres):**
+- `docker compose up -d` → redis:7-alpine healthy (`PONG`).
+- Gated integration test ran against real Redis and passed (enqueue → worker
+  drains → processor result).
+- `pnpm worker` boots and waits for jobs; `pnpm dev` boots in Redis mode
+  (`GET /login` 200 → Next compiles with bullmq externalized).
+- **Two-process E2E:** with both running in Redis mode, an authenticated
+  `run-now` created a run as `queued` (API enqueue-only), and the SEPARATE
+  worker moved it `running → needs_admin_action` within ~2s — proving the
+  durable handoff. (The test run record was deleted afterward.)
+
+**Operator notes:** add `RD_SYNC_REDIS_URL=redis://localhost:6379` to `.env` to
+enable durable mode, then run `pnpm worker` as a SEPARATE process from
+`pnpm dev`. Without it, the app stays in single-process in-memory mode (runs
+drain in-process). See `docs/runbooks/worker.md`.
