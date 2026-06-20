@@ -26,8 +26,10 @@
 // tsx does not auto-load .env, so the worker process needs this explicitly.
 import "dotenv/config";
 
+import { Worker } from "bullmq";
+
 import { buildRedisConnectionOptions } from "./queues/bullmq-queue";
-import { createIngestionWorker } from "./ingestion-worker-factory";
+import { createIngestionWorker, type WorkerConstructor } from "./ingestion-worker-factory";
 import { resolveDefaultAlertSink } from "./alerts/email-alert-sink";
 import { resolveDefaultScraper } from "../app/api/scrape-runs/consumer-defaults";
 import { defaultScrapeRunRepository } from "../app/api/scrape-runs/defaults";
@@ -71,6 +73,10 @@ const worker = createIngestionWorker({
   connection,
   processor,
   concurrency: 2,
+  // Bind the real bullmq Worker at the composition root; the factory stays
+  // bullmq-free. The cast is the single adapter seam between the library and
+  // our structural WorkerConstructor port.
+  WorkerCtor: Worker as unknown as WorkerConstructor,
 });
 
 console.log("[ingestion-worker] Started. Waiting for jobs on 'bank-transaction-ingestion'...");

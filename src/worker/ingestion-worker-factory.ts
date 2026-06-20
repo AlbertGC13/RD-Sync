@@ -43,10 +43,12 @@ export interface CreateIngestionWorkerOptions {
   /** How many jobs to process in parallel.  Defaults to 2. */
   concurrency?: number;
   /**
-   * Override the BullMQ Worker constructor.  Inject a fake in unit tests.
-   * When omitted, the real bullmq.Worker is used (production path).
+   * The BullMQ Worker constructor.  The standalone entrypoint passes the real
+   * `bullmq.Worker`; unit tests inject a fake.  Required on purpose: this keeps
+   * the factory free of any bullmq import (ESM-safe, no require(), and bullmq
+   * never leaks into a non-worker bundle).
    */
-  WorkerCtor?: WorkerConstructor;
+  WorkerCtor: WorkerConstructor;
 }
 
 /**
@@ -63,11 +65,7 @@ export interface CreateIngestionWorkerOptions {
 export function createIngestionWorker(options: CreateIngestionWorkerOptions): WorkerHandle {
   const concurrency = options.concurrency ?? 2;
 
-  const WorkerCtor: WorkerConstructor =
-    options.WorkerCtor ??
-    // Production: import bullmq.Worker synchronously (it is always installed).
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    (require("bullmq") as { Worker: WorkerConstructor }).Worker;
+  const WorkerCtor = options.WorkerCtor;
 
   const worker = new WorkerCtor(
     INGESTION_QUEUE_NAME,
