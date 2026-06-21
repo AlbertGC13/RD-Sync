@@ -38,8 +38,8 @@ const requiredThemeTokens = [
 ] as const;
 
 const brandColors = [
-  { token: "--color-primary", hex: "#0f766e" },
-  { token: "--color-secondary", hex: "#1e3a8a" },
+  { token: "--color-primary", hex: "#059669" },
+  { token: "--color-secondary", hex: "#262626" },
 ] as const;
 
 describe("src/app/globals.css design system baseline", () => {

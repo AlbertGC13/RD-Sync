@@ -72,6 +72,25 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
   const [dateTo, setDateTo] = useState(toDateInputValue(filters.dateTo));
   const [reviewState, setReviewState] = useState(filters.reviewState ?? "");
 
+  const hasAdvancedFilters = !!(
+    filters.bankId ||
+    filters.amount ||
+    filters.currency ||
+    filters.accountFingerprint ||
+    filters.dateFrom ||
+    filters.dateTo ||
+    filters.reviewState
+  );
+  const [isExpanded, setIsExpanded] = useState(hasAdvancedFilters);
+
+  const advancedActiveCount = useMemo(
+    () =>
+      [bankId, amount, currency, accountFingerprint, dateFrom, dateTo, reviewState].filter(
+        Boolean,
+      ).length,
+    [bankId, amount, currency, accountFingerprint, dateFrom, dateTo, reviewState],
+  );
+
   const activeChips = useMemo(
     () =>
       [
@@ -147,163 +166,169 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
       aria-label="Transaction filters"
       className="rounded-xl border border-border/80 bg-card/60 shadow-sm shadow-black/20"
     >
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-3">
-        <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-          <Filter className="h-4 w-4 text-muted-foreground" aria-hidden />
-          <span>Filter transactions</span>
-          {activeCount > 0 ? (
-            <Badge variant="secondary" className="ml-1">
-              {activeCount} active
-            </Badge>
-          ) : null}
-        </div>
-        <div className="flex items-center gap-3 text-xs text-muted-foreground">
-          <span className="inline-flex items-center gap-1.5">
-            <CircleDot className="h-3 w-3 text-success" aria-hidden />
-            {resultCount} {resultCount === 1 ? "result" : "results"}
-          </span>
-        </div>
-      </header>
+      <span className="sr-only">Filter transactions</span>
 
       <form
         onSubmit={(event) => {
           event.preventDefault();
           applyFilters();
         }}
-        className="grid gap-4 px-5 py-4 sm:grid-cols-2 lg:grid-cols-3"
       >
-        <Field
-          icon={Building2}
-          label="Bank"
-          htmlFor="filter-bankId"
-        >
-          <Select value={bankId} onValueChange={setBankId}>
-            <SelectTrigger id="filter-bankId" className="w-full">
-              <SelectValue placeholder="All banks" />
-            </SelectTrigger>
-            <SelectContent>
-              {BANK_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
-
-        <Field icon={Wallet} label="Amount" htmlFor="filter-amount">
-          <Input
-            id="filter-amount"
-            name="amount"
-            inputMode="decimal"
-            placeholder="e.g. 1500.50"
-            value={amount}
-            onChange={(event) => setAmount(event.target.value)}
-          />
-        </Field>
-
-        <Field icon={CreditCard} label="Currency" htmlFor="filter-currency">
-          <Select value={currency} onValueChange={setCurrency}>
-            <SelectTrigger id="filter-currency" className="w-full">
-              <SelectValue placeholder="Any currency" />
-            </SelectTrigger>
-            <SelectContent>
-              {CURRENCY_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
-
-        <Field
-          icon={Search}
-          label="Search reference, concept, originator"
-          htmlFor="filter-query"
-          className="sm:col-span-2 lg:col-span-3"
-        >
-          <Input
-            id="filter-query"
-            name="query"
-            placeholder="e.g. factura, REF-1234, Cliente Uno"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </Field>
-
-        <Field icon={Hash} label="Account fingerprint" htmlFor="filter-accountFingerprint">
-          <Input
-            id="filter-accountFingerprint"
-            name="accountFingerprint"
-            placeholder="acct-main"
-            value={accountFingerprint}
-            onChange={(event) => setAccountFingerprint(event.target.value)}
-          />
-        </Field>
-
-        <Field icon={CalendarClock} label="From" htmlFor="filter-dateFrom">
-          <Input
-            id="filter-dateFrom"
-            name="dateFrom"
-            type="date"
-            value={dateFrom ?? ""}
-            onChange={(event) => setDateFrom(event.target.value)}
-          />
-        </Field>
-
-        <Field icon={CalendarClock} label="To" htmlFor="filter-dateTo">
-          <Input
-            id="filter-dateTo"
-            name="dateTo"
-            type="date"
-            value={dateTo ?? ""}
-            onChange={(event) => setDateTo(event.target.value)}
-          />
-        </Field>
-
-        <Field icon={FileText} label="Review state" htmlFor="filter-reviewState">
-          <Select value={reviewState} onValueChange={setReviewState}>
-            <SelectTrigger id="filter-reviewState" className="w-full">
-              <SelectValue placeholder="Any state" />
-            </SelectTrigger>
-            <SelectContent>
-              {REVIEW_STATE_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
-
-        <div className="flex items-end gap-2 sm:col-span-2 lg:col-span-3 lg:justify-end">
-          {activeCount > 0 ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={clearAll}
-              disabled={isPending}
-            >
-              <X className="h-3.5 w-3.5" aria-hidden />
-              Clear all
-            </Button>
-          ) : null}
-          <Button type="submit" size="sm" disabled={isPending}>
+        <div className="flex items-center gap-2 px-4 py-3">
+          <div className="relative flex-1">
+            <Search
+              className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+              aria-hidden
+            />
+            <Input
+              id="filter-query"
+              name="query"
+              placeholder="Search reference, concept, originator…"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              className="pl-9"
+            />
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setIsExpanded(!isExpanded)}
+            aria-expanded={isExpanded}
+            aria-controls="filter-advanced-panel"
+          >
             <Filter className="h-3.5 w-3.5" aria-hidden />
+            Filters
+            {advancedActiveCount > 0 ? (
+              <Badge variant="secondary" className="ml-1">
+                {advancedActiveCount}
+              </Badge>
+            ) : null}
+          </Button>
+          <Button type="submit" size="sm" disabled={isPending}>
             {isPending ? "Applying…" : "Apply filters"}
           </Button>
+        </div>
+
+        <div
+          id="filter-advanced-panel"
+          className={
+            isExpanded
+              ? "grid gap-4 border-t border-border/60 px-4 pb-4 pt-3 sm:grid-cols-2 lg:grid-cols-3"
+              : "hidden"
+          }
+        >
+          <Field icon={Building2} label="Bank" htmlFor="filter-bankId">
+            <Select value={bankId} onValueChange={setBankId}>
+              <SelectTrigger id="filter-bankId" className="w-full">
+                <SelectValue placeholder="All banks" />
+              </SelectTrigger>
+              <SelectContent>
+                {BANK_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+
+          <Field icon={Wallet} label="Amount" htmlFor="filter-amount">
+            <Input
+              id="filter-amount"
+              name="amount"
+              inputMode="decimal"
+              placeholder="e.g. 1500.50"
+              value={amount}
+              onChange={(event) => setAmount(event.target.value)}
+            />
+          </Field>
+
+          <Field icon={CreditCard} label="Currency" htmlFor="filter-currency">
+            <Select value={currency} onValueChange={setCurrency}>
+              <SelectTrigger id="filter-currency" className="w-full">
+                <SelectValue placeholder="Any currency" />
+              </SelectTrigger>
+              <SelectContent>
+                {CURRENCY_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+
+          <Field icon={Hash} label="Account fingerprint" htmlFor="filter-accountFingerprint">
+            <Input
+              id="filter-accountFingerprint"
+              name="accountFingerprint"
+              placeholder="acct-main"
+              value={accountFingerprint}
+              onChange={(event) => setAccountFingerprint(event.target.value)}
+            />
+          </Field>
+
+          <Field icon={CalendarClock} label="From" htmlFor="filter-dateFrom">
+            <Input
+              id="filter-dateFrom"
+              name="dateFrom"
+              type="date"
+              value={dateFrom ?? ""}
+              onChange={(event) => setDateFrom(event.target.value)}
+            />
+          </Field>
+
+          <Field icon={CalendarClock} label="To" htmlFor="filter-dateTo">
+            <Input
+              id="filter-dateTo"
+              name="dateTo"
+              type="date"
+              value={dateTo ?? ""}
+              onChange={(event) => setDateTo(event.target.value)}
+            />
+          </Field>
+
+          <Field icon={FileText} label="Review state" htmlFor="filter-reviewState">
+            <Select value={reviewState} onValueChange={setReviewState}>
+              <SelectTrigger id="filter-reviewState" className="w-full">
+                <SelectValue placeholder="Any state" />
+              </SelectTrigger>
+              <SelectContent>
+                {REVIEW_STATE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+
+          <div className="flex items-end gap-2 sm:col-span-2 lg:col-span-3 lg:justify-end">
+            {activeCount > 0 ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={clearAll}
+                disabled={isPending}
+              >
+                <X className="h-3.5 w-3.5" aria-hidden />
+                Clear all
+              </Button>
+            ) : null}
+          </div>
         </div>
       </form>
 
       {activeChips.length > 0 ? (
         <div
-          className="flex flex-wrap items-center gap-1.5 border-t border-border/60 bg-muted/30 px-5 py-2.5"
+          className="flex flex-wrap items-center gap-1.5 border-t border-border/60 bg-muted/30 px-4 py-2.5"
           aria-label="Active filters"
         >
-          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Active:
+          <span className="mr-auto inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+            <CircleDot className="h-3 w-3 text-success" aria-hidden />
+            {resultCount} {resultCount === 1 ? "result" : "results"}
           </span>
           {activeChips.map((chip) => (
             <button
@@ -351,6 +376,3 @@ function toDateInputValue(value: string | Date | undefined): string | undefined 
   if (Number.isNaN(date.getTime())) return undefined;
   return date.toISOString().slice(0, 10);
 }
-
-// User icon is the canonical "originator" indicator and lives in the sibling
-// transaction-row component. No reference needed here.
