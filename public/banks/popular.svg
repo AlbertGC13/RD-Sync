@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <defs>
+    <radialGradient id="popOuter" cx="68%" cy="22%" r="100%">
+      <stop offset="0%" stop-color="#4ABDE8"/>
+      <stop offset="50%" stop-color="#1060C0"/>
+      <stop offset="100%" stop-color="#001E6E"/>
+    </radialGradient>
+    <radialGradient id="popInner" cx="60%" cy="38%" r="100%">
+      <stop offset="0%" stop-color="#1A72CC"/>
+      <stop offset="100%" stop-color="#003DA5"/>
+    </radialGradient>
+    <radialGradient id="popSphere" cx="42%" cy="32%" r="100%">
+      <stop offset="0%" stop-color="#70CEFF"/>
+      <stop offset="40%" stop-color="#1A8AD4"/>
+      <stop offset="100%" stop-color="#003A9A"/>
+    </radialGradient>
+  </defs>
+  <rect width="40" height="40" rx="7" fill="url(#popOuter)"/>
+  <rect x="4.5" y="4.5" width="31" height="31" rx="2.5" fill="url(#popInner)"/>
+  <rect x="4.5" y="4.5" width="31" height="31" rx="2.5" fill="none" stroke="white" stroke-width="1.5"/>
+  <g transform="translate(20 20)">
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white"/>
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white" transform="rotate(25.7)"/>
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white" transform="rotate(51.4)"/>
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white" transform="rotate(77.1)"/>
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white" transform="rotate(102.8)"/>
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white" transform="rotate(128.6)"/>
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white" transform="rotate(154.3)"/>
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white" transform="rotate(180)"/>
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white" transform="rotate(205.7)"/>
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white" transform="rotate(231.4)"/>
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white" transform="rotate(257.1)"/>
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white" transform="rotate(282.8)"/>
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white" transform="rotate(308.5)"/>
+    <path d="M-1.1,-11.5 A11.5,11.5,0,0,1,1.1,-11.5 L0,0Z" fill="white" transform="rotate(334.2)"/>
+    <circle r="5" fill="url(#popSphere)"/>
+  </g>
+</svg>

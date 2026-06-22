@@ -1,8 +1,8 @@
-import { ArrowDownLeft, ArrowUpRight, Building2, Hash, User } from "lucide-react";
+import Image from "next/image";
 
 import { Badge } from "../ui/badge";
-import { Card, CardContent } from "../ui/card";
 import { ReviewActions } from "./review-actions";
+import { getBankMeta } from "../../lib/banks";
 import type { DashboardTransaction } from "../../modules/transactions";
 
 interface TransactionRowProps {
@@ -13,106 +13,83 @@ interface TransactionRowProps {
 
 /**
  * Per-row visual contract (REQ-TX-UX-003):
- * - Shows postedAt in a human-friendly relative+absolute format.
- * - Credit/debit indicator with text + colored badge + directional icon
- *   (color is never the only signal).
- * - Bank name, account fingerprint, reference, concept, originator
- *   rendered in a structured information hierarchy.
+ * - Feed item layout: bank icon + text block + amount.
+ * - Credit/debit indicator with text and colored amount (color is never the only signal).
+ * - Bank name, account fingerprint, and time rendered in a structured information hierarchy.
  * - NO balance, session, credentials, MFA, or admin-only fields.
  */
 export function TransactionRow({ transaction, actions, reviewerMode }: TransactionRowProps) {
   const isCredit = transaction.direction === "credit";
-  const DirectionIcon = isCredit ? ArrowDownLeft : ArrowUpRight;
   const directionLabel = isCredit ? "Credit" : "Debit";
   const amountClass = isCredit ? "text-emerald-300" : "text-amber-300";
   const amountSign = isCredit ? "+" : "−";
   const formattedAmount = `${amountSign} ${transaction.currency} ${transaction.amount}`;
-  const { absolute, relative } = formatPostedAt(transaction.postedAt);
-  const reviewStateLabel = transaction.reviewState.replace(/_/g, " ");
+  const formattedTime = formatPostedAt(transaction.postedAt);
+  const bankMeta = getBankMeta(transaction.bankId);
 
   return (
-    <Card className="overflow-hidden transition-colors hover:border-border">
-      <CardContent className="grid gap-4 p-0">
-        <div className="grid gap-4 p-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
-          <div className="grid gap-3">
-            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <span className="inline-flex items-center gap-1.5">
-                <Building2 className="h-3.5 w-3.5" aria-hidden />
-                {formatBankName(transaction.bankId)}
-              </span>
-              <span aria-hidden>·</span>
-              <span className="inline-flex items-center gap-1.5">
-                <Hash className="h-3.5 w-3.5" aria-hidden />
-                <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-foreground">
-                  {transaction.accountFingerprint}
-                </code>
-              </span>
-            </div>
+    <div role="row">
+      <div className="flex items-center gap-3.5 px-4 py-3.5 hover:bg-white/[0.02] transition-colors">
+        <Image
+          src={bankMeta.logoSrc}
+          width={40}
+          height={40}
+          alt={bankMeta.name}
+          unoptimized
+          className="rounded-[10px] flex-shrink-0"
+        />
 
-            <div className="grid gap-1">
-              <h3 className="text-base font-semibold leading-tight tracking-tight text-foreground">
-                {transaction.reference ?? (
-                  <span className="italic text-muted-foreground">No reference</span>
-                )}
-              </h3>
-              {transaction.concept ? (
-                <p className="text-sm text-foreground/80">{transaction.concept}</p>
-              ) : null}
-              {transaction.originator ? (
-                <p className="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
-                  <User className="h-3.5 w-3.5" aria-hidden />
-                  <span>{transaction.originator}</span>
-                </p>
-              ) : null}
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <span title={absolute}>
-                <time dateTime={transaction.postedAt}>{relative}</time>
-              </span>
-              <span aria-hidden>·</span>
+        <div className="flex-1 min-w-0">
+          <p className="font-medium text-foreground truncate">
+            {transaction.concept ?? transaction.reference ?? (
+              <span className="italic text-muted-foreground">No reference</span>
+            )}
+          </p>
+          <p className="text-xs text-muted-foreground truncate">
+            {bankMeta.name} · {transaction.accountFingerprint} · {formattedTime}
+            {transaction.reference ? <> · {transaction.reference}</> : null}
+          </p>
+          {transaction.originator ? (
+            <p className="text-xs text-muted-foreground truncate">{transaction.originator}</p>
+          ) : null}
+          {reviewerMode ? (
+            <span className="inline-flex items-center gap-1 mt-0.5">
               <ReviewStatePill state={transaction.reviewState} />
-            </div>
-          </div>
-
-          <div className="flex flex-row items-center justify-between gap-3 sm:flex-col sm:items-end sm:justify-start">
-            <Badge variant={isCredit ? "success" : "warning"} className="gap-1">
-              <DirectionIcon className="h-3 w-3" aria-hidden />
-              {directionLabel}
-            </Badge>
-            <strong
-              className={`font-mono text-xl font-semibold tabular-nums tracking-tight ${amountClass}`}
-              aria-label={`${directionLabel} of ${transaction.currency} ${transaction.amount}`}
-            >
-              {formattedAmount}
-            </strong>
-            <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
-              {reviewStateLabel}
             </span>
-          </div>
+          ) : null}
         </div>
 
-        {actions || reviewerMode ? (
-          <div className="border-t border-border/60 bg-muted/20 px-5 py-3">
-            {reviewerMode ? (
-              <ReviewActions
-                transactionId={transaction.id}
-                currentState={transaction.reviewState}
-              />
-            ) : (
-              actions
-            )}
-          </div>
-        ) : null}
-      </CardContent>
-    </Card>
+        <div className="flex-shrink-0 text-right">
+          <strong
+            className={`font-mono text-sm font-semibold tabular-nums tracking-tight ${amountClass}`}
+            aria-label={`${directionLabel} of ${transaction.currency} ${transaction.amount}`}
+          >
+            {formattedAmount}
+          </strong>
+          <p className="text-xs text-muted-foreground">{transaction.currency}</p>
+        </div>
+      </div>
+
+      {actions || reviewerMode ? (
+        <div className="border-t border-border/60 bg-muted/20 px-4 py-3">
+          {reviewerMode ? (
+            <ReviewActions
+              transactionId={transaction.id}
+              currentState={transaction.reviewState}
+            />
+          ) : (
+            actions
+          )}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
 function ReviewStatePill({ state }: { state: DashboardTransaction["reviewState"] }) {
   const { variant, label } = reviewStateVisual(state);
   return (
-    <Badge variant={variant} className="gap-1">
+    <Badge variant={variant} className="gap-1 text-[10px] px-1.5 py-0">
       <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />
       {label}
     </Badge>
@@ -137,38 +114,13 @@ function reviewStateVisual(state: DashboardTransaction["reviewState"]): {
   }
 }
 
-function formatBankName(bankId: string): string {
-  const names: Record<string, string> = {
-    banreservas: "Banreservas",
-    bhd: "BHD",
-    popular: "Banco Popular",
-  };
-  return names[bankId] ?? bankId;
-}
-
-function formatPostedAt(value: string): { absolute: string; relative: string } {
+function formatPostedAt(value: string): string {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return { absolute: value, relative: value };
-  const absolute = date.toLocaleString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
+    month: "short",
+    day: "2-digit",
   });
-  return { absolute, relative: relativeTime(date) };
-}
-
-function relativeTime(date: Date): string {
-  const diffMs = date.getTime() - Date.now();
-  const diffSec = Math.round(diffMs / 1000);
-  const diffMin = Math.round(diffSec / 60);
-  const diffHour = Math.round(diffMin / 60);
-  const diffDay = Math.round(diffHour / 24);
-  const formatter = new Intl.RelativeTimeFormat("en-US", { numeric: "auto" });
-  if (Math.abs(diffSec) < 60) return formatter.format(diffSec, "second");
-  if (Math.abs(diffMin) < 60) return formatter.format(diffMin, "minute");
-  if (Math.abs(diffHour) < 24) return formatter.format(diffHour, "hour");
-  if (Math.abs(diffDay) < 7) return formatter.format(diffDay, "day");
-  return date.toLocaleDateString("en-US", { month: "short", day: "2-digit" });
 }
