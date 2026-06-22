@@ -9,6 +9,7 @@ test-results/
 *.tsbuildinfo
 .atl/
 .engram/
+.claude/
 .captures/
 /src/generated/prisma/
 
