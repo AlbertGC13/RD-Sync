@@ -1,8 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   createGetBankSessionStatusHandler,
-  resolveApiPreviewPrincipal,
   type BankSessionStatusHandlerDeps,
 } from "./route";
 import type { BankSessionCheckResult, BankSessionMonitor } from "../../../../modules/bank-sessions";
@@ -111,57 +110,47 @@ describe("GET /api/bank-sessions/status — auth matrix", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Dev preview principal — gated by NODE_ENV and RD_SYNC_DEV_PREVIEW
+// previewRole backdoor is removed — query params must never substitute for
+// a real admin principal.
 // ---------------------------------------------------------------------------
 
-describe("GET /api/bank-sessions/status — dev preview principal", () => {
+describe("GET /api/bank-sessions/status — previewRole bypass is removed", () => {
   beforeEach(() => {
-    process.env.RD_SYNC_DEV_PREVIEW = "enabled";
+    process.env.RD_SYNC_TRUST_PROXY_HEADERS = "enabled";
   });
 
   afterEach(() => {
-    delete process.env.RD_SYNC_DEV_PREVIEW;
-    // NODE_ENV is read-only at the type level; no cleanup needed
+    delete process.env.RD_SYNC_TRUST_PROXY_HEADERS;
   });
 
-  it("returns 200 with previewRole=admin when dev preview is enabled", async () => {
+  it("returns 401 when only a previewRole=admin query param is provided", async () => {
     const handler = createGetBankSessionStatusHandler({
       checker: makeStubChecker(ACTIVE_RESULT),
       monitor: null,
     });
 
     const res = await handler(makeRequest({}, { previewRole: "admin" }));
-    expect(res.status).toBe(200);
-  });
-
-  it("returns 401 with previewRole=viewer (not admin role)", async () => {
-    const handler = createGetBankSessionStatusHandler({
-      checker: makeStubChecker(ACTIVE_RESULT),
-      monitor: null,
-    });
-
-    const res = await handler(makeRequest({}, { previewRole: "viewer" }));
-    // previewRole=viewer does not resolve a principal, so 401
     expect(res.status).toBe(401);
   });
 
-  it("production ignores the dev preview flag — resolveApiPreviewPrincipal returns null", () => {
-    withEnv({ NODE_ENV: "production", RD_SYNC_DEV_PREVIEW: "enabled" }, () => {
-      expect(resolveApiPreviewPrincipal(new URLSearchParams("previewRole=admin"))).toBeNull();
-    });
-  });
+  it("returns 401 with previewRole=viewer even when dev preview is enabled", async () => {
+    const previousPreview = process.env.RD_SYNC_DEV_PREVIEW;
+    try {
+      process.env.RD_SYNC_DEV_PREVIEW = "enabled";
+      const handler = createGetBankSessionStatusHandler({
+        checker: makeStubChecker(ACTIVE_RESULT),
+        monitor: null,
+      });
 
-  it("production rejects previewRole=admin via the full handler (returns 401)", async () => {
-    const handler = createGetBankSessionStatusHandler({
-      checker: makeStubChecker(ACTIVE_RESULT),
-      monitor: null,
-    });
-
-    const res = await withEnv(
-      { NODE_ENV: "production", RD_SYNC_DEV_PREVIEW: "enabled" },
-      () => handler(makeRequest({}, { previewRole: "admin" })),
-    );
-    expect(res.status).toBe(401);
+      const res = await handler(makeRequest({}, { previewRole: "viewer" }));
+      expect(res.status).toBe(401);
+    } finally {
+      if (previousPreview === undefined) {
+        delete process.env.RD_SYNC_DEV_PREVIEW;
+      } else {
+        process.env.RD_SYNC_DEV_PREVIEW = previousPreview;
+      }
+    }
   });
 });
 
@@ -230,32 +219,79 @@ describe("GET /api/bank-sessions/status — response shape", () => {
 });
 
 // ---------------------------------------------------------------------------
-// env cleanup
+// Resilience: an unexpected throw from the checker must NOT take down the
+// admin endpoint. The handler must degrade to browser_unavailable so
+// operators still see a usable status.
 // ---------------------------------------------------------------------------
 
-afterEach(() => {
-  delete process.env.RD_SYNC_DEV_PREVIEW;
+describe("GET /api/bank-sessions/status — checker-throws resilience", () => {
+  beforeEach(() => {
+    process.env.RD_SYNC_TRUST_PROXY_HEADERS = "enabled";
+  });
+
+  afterEach(() => {
+    delete process.env.RD_SYNC_TRUST_PROXY_HEADERS;
+  });
+
+  it("degrades to browser_unavailable when the checker throws unexpectedly", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const before = Date.now();
+      const handler = createGetBankSessionStatusHandler({
+        checker: {
+          async check(): Promise<BankSessionCheckResult> {
+            throw new Error("CDP page closed unexpectedly");
+          },
+        },
+        monitor: null,
+      });
+
+      const res = await handler(makeRequest(adminHeaders()));
+
+      // Endpoint stays 200 — the operator still gets a usable status.
+      expect(res.status).toBe(200);
+      const body = await res.json() as { session: BankSessionCheckResult };
+      expect(body.session.status).toBe("browser_unavailable");
+      expect(body.session.safeSummary).toBe("Bank browser session is not available");
+      // The fallback checkedAt must be the current failure timestamp, NOT the
+      // Unix epoch (new Date(0)). A 1970 timestamp would mislead operators
+      // into thinking the checker last ran at the epoch.
+      const checkedAtMs = new Date(body.session.checkedAt).getTime();
+      expect(checkedAtMs).not.toBe(0);
+      expect(checkedAtMs).toBeGreaterThanOrEqual(before);
+      // Server-side diagnostic context is logged with the actor id so we
+      // can correlate the failure with the caller.
+      expect(consoleSpy).toHaveBeenCalledTimes(1);
+      const firstCall = consoleSpy.mock.calls[0];
+      expect(String(firstCall?.[0] ?? "")).toContain("bank-sessions/status");
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("does not leak the raw checker error.message to the response body", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const handler = createGetBankSessionStatusHandler({
+        checker: {
+          async check(): Promise<BankSessionCheckResult> {
+            throw new Error("Redis ECONNREFUSED secret-bucket-1:6379 password=hunter2");
+          },
+        },
+        monitor: null,
+      });
+
+      const res = await handler(makeRequest(adminHeaders()));
+      const text = await res.text();
+
+      expect(res.status).toBe(200);
+      expect(text).not.toContain("Redis");
+      expect(text).not.toContain("ECONNREFUSED");
+      expect(text).not.toContain("secret-bucket");
+      expect(text).not.toContain("password");
+      expect(text).not.toContain("hunter2");
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
 });
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function withEnv<T>(values: Record<string, string | undefined>, callback: () => T): T {
-  const previous = Object.fromEntries(
-    Object.keys(values).map((key) => [key, process.env[key]]),
-  ) as Record<string, string | undefined>;
-
-  try {
-    for (const [key, value] of Object.entries(values)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-    return callback();
-  } finally {
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
