@@ -116,6 +116,41 @@ describe("scraper diagnostics redaction", () => {
       "[REDACTED] [REDACTED] [REDACTED] raw account [REDACTED_ACCOUNT] balance [REDACTED_AMOUNT]",
     );
   });
+
+  it("strips credentials from postgresql connection URIs while preserving scheme and host", () => {
+    const redacted = redactDiagnosticText(
+      "Connection failed: postgresql://bank_user:hunter2@10.0.0.5:5432/rd_sync",
+    );
+
+    expect(redacted).toBe(
+      "Connection failed: postgresql://[REDACTED_URI_CREDENTIALS]@10.0.0.5:5432/rd_sync",
+    );
+    expect(redacted).not.toContain("bank_user");
+    expect(redacted).not.toContain("hunter2");
+  });
+
+  it("strips credentials from redis URIs with empty user and password only", () => {
+    const redacted = redactDiagnosticText("redis://:s3cr3t@redis-bucket:6379/0");
+
+    expect(redacted).toBe("redis://[REDACTED_URI_CREDENTIALS]@redis-bucket:6379/0");
+    expect(redacted).not.toContain("s3cr3t");
+  });
+
+  it("strips credentials from mongodb+srv URIs", () => {
+    const redacted = redactDiagnosticText(
+      "mongodb+srv://reader:rd_sync_pw@cluster.example.net/audit",
+    );
+
+    expect(redacted).toBe("mongodb+srv://[REDACTED_URI_CREDENTIALS]@cluster.example.net/audit");
+    expect(redacted).not.toContain("reader");
+    expect(redacted).not.toContain("rd_sync_pw");
+  });
+
+  it("does not redact scheme-less URLs or plain host:port text", () => {
+    const redacted = redactDiagnosticText("ECONNREFUSED 127.0.0.1:5432 no creds here");
+
+    expect(redacted).toBe("ECONNREFUSED 127.0.0.1:5432 no creds here");
+  });
 });
 
 class FakeReadOnlyPage {

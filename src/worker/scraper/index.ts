@@ -50,6 +50,18 @@ const unsafeBankMutationPattern = /\b(transfer|payment|beneficiary|beneficiario|
 const credentialPattern = /\b(password|passwd|pwd|sessionToken|token|cookie|secret|authorization)\s*[:=]\s*[^\s]+/gi;
 const accountNumberPattern = /\b\d{10,}\b/g;
 const balancePattern = /\b\d{1,3}(?:,\d{3})+\.\d{2}\b/g;
+/**
+ * Strips credentials from URI connection strings before they can be
+ * persisted or displayed. Matches `scheme://[user[:password]@]host[:port]`
+ * forms for the drivers RD-Sync might surface in diagnostic text —
+ * postgres/postgresql, redis, mongodb (+srv), amqp, and generic db schemes.
+ * The userinfo segment (everything between `://` and the next `@` before a
+ * path/host boundary) is replaced with `[REDACTED_URI_CREDENTIALS]` while the
+ * scheme and host are preserved so operators still see *where* the failure
+ * happened without seeing *how* it authenticates.
+ */
+const uriCredentialPattern =
+  /((?:postgres(?:ql)?|redis|rediss|mongodb(?:\+srv)?|amqp|amqps|mssql|mysql|db2):\/\/)([^\s/@:]*(?::[^\s/@]+)?@)/gi;
 
 export function createReadOnlyBankScraper(profile: ReadOnlyScraperProfile): ReadOnlyBankScraper {
   assertReadOnlyProfile(profile);
@@ -106,6 +118,10 @@ export function createPlaywrightReadOnlyPage(page: PlaywrightPageLike): ReadOnly
 
 export function redactDiagnosticText(value: string): string {
   return value
+    // Strip URI userinfo FIRST so the credential pattern below does not
+    // leave half-redacted `password=...@host` fragments behind. The scheme
+    // and host are preserved; only `user:pass@` is replaced.
+    .replace(uriCredentialPattern, "$1[REDACTED_URI_CREDENTIALS]@")
     .replace(credentialPattern, "[REDACTED]")
     .replace(accountNumberPattern, "[REDACTED_ACCOUNT]")
     .replace(balancePattern, "[REDACTED_AMOUNT]")
