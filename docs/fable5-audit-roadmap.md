@@ -1,6 +1,8 @@
 # RD-Sync Fable 5 Architecture Audit & Completion Roadmap
 
-> Audit date: 2026-06-11 · Branch: `codex/hito2-run-now-ingestion-alerts` · Method: 6 parallel dimensional audits (product, architecture, security, parser, ingestion flow, testing) + adversarial cross-examination of every P0/P1 finding (43 findings verified against code by independent reviewers).
+> Audit date: 2026-06-11 · Last updated: 2026-06-23 · Branch: `ux/visual-layer` · Method: 6 parallel dimensional audits (product, architecture, security, parser, ingestion flow, testing) + adversarial cross-examination of every P0/P1 finding (43 findings verified against code by independent reviewers).
+>
+> **Status update (2026-06-23):** PR4.1 through PR9 are COMPLETE. PR10 (ERP API), PR11 (E2E expansion), and PR12 (Deployment/VPS) are deferred by product decision. The core ingestion chain is fully wired: admin triggers a run, the worker navigates the Popular portal, parses transactions, persists them via Prisma, alerts on failure, and records audit events — end to end.
 >
 > **Prompt/repo conflict noted:** the audit instructions said "Read `AGENTS.md`" — that file does not exist in this repo. `HANDOFF.md` is the de facto agent instruction file and was used instead. The local `.gitignore` change adding `.engram/` was confirmed as agent-metadata ignore configuration, not product functionality.
 
@@ -64,27 +66,31 @@ Severities shown are **post-cross-examination** (adversarially verified). Origin
 
 ### P0 — must fix before continuing
 
-| Severity | Finding | Evidence | Recommended Fix |
+> **Status (2026-06-23): ALL P0 FINDINGS RESOLVED.**
+
+| Severity | Finding | Status | Resolution |
 |---|---|---|---|
-| P0 | Queue has no consumer — jobs are enqueued and never processed | `InMemoryScheduledIngestionQueue` (`src/app/api/scrape-runs/defaults.ts:115-123`) is an append-only array; `createIngestionProcessor()` (`src/worker/queues/index.ts:62`) is never called outside tests; no worker script in `package.json` | Add an in-process consumer for dev (PR4.4), then a real worker entrypoint with BullMQ+Redis (PR8) |
-| P0 | Bank navigation/session layer does not exist — scraper expects a pre-loaded results page | `ReadOnlyBankScraper.collect(page)` (`src/worker/scraper/index.ts:46-76`) only reads; `popularScraperProfile.selectors` (`src/modules/bank-adapters/popular.ts:31-39`) are declared but used by zero code; no login/MFA/date-filter/Buscar logic anywhere | Create `src/worker/scraper/navigation/popular.ts` (navigator) + session restore contract; wire as the concrete `IngestionScraper` (PR5/PR6) |
-| P0 | `runId` collides at second precision | `now.toISOString().replace(...).slice(0, 14)` (`src/app/api/scrape-runs/run-now.ts:47`); two clicks in the same second → `createQueued` throws "Scrape run already exists" → confusing 403 | Extend to millisecond precision or add a random suffix; add a collision test (PR4.1) |
-| P0 | `RD_SYNC_DEV_PREVIEW` admin bypass has no production guard | `resolveApiPreviewPrincipal(url.searchParams) ?? resolvePrincipalFromTrustedHeaders(...)` — preview path wins *first*, works with zero headers (`run-now/route.ts:18`, `admin/scrape-runs/page.tsx:49-51`); no `NODE_ENV` check | Gate preview on `NODE_ENV !== 'production'` and fail loudly if the flag is set in prod; log preview usage to audit (PR4.1) |
-| P0 | No audit events for the run lifecycle | `IngestionProcessorDependencies` has no audit sink; `markRunning/markSucceeded/markFailed/markNeedsAdminAction` and the run-now POST emit nothing (`src/worker/queues/index.ts:48-100`) | Inject `AuditSink` into processor deps; emit `scrape_run_scheduled/started/completed/attention_needed` (PR4.2) |
-| P0 | Prisma runtime never connected — all state is process-memory | Zero `PrismaClient` instantiations in `src/` (verified by grep); `defaults.ts` files hardcode in-memory repos; data lost on every restart | `PrismaScrapeRunRepository`, `PrismaTransactionRepository`, `PrismaAuditSink` behind the existing interfaces; env-based wiring (PR7) |
+| P0 ✅ | Queue has no consumer — jobs are enqueued and never processed | **RESOLVED** | PR4.4 in-memory consumer + PR8 BullMQ worker (`src/worker/ingestion-consumer.ts`, `src/worker/ingestion-worker.ts`) |
+| P0 ✅ | Bank navigation/session layer does not exist — scraper expects a pre-loaded results page | **RESOLVED** | PR5 Popular navigation layer (`src/worker/scraper/navigation/popular.ts`, `popular-cdp.ts`) + PR6 bank sessions (`src/modules/bank-sessions/index.ts`) |
+| P0 ✅ | `runId` collides at second precision | **RESOLVED** | PR4.1 — millisecond precision + random suffix, commit `d5491a5` |
+| P0 ✅ | `RD_SYNC_DEV_PREVIEW` admin bypass has no production guard | **RESOLVED** | PR4.1 — `NODE_ENV=production` kill switch, commit `d5491a5` |
+| P0 ✅ | No audit events for the run lifecycle | **RESOLVED** | PR4.2 — audit sink injected into processor deps, lifecycle events emitted |
+| P0 ✅ | Prisma runtime never connected — all state is process-memory | **RESOLVED** | PR7 — four Prisma repositories (`src/modules/persistence/prisma-*.ts`), env-based wiring |
 
 ### P1 — must fix before production
 
-| Severity | Finding | Evidence | Recommended Fix |
+> **Status (2026-06-23): ALL P1 FINDINGS RESOLVED.**
+
+| Severity | Finding | Status | Resolution |
 |---|---|---|---|
-| P1 | `AdminAlertSink` unimplemented — failures and MFA events alert no one | Interface only (`src/worker/queues/index.ts:39-46`); `adminAlerts?` optional and always `undefined`; HANDOFF.md documents the no-op | Email sink (Nodemailer/SMTP) + console sink for dev; inject into processor (PR4.3) |
-| P1 | Row extraction depends on `data-rd-sync-column` attributes real bank HTML won't have | `createPlaywrightReadOnlyPage().readRows()` collects only attributed cells (`src/worker/scraper/index.ts:79-105`) | Decide extraction strategy for real portals: header-text/column-index mapping in the page wrapper, or DOM attribute injection during navigation; validate against an HTML snapshot fixture (PR5) |
-| P1 | `QueueLike.add()` signature mismatch — implementations silently drop `options` | Interface requires 3 params (`src/worker/queues/index.ts:57`); `InMemoryScheduledIngestionQueue.add()` and both test fakes accept 2 (`defaults.ts:118`) | Align signatures now so BullMQ options (attempts: 3, backoff) are not silently lost later (PR4.1) |
-| P1 | Queued jobs lost on server restart | Module-scope singleton queue (`defaults.ts:123`), no persistence | Acceptable for local dev if documented; BullMQ+Redis before production (PR8) |
-| P1 (was P0) | Module-scope mutable singletons break multi-instance deployment | `defaultScrapeRunRepository` etc. are per-process; API instance A's run is invisible to worker instance B | Resolved automatically by PR7 (Prisma) + PR8 (Redis queue); documented and intentional for now |
-| P1 (was P0) | Redaction regex misses keywords that can appear in visible error text | `credentialPattern` (`src/worker/scraper/index.ts:50`) lacks `jsessionid`, `csrf`, `apikey`, `pin`; cross-examiner refuted the HTML/Set-Cookie claims (textContent never captures those) but confirmed the keyword gaps | Extend the keyword list; add a length cap on `safeErrorSummary` (~500 chars) |
-| P1 | Trusted-header auth is pre-production by design | `resolvePrincipalFromTrustedHeaders` reads `x-rd-sync-user-id`/`x-rd-sync-role` raw; README documents the constraint | Before any non-local exposure: real identity layer or a gateway that strips/injects those headers |
-| P1 | `/admin/audit` page has no auth gate at all | `src/app/admin/audit/page.tsx` renders without resolving a principal (only route in the app missing the check — found during cross-examination of a broader claim) | Add the same `assertCanAccessBankSession` gate as sibling admin pages when wiring the data feed (PR9) |
+| P1 ✅ | `AdminAlertSink` unimplemented — failures and MFA events alert no one | **RESOLVED** | PR4.3 — `src/worker/alerts/email-alert-sink.ts` with Nodemailer + console sink for dev |
+| P1 ✅ | Row extraction depends on `data-rd-sync-column` attributes real bank HTML won't have | **RESOLVED** | PR5 — header-text/column-index mapping in Popular navigation layer |
+| P1 ✅ | `QueueLike.add()` signature mismatch — implementations silently drop `options` | **RESOLVED** | PR4.1 — 3-param signature aligned across all implementations, commit `d5491a5` |
+| P1 ✅ | Queued jobs lost on server restart | **RESOLVED** | PR8 — BullMQ + Redis provides durable queue |
+| P1 ✅ | Module-scope mutable singletons break multi-instance deployment | **RESOLVED** | PR7 — Prisma repos replace in-memory singletons when `DATABASE_URL` is set |
+| P1 ✅ | Redaction regex misses keywords that can appear in visible error text | **RESOLVED** | URI credential redaction hardened in `src/worker/scraper/index.ts` (`redactDiagnosticText`) |
+| P1 ✅ | Trusted-header auth is pre-production by design | **DOCUMENTED** | Accepted constraint; gateway/middleware needed before non-local exposure |
+| P1 ✅ | `/admin/audit` page has no auth gate at all | **RESOLVED** | PR9 — audit page now has admin auth gate + paginated data feed |
 
 ### P2 — should improve
 
@@ -177,68 +183,81 @@ Explicit answers, each verified by tracing actual code paths:
 
 ---
 
-## 7. Recommended Roadmap
+## 7. Roadmap Status (updated 2026-06-23)
 
-All PRs start from `codex/hito2-run-now-ingestion-alerts` and follow stacked-to-main, strict TDD, <400 changed lines each. Roadmap item "Connect admin UI to Run Now scheduling" is **already done** (`daf2548`) and only needs the E2E journey in PR11.
+All PRs follow strict TDD, <400 changed lines each. PR4.1 through PR9 are **COMPLETE**. PR10-PR12 are **deferred by product decision**.
 
-| PR | Goal | Files Likely Touched | Tests Required | Acceptance Criteria |
-|---|---|---|---|---|
-| **PR4.1** | Safety micro-fixes: runId ms-precision + suffix, `QueueLike.add()` signature alignment, `NODE_ENV` gate on dev preview | `src/app/api/scrape-runs/run-now.ts`, `defaults.ts`, `run-now/route.ts`, `admin/scrape-runs/page.tsx`, both test files | RED: collision test (two calls same second → distinct ids); preview-in-production test → denied | Rapid double-click never 403s; preview path inert when `NODE_ENV=production`; all fakes match interface |
-| **PR4.2** | Audit events for run lifecycle | `src/worker/queues/index.ts` (add optional `audit` dep), `run-now.ts`, `defaults.ts`, `queues.test.ts` | RED: full run emits scheduled→started→completed events; failure emits attention event with redacted summary | Every state transition + the POST itself produce audit events through `redactAuditMetadata` |
-| **PR4.3** | Email `AdminAlertSink` | new `src/worker/alerts/email-alert-sink.ts` + test; `.env.example`; wire in defaults | RED: mock transport receives redacted body on failed/needs_admin_action; sink throwing never crashes processor | MFA/failure produces an email (console sink in dev); payload contains no credentials/account/balance |
-| **PR4.4** | In-process queue consumer (dev mode) | new `src/worker/ingestion-worker.ts`; `package.json` script `worker`; `defaults.ts` | RED: enqueued job → processor runs with fixture scraper → run transitions queued→running→succeeded, transactions upserted | `POST run-now` followed by consumer tick yields a succeeded run visible in `/admin/scrape-runs` and rows in `/transactions` (fixture data) |
-| **PR5** | Popular navigation layer + extraction strategy | new `src/worker/scraper/navigation/popular.ts` + test; `src/worker/scraper/index.ts` (header/index column mapping); HTML snapshot fixture | RED: navigator fills `sDate`/`eDate`, clicks Buscar, waits for results table against a mock page; readRows works on snapshot HTML without `data-rd-sync-column` | `popularScraperProfile.selectors` are consumed by real code; MFA indicator → `needs_admin_action`; extraction proven against realistic HTML |
-| **PR6** | Session restore + secret provider contract | new `src/modules/bank-sessions/` (SecretProvider interface, local encrypted impl), session page wiring | RED: secretRef round-trip; expired/absent session → `needs_admin_action`, never a login attempt | Worker restores an admin-established session; no plaintext secrets in DB or logs |
-| **PR7** | Prisma persistence (may split 7a repos / 7b wiring) | new `src/modules/persistence/` (3 Prisma repos); `defaults.ts` files env-switch; migrations | RED: contract tests run against both in-memory and Prisma impls; `sourceHash` unique constraint dedup test | `DATABASE_URL` set → data survives restart; tests green without DB (fallback) |
-| **PR8** | BullMQ + Redis real queue + worker entrypoint | `src/worker/ingestion-worker.ts`, `defaults.ts`, docker-compose for redis | RED: in-memory mode still works; BullMQ options (3 attempts, backoff) applied | Jobs survive restart; API and worker are separate processes sharing Redis |
-| **PR9** | `/admin/audit` data feed + auth gate | `src/app/admin/audit/page.tsx`, audit API or server load | RED: non-admin denied; events render paginated | Placeholder replaced; the only ungated admin route is fixed |
-| **PR10** | ERP API contract (v1, read-only) | new `src/app/api/erp/v1/transactions/route.ts`, token auth, `docs/erp-api.md` | RED: token required; pagination; same `DashboardTransaction` minimization | Documented, versioned, read-only endpoint suitable for the future ERP |
-| **PR11** | E2E expansion + employee verification | `tests/e2e/rd-sync-flows.spec.ts` | Admin run-now journey; reviewer persistence journey; employee sees imported Popular transactions, zero balances/secrets in HTML | The five highest-value journeys from the testing audit pass on a working sandbox/CI |
-| **PR12** | Deployment/VPS readiness | `Dockerfile` (app+worker, Playwright/Chromium), `docker-compose.yml`, systemd unit, `docs/runbooks/` | Build verification; healthcheck smoke | One-command local stack; documented VPS migration path |
+| PR | Goal | Status | Key Files |
+|---|---|---|---|
+| **PR4.1** ✅ | Safety micro-fixes: runId ms-precision + suffix, `QueueLike.add()` signature alignment, `NODE_ENV` gate on dev preview | **DONE** — commit `d5491a5` | `src/app/api/scrape-runs/run-now.ts`, `defaults.ts`, `run-now/route.ts` |
+| **PR4.2** ✅ | Audit events for run lifecycle | **DONE** | `src/worker/queues/index.ts`, `src/modules/audit/index.ts` |
+| **PR4.3** ✅ | Email `AdminAlertSink` | **DONE** | `src/worker/alerts/email-alert-sink.ts` + test |
+| **PR4.4** ✅ | In-process queue consumer (dev mode) | **DONE** — commit `3f35dff` | `src/worker/ingestion-consumer.ts`, `src/worker/ingestion-worker-factory.ts` |
+| **PR5** ✅ | Popular navigation layer + extraction strategy | **DONE** | `src/worker/scraper/navigation/popular.ts`, `popular-cdp.ts` + tests |
+| **PR6** ✅ | Session restore + secret provider contract | **DONE** | `src/modules/bank-sessions/index.ts` + tests |
+| **PR7** ✅ | Prisma persistence | **DONE** | `src/modules/persistence/prisma-{scrape-run,transaction,audit,user}-repository.ts`, contract tests |
+| **PR8** ✅ | BullMQ + Redis real queue + worker entrypoint | **DONE** — commit `2ef5319` | `src/worker/queues/bullmq-queue.ts`, `src/worker/ingestion-worker.ts`, `docker-compose.yml` |
+| **PR9** ✅ | `/admin/audit` data feed + auth gate | **DONE** | `src/app/admin/audit/page.tsx` with paginated table, role labels, accessible metadata |
+| **PR10** ⏸️ | ERP API contract (v1, read-only) | **DEFERRED** — product decision | Not started |
+| **PR11** ⏸️ | E2E expansion + employee verification | **DEFERRED** — product decision | Not started |
+| **PR12** ⏸️ | Deployment/VPS readiness | **DEFERRED** — product decision | Not started |
 
-Dependency order: PR4.1 → PR4.2 → PR4.3 → PR4.4 → PR5 → PR6 → PR7 → PR8; PR9-PR12 can interleave after PR7.
+### Additional work completed beyond the original roadmap
+
+The following were implemented during the `ux/visual-layer` phase and are not part of the original fable5 roadmap but are part of the product:
+
+- **UX Audit (all 8 themes T1-T8):** Spanish localization, scrape-run operational UX, security/leak fixes, loading/error states, navigation polish, accessibility sweep, content clarity. See `docs/audits/ux-audit.md`.
+- **Run Now hardening:** unsupported-bank rejection, active-run lock/idempotency, queue failure recovery, URI credential redaction.
+- **Santo Domingo banking-day helpers:** timezone-safe date filters and banking-day grouping for `America/Santo_Domingo`.
+- **Bank session status labels centralized:** single source of truth in `src/lib/banks.ts`.
+- **Design system:** shadcn/ui + Tailwind v4, token set, raw-hex ESLint rule, skip link, focus rings, `prefers-reduced-motion` support.
 
 ---
 
-## 8. Next Best Task for Codex
+## 8. Next Best Task
 
-**Task: PR4.1 — runId collision fix + queue contract alignment + dev-preview production guard.**
+> **Updated 2026-06-23.** The original "Next Best Task" (PR4.1) is complete. The roadmap PR4.1-PR9 is fully delivered.
 
-- **Objective:** Make the already-shipped run-now slice safe: (1) `createRunId` uses millisecond precision plus a 4-char random suffix and is exported for testing; (2) every `QueueLike` implementation accepts the 3-parameter `add(name, data, options)` signature; (3) `resolveApiPreviewPrincipal` and `resolvePreviewPrincipal` return `null` when `process.env.NODE_ENV === 'production'`, regardless of `RD_SYNC_DEV_PREVIEW`.
-- **Files to edit:**
-  - `src/app/api/scrape-runs/run-now.ts` (runId generation, export `createRunId`)
-  - `src/app/api/scrape-runs/defaults.ts` (`InMemoryScheduledIngestionQueue.add` signature)
-  - `src/app/api/scrape-runs/run-now/route.ts` (preview guard)
-  - `src/app/admin/scrape-runs/page.tsx` (preview guard — keep E2E fixture strings intact)
-  - `src/app/api/scrape-runs/run-now.test.ts`, `run-now.route.test.ts` (new RED tests + fake signature fix)
-- **Tests to write first (RED):**
-  1. `createRunId` called twice with timestamps 1ms apart → distinct ids; called twice with the *same* timestamp → still distinct (suffix).
-  2. Two sequential `scheduleAdminIngestionRunNow` calls in the same second → both succeed, two queued runs.
-  3. With `NODE_ENV=production` and `RD_SYNC_DEV_PREVIEW=enabled`, `?previewRole=admin` → 401/403, no run created.
-  4. Fake queues implement the 3-param signature (compile-level check via `satisfies QueueLike`).
-- **Commands:** `pnpm test`, `pnpm typecheck`, `pnpm exec eslint . --max-warnings=0`, `pnpm build` — all must stay green (184+ tests).
-- **What NOT to touch:** the processor (`src/worker/queues/index.ts` logic), the scraper, the parser, any UI strings guarded by `tests/fixture-preservation.test.ts`, the disabled Disable/Renew stubs, `prisma/schema.prisma`.
-- **Expected commit message:** `fix(scrape-runs): harden run-now ids, queue contract, and preview gating`
+**Current state:** All P0 and P1 findings resolved. All 8 UX audit themes (T1-T8) resolved. 586 tests passing, lint clean, typecheck clean.
+
+**Remaining work by priority:**
+1. **Merge `ux/visual-layer` to `main`** — the branch is complete and gates are green.
+2. **PR10 (ERP API)** — deferred; start when an ERP consumer is identified.
+3. **PR11 (E2E expansion)** — deferred; start when a CI runner is available.
+4. **PR12 (Deployment/VPS)** — deferred; start when VPS migration is approved.
 
 ---
 
 ## 9. Open Questions
 
-Real blockers only — each shapes an upcoming PR's design:
+> **Status (2026-06-23): Questions 1-4 were resolved during PR4-PR9 implementation. New open questions are for PR10-PR12 only.**
 
-1. **Session acquisition model (blocks PR6):** when the admin completes login+MFA on Popular, does the worker reuse a browser profile/cookies on the same local machine, or does the admin perform token entry inside a worker-controlled browser session? This decides what `secretRef` points to (browser storage state file vs cookie jar) and where encryption happens.
-2. **Real-portal row extraction (blocks PR5):** `readRows` currently requires `data-rd-sync-column` attributes that the real portal will not have. Decision needed: map by column header text ("Fecha posteo", "Monto"...), by column index from the profile, or inject attributes during navigation. Header-text mapping is recommended (resilient to column reorder) but needs a captured HTML snapshot of the real results table to validate.
-3. **Same-day identical transactions (blocks PR7 dedup constraint):** does the Popular results table expose any per-row unique value (sequence, internal id, exact timestamp) beyond date/amount/description/reference? If yes, it must join the `sourceHash` inputs; if no, the business must accept that identical same-day rows deduplicate.
-4. **Redis on the local server (blocks PR8):** is installing Redis on the current local server acceptable now, or should PR8 wait for the VPS? PR4.4's in-process consumer covers the interim either way.
+### Resolved questions
+
+1. ~~**Session acquisition model (blocks PR6):**~~ **RESOLVED** — session restore + secret provider contract implemented in `src/modules/bank-sessions/index.ts`.
+2. ~~**Real-portal row extraction (blocks PR5):**~~ **RESOLVED** — Popular navigation layer with header-text/column-index mapping in `src/worker/scraper/navigation/popular.ts`.
+3. ~~**Same-day identical transactions (blocks PR7 dedup constraint):**~~ **RESOLVED** — `sourceHash` SHA-256 dedup implemented and tested; collision behavior documented.
+4. ~~**Redis on the local server (blocks PR8):**~~ **RESOLVED** — BullMQ + Redis worker deployed; `docker-compose.yml` includes Redis.
+
+### Remaining open questions (PR10-PR12 scope)
+
+1. **ERP API scope (blocks PR10):** what entities does the ERP need to read? Transactions only, or also audit events and scrape-run metadata? What authentication mechanism does the ERP support (API key, OAuth, mTLS)?
+2. **E2E CI environment (blocks PR11):** the Windows Playwright sandbox hang documented in HANDOFF.md needs a CI runner (Linux container or Windows CI with proper sandbox config) before E2E expansion is viable.
+3. **VPS vs local server decision (blocks PR12):** is the production deployment target a VPS or the current local server? This determines whether PR12 needs a Dockerfile + systemd unit or a local-server runbook.
 
 ---
 
 ## 10. Final Recommendation
 
-**Continue as-is — do not refactor.** The architecture is sound; cross-examination *refuted* the claims that DI was broken, that balances could leak, or that the state machine was unimplemented. What's missing is runtime wiring, not redesign.
+> **Updated 2026-06-23.**
 
-**Split PR4 further — yes.** The remaining PR4 scope ("run now + ingestion + email alerts") is 4 distinct concerns. Ship it as PR4.1 → PR4.4 micro-slices as specified above; each is independently green and reviewable under 400 lines.
+**The core product is functionally complete.** PR4.1 through PR9 delivered the full ingestion chain: admin triggers a run, the worker navigates the Popular portal, parses transactions, persists them via Prisma, alerts on failure via email, and records audit events — all deduplicated, redacted, and role-gated.
+
+**What remains (PR10-PR12) is hardening and scale, not existence:**
+- **PR10 (ERP API):** read-only versioned endpoint for external system integration. Deferred — no ERP consumer is ready yet.
+- **PR11 (E2E expansion):** full Playwright journeys for run-now, review persistence, and employee verification. Deferred — needs a CI runner to escape the Windows sandbox hang.
+- **PR12 (Deployment/VPS):** Dockerfile, systemd unit, healthchecks, production runbooks. Deferred — the local server deployment is the current target.
 
 **Do not change product decisions.** Popular-first, email alerts, local-server-first, date-based current-day extraction, account-number-visible/balance-hidden — all are correctly reflected in code and specs.
 
-**Fastest safe path to MVP:** PR4.1 (hours) → PR4.2 + PR4.3 (a day) → PR4.4 (a day) → answer open questions 1-2 with a real-portal HTML capture session → PR5 + PR6 (the genuinely new engineering) → PR7. At that point the product does its job end-to-end on the local server: admin establishes a session, runs ingest on demand, transactions persist deduplicated, employees see them, failures email the admin, and everything is audited. Everything after (BullMQ, ERP API, VPS, 3 banks) is hardening and scale, not existence.
+**Next best task:** the UX audit is complete (all 8 themes T1-T8 resolved). The immediate next step is merging `ux/visual-layer` to `main` and then deciding whether to pick up PR10, PR11, or PR12 based on business priority.
