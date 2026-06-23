@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../ui/tooltip";
 import { notImplemented } from "../../app/(private)/transactions/_actions/not-implemented";
-import type { ReviewState } from "../../modules/transactions";
+import { REVIEW_STATE_LABELS, type ReviewState } from "../../modules/transactions/labels";
 
 interface ReviewActionsProps {
   transactionId: string;
@@ -41,13 +41,13 @@ export function ReviewActions({ transactionId, currentState }: ReviewActionsProp
         toast.error(result.message);
         return;
       }
-      toast.success(`Marked ${transactionId} as ${target}`);
+      toast.success(`Transacción ${transactionId} marcada como ${REVIEW_STATE_LABELS[target]}`);
     })();
   }
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="flex flex-wrap gap-2" role="group" aria-label="Review actions (forthcoming)">
+      <div className="flex flex-wrap gap-2" role="group" aria-label="Acciones de revisión (próximamente)">
         {REVIEW_STATES.map((state) => (
           <Tooltip key={state}>
             <TooltipTrigger asChild>
@@ -62,11 +62,11 @@ export function ReviewActions({ transactionId, currentState }: ReviewActionsProp
                 onClick={() => handleClick(state)}
                 className="opacity-60"
               >
-                {state.replace(/_/g, " ")}
+                {REVIEW_STATE_LABELS[state]}
               </Button>
             </TooltipTrigger>
             <TooltipContent>
-              <p>Available in upcoming change</p>
+              <p>Disponible en un próximo cambio</p>
             </TooltipContent>
           </Tooltip>
         ))}

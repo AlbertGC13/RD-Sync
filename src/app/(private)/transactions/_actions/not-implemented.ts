@@ -19,10 +19,10 @@
 export type NotImplementedFeature = "review" | "retry" | "disable" | "renew";
 
 const MESSAGES: Record<NotImplementedFeature, string> = {
-  review: "Review actions are available in an upcoming change.",
-  retry: "Run retry is available in Hito 2.",
-  disable: "Disable connection is available in Hito 2.",
-  renew: "Session renewal is available in Hito 2.",
+  review: "Las acciones de revisión estarán disponibles en un próximo cambio.",
+  retry: "El reintento de corrida estará disponible en el Hito 2.",
+  disable: "La desactivación de conexión estará disponible en el Hito 2.",
+  renew: "La renovación de sesión estará disponible en el Hito 2.",
 };
 
 export type NotImplementedResult =
