@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   default as AdminScrapeRunsPage,
   AdminScrapeRunsDashboard,
-  resolvePreviewPrincipal,
   summarizeScrapeRuns,
   type AdminScrapeRun,
 } from "./page";
@@ -29,6 +28,11 @@ vi.mock("next/headers", () => ({
   })),
 }));
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: vi.fn() }),
+  usePathname: () => "/admin/scrape-runs",
+}));
+
 const runs: AdminScrapeRun[] = [
   {
     id: "run-1",
@@ -38,7 +42,7 @@ const runs: AdminScrapeRun[] = [
     endedAt: "2026-06-07T13:46:00.000Z",
     insertedCount: 0,
     skippedCount: 0,
-    safeErrorSummary: "Bank session requires admin MFA action",
+    safeErrorSummary: "La sesión bancaria requiere acción MFA del administrador",
   },
   {
     id: "run-2",
@@ -58,7 +62,7 @@ const runs: AdminScrapeRun[] = [
     endedAt: "2026-06-07T11:01:00.000Z",
     insertedCount: 0,
     skippedCount: 0,
-    safeErrorSummary: "Transaction table selector missing",
+    safeErrorSummary: "Selector de tabla de transacciones no encontrado",
   },
 ];
 
@@ -72,12 +76,10 @@ describe("AdminScrapeRunsDashboard", () => {
       process.env.RD_SYNC_AUTH_SECRET = TEST_SECRET;
       delete process.env.RD_SYNC_DEV_PREVIEW;
 
-      const html = renderToStaticMarkup(
-        await AdminScrapeRunsPage({ searchParams: Promise.resolve({}) }),
-      );
+      const html = renderToStaticMarkup(await AdminScrapeRunsPage());
 
-      expect(html).toContain("No scrape runs recorded yet");
-      expect(html).not.toContain("Bank session requires admin MFA action");
+      expect(html).toContain("Aún no se registran corridas de extracción");
+      expect(html).not.toContain("La sesión bancaria requiere acción MFA del administrador");
       expect(html).not.toContain("preview-run-");
     } finally {
       if (previousSecret === undefined) {
@@ -93,34 +95,34 @@ describe("AdminScrapeRunsDashboard", () => {
     }
   });
 
-  it("renders operational health and admin intervention guidance for admins", () => {
+  it("renders operational health and admin intervention guidance for admins in Spanish", () => {
     const html = renderToStaticMarkup(
       <AdminScrapeRunsDashboard principal={{ id: "admin-1", role: "admin" }} runs={runs} />,
     );
 
-    // E2E fixture strings (REQ-DS-004 contract):
-    expect(html).toContain("Scrape run operations");
-    expect(html).toContain("Needs admin action");
-    expect(html).toContain("1");
-    expect(html).toContain("Bank session requires admin MFA action");
-    expect(html).toContain("Admin intervention required");
-    expect(html).toContain("Resume only after session renewal is completed by an admin.");
+    // Spanish visible contracts (operator-facing copy for Dominican banking staff):
+    expect(html).toContain("Operaciones de extracción");
+    expect(html).toContain("Necesita acción admin");
+    expect(html).toContain("Intervención administrativa requerida");
+    expect(html).toContain("Reanuda solo después de que un administrador complete la renovación de sesión.");
     expect(html).toContain("Banreservas");
-    expect(html).toContain("12 inserted");
+    expect(html).toContain("12 insertadas");
+    // The needs-admin-action run's safe summary is rendered (Spanish fixture).
+    expect(html).toContain("La sesión bancaria requiere acción MFA del administrador");
     // Negative guarantees: no secrets in the rendered HTML.
     expect(html).not.toContain("token=");
     expect(html).not.toContain("password=");
   });
 
-  it("denies non-admin users without showing scraper controls or run details", () => {
+  it("denies non-admin users with a Spanish denial page and without leaking run details", () => {
     const html = renderToStaticMarkup(
       <AdminScrapeRunsDashboard principal={{ id: "viewer-1", role: "viewer" }} runs={runs} />,
     );
 
-    expect(html).toContain("Admin access required");
-    expect(html).toContain("Only admins can view scraping health or handle MFA/session intervention.");
-    expect(html).not.toContain("Bank session requires admin MFA action");
-    expect(html).not.toContain("Resume only after session renewal");
+    expect(html).toContain("Acceso administrativo requerido");
+    expect(html).toContain("Solo los administradores pueden ver la salud de la extracción o gestionar la intervención de MFA/sesión.");
+    expect(html).not.toContain("La sesión bancaria requiere acción MFA del administrador");
+    expect(html).not.toContain("Reanuda solo después");
   });
 
   it("summarizes failed, succeeded, and attention-needed runs", () => {
@@ -139,47 +141,53 @@ describe("AdminScrapeRunsDashboard", () => {
       <AdminScrapeRunsDashboard principal={{ id: "admin-1", role: "admin" }} runs={[]} />,
     );
 
-    expect(html).toContain("No scrape runs recorded yet");
-    expect(html).toContain("Once a bank connection is wired and the scheduler is on, runs will appear here.");
-    expect(html).not.toContain("Bank session requires admin MFA action");
+    expect(html).toContain("Aún no se registran corridas de extracción");
+    expect(html).toContain("Cuando se conecte una cuenta bancaria y el planificador esté activo, las corridas aparecerán aquí.");
+    expect(html).not.toContain("La sesión bancaria requiere acción MFA del administrador");
   });
 
-  it("exposes FR-012 affordances with retry active and session actions deferred", () => {
+  it("exposes FR-012 affordances with run-now active and session actions deferred", () => {
     const html = renderToStaticMarkup(
       <AdminScrapeRunsDashboard principal={{ id: "admin-1", role: "admin" }} runs={runs} />,
     );
 
-    expect(html).toContain("Retry run");
-    expect(html).toContain("Disable connection");
-    expect(html).toContain("Renew session");
-    expect(html).toContain('aria-label="Run actions"');
-    expect(html).toContain('aria-label="Schedule a new ingestion run now"');
+    expect(html).toContain("Ejecutar ahora");
+    expect(html).toContain("Desactivar conexión");
+    expect(html).toContain("Renovar sesión");
+    expect(html).toContain('aria-label="Acciones de corrida"');
+    expect(html).toContain('aria-label="Programar una nueva corrida de extracción ahora"');
     expect(html).toContain('aria-disabled="true"');
   });
 
-  it("allows admin preview only when local dev preview is enabled", () => {
-    const previousValue = process.env.RD_SYNC_DEV_PREVIEW;
+  it("denies admin scrape-runs access when only a query-param preview flag is provided (no real admin principal)", () => {
+    // Behaviour test for blocker C — proves that query-param-based preview
+    // admin access is denied by the dashboard, matching the API surface.
+    // A null principal simulates the "no cookie, no headers, no proxy trust"
+    // case that an attacker probing ?previewRole=admin would land on.
+    const html = renderToStaticMarkup(
+      <AdminScrapeRunsDashboard principal={null} runs={[]} />,
+    );
 
-    try {
-      delete process.env.RD_SYNC_DEV_PREVIEW;
-      expect(resolvePreviewPrincipal({ previewRole: "admin" })).toBeNull();
+    // Denial page is rendered for unauthenticated callers.
+    expect(html).toContain("Acceso administrativo requerido");
+    // Run operations and any operator data must NOT leak.
+    expect(html).not.toContain("Operaciones de extracción");
+    expect(html).not.toContain("La sesión bancaria requiere acción MFA del administrador");
+    expect(html).not.toContain("Reanuda solo después");
+  });
 
-      process.env.RD_SYNC_DEV_PREVIEW = "enabled";
-      expect(resolvePreviewPrincipal({ previewRole: "admin" })).toEqual({
-        id: "admin-preview",
-        role: "admin",
-      });
-      expect(resolvePreviewPrincipal({ previewRole: "viewer" })).toBeNull();
+  it("disables the page-level Run Now button when an active Popular run exists", () => {
+    const activeRuns: AdminScrapeRun[] = [
+      { ...runs[0], id: "run-active", status: "running" },
+    ];
+    const html = renderToStaticMarkup(
+      <AdminScrapeRunsDashboard principal={{ id: "admin-1", role: "admin" }} runs={activeRuns} />,
+    );
 
-      vi.stubEnv("NODE_ENV", "production");
-      expect(resolvePreviewPrincipal({ previewRole: "admin" })).toBeNull();
-    } finally {
-      vi.unstubAllEnvs();
-      if (previousValue === undefined) {
-        delete process.env.RD_SYNC_DEV_PREVIEW;
-      } else {
-        process.env.RD_SYNC_DEV_PREVIEW = previousValue;
-      }
-    }
+    // The page-level button must render disabled so operators cannot
+    // schedule a duplicate concurrent run for the same bank.
+    const runNowButton = html.match(/<button[^>]*>Ejecutar ahora<\/button>/)?.[0];
+    expect(runNowButton).toBeDefined();
+    expect(runNowButton).toContain('disabled=""');
   });
 });

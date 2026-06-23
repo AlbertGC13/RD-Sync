@@ -20,8 +20,11 @@ import { Badge } from "../../../components/ui/badge";
 import { PageHeader } from "../../../components/ui/page-header";
 import { EmptyState } from "../../../components/ui/empty-state";
 import { RunActionAffordances } from "../../../components/admin/run-action-affordances";
+import { TriggerScrapeButton } from "../../../components/admin/trigger-scrape-button";
 import type { ScrapeRunStatus } from "../../../worker/queues";
 import { listScrapeRunsForPage } from "../../api/scrape-runs/defaults";
+import { BANKING_TIMEZONE } from "../../../lib/banking-day";
+import { bankDisplayName, scrapeRunStatusLabel } from "../../../lib/banks";
 
 export interface AdminScrapeRun {
   id: string;
@@ -39,15 +42,8 @@ interface AdminScrapeRunsDashboardProps {
   runs: readonly AdminScrapeRun[];
 }
 
-interface AdminScrapeRunsPageProps {
-  searchParams?: Promise<Record<string, string | string[] | undefined>>;
-}
-
-export default async function AdminScrapeRunsPage({ searchParams }: AdminScrapeRunsPageProps) {
-  const resolvedSearchParams = searchParams ? await searchParams : {};
-  const principal =
-    resolvePreviewPrincipal(resolvedSearchParams) ??
-    await getCurrentPrincipal();
+export default async function AdminScrapeRunsPage() {
+  const principal = await getCurrentPrincipal();
   const runs = await listScrapeRunsForPage({});
 
   return <AdminScrapeRunsDashboard principal={principal} runs={runs} />;
@@ -60,17 +56,17 @@ export function AdminScrapeRunsDashboard({ principal, runs }: AdminScrapeRunsDas
     return (
       <div className="grid gap-6">
         <PageHeader
-          eyebrow="Restricted operations"
-          title="Admin access required"
-          description="Only admins can view scraping health or handle MFA/session intervention."
+          eyebrow="Operaciones restringidas"
+          title="Acceso administrativo requerido"
+          description="Solo los administradores pueden ver la salud de la extracción o gestionar la intervención de MFA/sesión."
         />
         <Card>
           <CardContent className="grid gap-3 p-8 text-center">
             <ShieldAlert className="mx-auto h-8 w-8 text-warning" aria-hidden />
             <p className="text-sm text-muted-foreground">
-              If you believe you should have access, contact the workspace owner and ask for
-              the <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">admin</code>{" "}
-              role.
+              Si crees que deberías tener acceso, contacta al propietario del espacio de trabajo y
+              solicita el <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">admin</code>{" "}
+              rol.
             </p>
           </CardContent>
         </Card>
@@ -82,50 +78,57 @@ export function AdminScrapeRunsDashboard({ principal, runs }: AdminScrapeRunsDas
   const attentionRuns = runs.filter(
     (run) => run.status === "needs_admin_action" || run.status === "failed",
   );
+  const hasActivePopularRun = runs.some(
+    (run) =>
+      run.bankId === "popular" && (run.status === "queued" || run.status === "running"),
+  );
 
   return (
     <div className="grid gap-6">
       <PageHeader
-        eyebrow="Admin operations"
-        title="Scrape run operations"
-        description="Monitor bank ingestion health, review safe failure summaries, and keep MFA/session work restricted to admins."
+        eyebrow="Operaciones administrativas"
+        title="Operaciones de extracción"
+        description="Monitorea la salud de la ingesta bancaria, revisa resúmenes seguros de fallos y mantiene el trabajo de MFA/sesión restringido a administradores."
         actions={
-          <Badge variant="outline" className="gap-1.5">
-            <Activity className="h-3 w-3 text-primary" aria-hidden />
-            {summary.total} runs · last 24h
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className="gap-1.5">
+              <Activity className="h-3 w-3 text-primary" aria-hidden />
+              {summary.total} corridas · últimas 24h
+            </Badge>
+            <TriggerScrapeButton disabled={hasActivePopularRun} />
+          </div>
         }
       />
 
       <section
         className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"
-        aria-label="Scrape run health summary"
+        aria-label="Resumen de salud de extracción"
       >
         <MetricCard
-          label="Total runs"
+          label="Corridas totales"
           value={summary.total}
-          detail={`${summary.inserted} inserted`}
+          detail={`${summary.inserted} insertadas`}
           icon={Activity}
           tone="default"
         />
         <MetricCard
-          label="Successful"
+          label="Exitosas"
           value={summary.succeeded}
-          detail={`${summary.skipped} skipped duplicates`}
+          detail={`${summary.skipped} duplicados omitidos`}
           icon={CheckCircle2}
           tone="success"
         />
         <MetricCard
-          label="Needs admin action"
+          label="Necesita acción admin"
           value={summary.needsAdminAction}
-          detail="MFA or session renewal"
+          detail="MFA o renovación de sesión"
           icon={AlertTriangle}
           tone="warning"
         />
         <MetricCard
-          label="Failed"
+          label="Fallidas"
           value={summary.failed}
-          detail="Safe summaries only"
+          detail="Solo resúmenes seguros"
           icon={ShieldAlert}
           tone="destructive"
         />
@@ -136,11 +139,11 @@ export function AdminScrapeRunsDashboard({ principal, runs }: AdminScrapeRunsDas
           <CardHeader>
             <div className="flex items-center justify-between">
               <div>
-                <CardDescription>Intervention queue</CardDescription>
-                <CardTitle>Admin intervention required</CardTitle>
+                <CardDescription>Cola de intervención</CardDescription>
+                <CardTitle>Intervención administrativa requerida</CardTitle>
               </div>
               {attentionRuns.length > 0 ? (
-                <Badge variant="destructive">{attentionRuns.length} pending</Badge>
+                <Badge variant="destructive">{attentionRuns.length} pendientes</Badge>
               ) : null}
             </div>
           </CardHeader>
@@ -154,8 +157,8 @@ export function AdminScrapeRunsDashboard({ principal, runs }: AdminScrapeRunsDas
             ) : (
               <EmptyState
                 icon={<CheckCircle2 className="h-6 w-6 text-success" aria-hidden />}
-                title="No scrape runs currently require admin intervention."
-                description="All runs are succeeding or in queue. The next failure or MFA prompt will appear here."
+                title="Ninguna corrida requiere intervención administrativa actualmente."
+                description="Todas las corridas están finalizadas o en cola. El próximo fallo o aviso de MFA aparecerá aquí."
               />
             )}
           </CardContent>
@@ -163,14 +166,14 @@ export function AdminScrapeRunsDashboard({ principal, runs }: AdminScrapeRunsDas
 
         <Card>
           <CardHeader>
-            <CardDescription>Safe recovery checklist</CardDescription>
-            <CardTitle>MFA / session handling</CardTitle>
+            <CardDescription>Lista de recuperación segura</CardDescription>
+            <CardTitle>Gestión de MFA / sesión</CardTitle>
           </CardHeader>
           <CardContent>
             <ol className="grid list-decimal gap-3 pl-5 text-sm leading-relaxed text-foreground/90">
-              <li>Confirm the alert contains no credentials, cookies, or raw bank session data.</li>
-              <li>Renew the bank session using an admin-only workstation and authorized credentials.</li>
-              <li>Resume only after session renewal is completed by an admin.</li>
+              <li>Confirma que la alerta no contenga credenciales, cookies ni datos crudos de sesión bancaria.</li>
+              <li>Renueva la sesión bancaria usando una estación de trabajo exclusiva para administradores con credenciales autorizadas.</li>
+              <li>Reanuda solo después de que un administrador complete la renovación de sesión.</li>
             </ol>
           </CardContent>
         </Card>
@@ -180,12 +183,12 @@ export function AdminScrapeRunsDashboard({ principal, runs }: AdminScrapeRunsDas
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
-              <CardDescription>Run history</CardDescription>
-              <CardTitle>Recent scrape runs</CardTitle>
+              <CardDescription>Historial de corridas</CardDescription>
+              <CardTitle>Corridas recientes de extracción</CardTitle>
             </div>
             <Badge variant="secondary" className="gap-1.5">
               <Clock className="h-3 w-3" aria-hidden />
-              Newest first
+              Más recientes primero
             </Badge>
           </div>
         </CardHeader>
@@ -199,8 +202,8 @@ export function AdminScrapeRunsDashboard({ principal, runs }: AdminScrapeRunsDas
           ) : (
             <EmptyState
               icon={<Inbox className="h-6 w-6" aria-hidden />}
-              title="No scrape runs recorded yet"
-              description="Once a bank connection is wired and the scheduler is on, runs will appear here."
+              title="Aún no se registran corridas de extracción"
+              description="Cuando se conecte una cuenta bancaria y el planificador esté activo, las corridas aparecerán aquí."
             />
           )}
         </CardContent>
@@ -278,7 +281,7 @@ function ScrapeRunCard({ run }: { run: AdminScrapeRun }) {
             <div className="grid gap-1">
               <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <Banknote className="h-3.5 w-3.5" aria-hidden />
-                <span className="font-medium text-foreground">{formatBankName(run.bankId)}</span>
+                <span className="font-medium text-foreground">{bankDisplayName(run.bankId)}</span>
                 <span aria-hidden>·</span>
                 <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
                   {run.id}
@@ -297,16 +300,17 @@ function ScrapeRunCard({ run }: { run: AdminScrapeRun }) {
           </div>
 
           <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <RunStat label="Started" value={formatRelative(run.startedAt)} absolute={formatAbsolute(run.startedAt)} />
-            <RunStat label="Ended" value={formatRelative(run.endedAt)} absolute={formatAbsolute(run.endedAt)} />
+            <RunStat label="Iniciada" value={formatRelative(run.startedAt)} absolute={formatAbsolute(run.startedAt)} />
+            <RunStat label="Finalizada" value={formatRelative(run.endedAt)} absolute={formatAbsolute(run.endedAt)} />
             <RunStat
-              label="Inserted"
+              label="Insertadas"
               value={String(run.insertedCount)}
               mono
-              tone="success"
+              tone={run.status === "succeeded" && run.insertedCount === 0 ? "muted" : "success"}
+              note={run.status === "succeeded" && run.insertedCount === 0 ? "Sin transacciones nuevas" : undefined}
             />
             <RunStat
-              label="Skipped"
+              label="Omitidas"
               value={String(run.skippedCount)}
               mono
               tone="muted"
@@ -314,7 +318,7 @@ function ScrapeRunCard({ run }: { run: AdminScrapeRun }) {
           </dl>
         </div>
         <div className="border-t border-border/60 bg-muted/20 px-5 py-3">
-          <RunActionAffordances runId={run.id} status={run.status} />
+          <RunActionAffordances runId={run.id} bankId={run.bankId} status={run.status} />
         </div>
       </CardContent>
     </Card>
@@ -327,9 +331,10 @@ interface RunStatProps {
   absolute?: string;
   mono?: boolean;
   tone?: "default" | "muted" | "success";
+  note?: string;
 }
 
-function RunStat({ label, value, absolute, mono, tone = "default" }: RunStatProps) {
+function RunStat({ label, value, absolute, mono, tone = "default", note }: RunStatProps) {
   const toneClass =
     tone === "muted"
       ? "text-muted-foreground"
@@ -347,6 +352,7 @@ function RunStat({ label, value, absolute, mono, tone = "default" }: RunStatProp
       >
         {value}
       </dd>
+      {note ? <p className="text-[10px] text-amber-400">{note}</p> : null}
     </div>
   );
 }
@@ -360,80 +366,55 @@ function statusToBadge(status: ScrapeRunStatus): {
     case "succeeded":
       return {
         variant: "success",
-        label: "Succeeded",
+        label: scrapeRunStatusLabel(status),
         icon: <CheckCircle2 className="h-3 w-3" aria-hidden />,
       };
     case "failed":
       return {
         variant: "destructive",
-        label: "Failed",
+        label: scrapeRunStatusLabel(status),
         icon: <ShieldAlert className="h-3 w-3" aria-hidden />,
       };
     case "needs_admin_action":
       return {
         variant: "warning",
-        label: "Needs admin action",
+        label: scrapeRunStatusLabel(status),
         icon: <AlertTriangle className="h-3 w-3" aria-hidden />,
       };
     case "running":
       return {
         variant: "secondary",
-        label: "Running",
+        label: scrapeRunStatusLabel(status),
         icon: <Activity className="h-3 w-3 animate-pulse" aria-hidden />,
       };
     case "queued":
     default:
       return {
         variant: "outline",
-        label: "Queued",
+        label: scrapeRunStatusLabel(status),
         icon: <Clock className="h-3 w-3" aria-hidden />,
       };
   }
 }
 
-function formatBankName(bankId: string): string {
-  const names: Record<string, string> = {
-    banreservas: "Banreservas",
-    bhd: "BHD",
-    popular: "Banco Popular",
-  };
-  return names[bankId] ?? bankId;
-}
-
 function formatAbsolute(value: string | null): string {
-  if (!value) return "Not recorded";
-  return new Intl.DateTimeFormat("en-US", {
+  if (!value) return "Sin registrar";
+  return new Intl.DateTimeFormat("es-DO", {
     dateStyle: "medium",
     timeStyle: "short",
-    timeZone: "UTC",
+    timeZone: BANKING_TIMEZONE,
   }).format(new Date(value));
 }
 
 function formatRelative(value: string | null): string {
-  if (!value) return "Not recorded";
+  if (!value) return "Sin registrar";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   const diffMs = date.getTime() - Date.now();
   const diffMin = Math.round(diffMs / 60_000);
-  if (Math.abs(diffMin) < 60) return new Intl.RelativeTimeFormat("en-US", { numeric: "auto" }).format(diffMin, "minute");
+  if (Math.abs(diffMin) < 60) return new Intl.RelativeTimeFormat("es-DO", { numeric: "auto" }).format(diffMin, "minute");
   const diffHour = Math.round(diffMin / 60);
-  if (Math.abs(diffHour) < 24) return new Intl.RelativeTimeFormat("en-US", { numeric: "auto" }).format(diffHour, "hour");
+  if (Math.abs(diffHour) < 24) return new Intl.RelativeTimeFormat("es-DO", { numeric: "auto" }).format(diffHour, "hour");
   const diffDay = Math.round(diffHour / 24);
-  return new Intl.RelativeTimeFormat("en-US", { numeric: "auto" }).format(diffDay, "day");
-}
-
-export function resolvePreviewPrincipal(
-  searchParams: Record<string, string | string[] | undefined>,
-): Principal | null {
-  if (process.env.NODE_ENV === "production" || process.env.RD_SYNC_DEV_PREVIEW !== "enabled") {
-    return null;
-  }
-  return firstValue(searchParams.previewRole) === "admin"
-    ? { id: "admin-preview", role: "admin" }
-    : null;
-}
-
-function firstValue(value: string | string[] | undefined): string | undefined {
-  if (Array.isArray(value)) return value[0];
-  return value;
+  return new Intl.RelativeTimeFormat("es-DO", { numeric: "auto" }).format(diffDay, "day");
 }
