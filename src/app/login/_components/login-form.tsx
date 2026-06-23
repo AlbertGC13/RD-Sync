@@ -58,7 +58,6 @@ export function LoginForm({ next }: LoginFormProps) {
           autoComplete="email"
           required
           placeholder="you@example.com"
-          aria-describedby={error ? "login-error" : undefined}
         />
       </div>
 
@@ -73,10 +72,15 @@ export function LoginForm({ next }: LoginFormProps) {
           autoComplete="current-password"
           required
           placeholder="••••••••"
-          aria-describedby={error ? "login-error" : undefined}
         />
       </div>
 
+      {/*
+        The error is a form-level (generic) message, not field-specific, so it
+        is not associated to either input via aria-describedby. `role="alert"`
+        announces it on appearance without the duplicate announcement that
+        linking both inputs to one shared element would cause.
+      */}
       {error ? (
         <p id="login-error" role="alert" className="text-sm text-destructive">
           {error}

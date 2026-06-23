@@ -58,6 +58,37 @@ const REVIEW_STATE_VALUES: readonly ReviewState[] = [
   "ignored",
 ];
 
+/**
+ * Builds the target URL for removing a single filter from the committed query
+ * string. Exported so the chip-removal navigation behaviour is unit-testable
+ * without a DOM — the project's test environment is `node` (no jsdom), so
+ * click handlers cannot be exercised via event simulation.
+ */
+export function buildFilterRemovalUrl(
+  currentSearchParams: URLSearchParams,
+  removedKey: string,
+): string {
+  const next = new URLSearchParams(currentSearchParams.toString());
+  next.delete(removedKey);
+  const qs = next.toString();
+  return qs ? `/transactions?${qs}` : "/transactions";
+}
+
+/**
+ * Performs the chip-removal navigation: pushes the URL produced by
+ * `buildFilterRemovalUrl` to the router. Exported so the behavioural
+ * contract — "clicking a filter chip re-navigates with the filter removed"
+ * — is unit-testable in the project's `node` test environment, where click
+ * handlers cannot be exercised via event simulation.
+ */
+export function removeFilterAndNavigate(
+  searchParams: URLSearchParams,
+  key: string,
+  router: ReturnType<typeof useRouter>,
+): void {
+  router.push(buildFilterRemovalUrl(searchParams, key));
+}
+
 export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -96,23 +127,35 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
   const activeChips = useMemo(
     () =>
       [
-        bankId && { key: "bankId", label: `Banco: ${bankId}`, clear: () => setBankId("") },
-        amount && { key: "amount", label: `Monto: ${amount}`, clear: () => setAmount("") },
-        query && { key: "query", label: `Búsqueda: ${query}`, clear: () => setQuery("") },
-        currency && { key: "currency", label: `Moneda: ${currency}`, clear: () => setCurrency("") },
+        bankId && { key: "bankId", name: "Banco", value: bankId, label: `Banco: ${bankId}` },
+        amount && { key: "amount", name: "Monto", value: amount, label: `Monto: ${amount}` },
+        query && { key: "query", name: "Búsqueda", value: query, label: `Búsqueda: ${query}` },
+        currency && {
+          key: "currency",
+          name: "Moneda",
+          value: currency,
+          label: `Moneda: ${currency}`,
+        },
         accountFingerprint && {
           key: "accountFingerprint",
+          name: "Cuenta",
+          value: accountFingerprint,
           label: `Cuenta: ${accountFingerprint}`,
-          clear: () => setAccountFingerprint(""),
         },
-        dateFrom && { key: "dateFrom", label: `Desde: ${dateFrom}`, clear: () => setDateFrom("") },
-        dateTo && { key: "dateTo", label: `Hasta: ${dateTo}`, clear: () => setDateTo("") },
+        dateFrom && {
+          key: "dateFrom",
+          name: "Desde",
+          value: dateFrom,
+          label: `Desde: ${dateFrom}`,
+        },
+        dateTo && { key: "dateTo", name: "Hasta", value: dateTo, label: `Hasta: ${dateTo}` },
         reviewState && {
           key: "reviewState",
+          name: "Estado",
+          value: REVIEW_STATE_LABELS[reviewState as ReviewState] ?? reviewState,
           label: `Estado: ${REVIEW_STATE_LABELS[reviewState as ReviewState] ?? reviewState}`,
-          clear: () => setReviewState(""),
         },
-      ].filter(Boolean) as { key: string; label: string; clear: () => void }[],
+      ].filter(Boolean) as { key: string; name: string; value: string; label: string }[],
     [bankId, amount, query, currency, accountFingerprint, dateFrom, dateTo, reviewState],
   );
 
@@ -162,6 +205,46 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
       router.push("/transactions");
     });
   }, [router]);
+
+  /**
+   * Removes a single filter: clears its local draft state AND re-navigates
+   * immediately with the filter removed from the committed URL. Without the
+   * navigation, the list would stay stale until "Apply" is clicked.
+   */
+  const removeFilter = useCallback(
+    (key: string) => {
+      switch (key) {
+        case "bankId":
+          setBankId("");
+          break;
+        case "amount":
+          setAmount("");
+          break;
+        case "query":
+          setQuery("");
+          break;
+        case "currency":
+          setCurrency("");
+          break;
+        case "accountFingerprint":
+          setAccountFingerprint("");
+          break;
+        case "dateFrom":
+          setDateFrom("");
+          break;
+        case "dateTo":
+          setDateTo("");
+          break;
+        case "reviewState":
+          setReviewState("");
+          break;
+      }
+      startTransition(() => {
+        removeFilterAndNavigate(searchParams, key, router);
+      });
+    },
+    [searchParams, router],
+  );
 
   return (
     <section
@@ -235,14 +318,15 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
             </Select>
           </Field>
 
-          <Field icon={Wallet} label="Monto" htmlFor="filter-amount">
+          <Field icon={Wallet} label="Monto" htmlFor="filter-amount" description="Monto exacto en DOP">
             <Input
               id="filter-amount"
               name="amount"
               inputMode="decimal"
-              placeholder="ej. 1500.50"
+              placeholder="Ej: 1500.50"
               value={amount}
               onChange={(event) => setAmount(event.target.value)}
+              aria-describedby="filter-amount-hint"
             />
           </Field>
 
@@ -336,7 +420,8 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
             <button
               key={chip.key}
               type="button"
-              onClick={chip.clear}
+              onClick={() => removeFilter(chip.key)}
+              aria-label={`Quitar filtro: ${chip.name}: ${chip.value}`}
               className="group inline-flex items-center gap-1 rounded-full border border-border bg-background px-2.5 py-0.5 text-xs text-foreground transition-colors hover:border-primary/60 hover:bg-primary/10"
             >
               {chip.label}
@@ -354,10 +439,12 @@ interface FieldProps {
   label: string;
   htmlFor: string;
   className?: string;
+  /** Optional helper text rendered below the control and wired as its describedby target. */
+  description?: string;
   children: ReactNode;
 }
 
-function Field({ icon: Icon, label, htmlFor, className, children }: FieldProps) {
+function Field({ icon: Icon, label, htmlFor, className, description, children }: FieldProps) {
   return (
     <div className={`grid gap-1.5 ${className ?? ""}`}>
       <label
@@ -368,6 +455,11 @@ function Field({ icon: Icon, label, htmlFor, className, children }: FieldProps) 
         {label}
       </label>
       {children}
+      {description ? (
+        <p id={`${htmlFor}-hint`} className="text-xs text-muted-foreground">
+          {description}
+        </p>
+      ) : null}
     </div>
   );
 }

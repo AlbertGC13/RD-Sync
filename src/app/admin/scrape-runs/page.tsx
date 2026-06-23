@@ -385,7 +385,7 @@ function statusToBadge(status: ScrapeRunStatus): {
       return {
         variant: "secondary",
         label: scrapeRunStatusLabel(status),
-        icon: <Activity className="h-3 w-3 animate-pulse" aria-hidden />,
+        icon: <Activity className="h-3 w-3 motion-safe:animate-pulse" aria-hidden />,
       };
     case "queued":
     default:

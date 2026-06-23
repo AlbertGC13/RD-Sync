@@ -4,11 +4,13 @@ import { describe, expect, it } from "vitest";
 import { Skeleton } from "./skeleton";
 
 describe("Skeleton", () => {
-  it("renders a div with the animate-pulse class", () => {
+  it("renders a div with the animate-pulse class guarded by motion-safe", () => {
     const html = renderToStaticMarkup(<Skeleton />);
 
     expect(html).toContain("<div");
-    expect(html).toContain("animate-pulse");
+    // The pulse animation must be guarded by `motion-safe:` so it is disabled
+    // for users with `prefers-reduced-motion: reduce`.
+    expect(html).toContain("motion-safe:animate-pulse");
     expect(html).toContain("bg-muted");
   });
 
