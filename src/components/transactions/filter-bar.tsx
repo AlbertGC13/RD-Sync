@@ -27,10 +27,12 @@ import {
   SelectValue,
 } from "../ui/select";
 import type { TransactionFilters } from "../../modules/transactions";
+import { REVIEW_STATE_LABELS, type ReviewState } from "../../modules/transactions/labels";
+import { getSantoDomingoDayKey } from "../../lib/banking-day";
 
 interface FilterBarProps {
   filters: TransactionFilters;
-  /** Number of active filters, used to drive the "Clear all" affordance. */
+  /** Number of active filters, used to drive the "Limpiar todo" affordance. */
   activeCount: number;
   /** Total results so the user can decide if filters are too narrow. */
   resultCount: number;
@@ -43,18 +45,18 @@ const BANK_OPTIONS = [
 ] as const;
 
 const CURRENCY_OPTIONS = [
-  { value: "DOP", label: "DOP · Dominican Peso" },
-  { value: "USD", label: "USD · US Dollar" },
-  { value: "EUR", label: "EUR · Euro" },
+  { value: "DOP", label: "DOP — Peso dominicano" },
+  { value: "USD", label: "USD — Dólar estadounidense" },
+  { value: "EUR", label: "EUR — Euro" },
 ] as const;
 
-const REVIEW_STATE_OPTIONS = [
-  { value: "new", label: "New" },
-  { value: "seen", label: "Seen" },
-  { value: "internally_validated", label: "Internally validated" },
-  { value: "needs_review", label: "Needs review" },
-  { value: "ignored", label: "Ignored" },
-] as const;
+const REVIEW_STATE_VALUES: readonly ReviewState[] = [
+  "new",
+  "seen",
+  "internally_validated",
+  "needs_review",
+  "ignored",
+];
 
 export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps) {
   const router = useRouter();
@@ -94,20 +96,20 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
   const activeChips = useMemo(
     () =>
       [
-        bankId && { key: "bankId", label: `Bank: ${bankId}`, clear: () => setBankId("") },
-        amount && { key: "amount", label: `Amount: ${amount}`, clear: () => setAmount("") },
-        query && { key: "query", label: `Search: ${query}`, clear: () => setQuery("") },
-        currency && { key: "currency", label: `Currency: ${currency}`, clear: () => setCurrency("") },
+        bankId && { key: "bankId", label: `Banco: ${bankId}`, clear: () => setBankId("") },
+        amount && { key: "amount", label: `Monto: ${amount}`, clear: () => setAmount("") },
+        query && { key: "query", label: `Búsqueda: ${query}`, clear: () => setQuery("") },
+        currency && { key: "currency", label: `Moneda: ${currency}`, clear: () => setCurrency("") },
         accountFingerprint && {
           key: "accountFingerprint",
-          label: `Account: ${accountFingerprint}`,
+          label: `Cuenta: ${accountFingerprint}`,
           clear: () => setAccountFingerprint(""),
         },
-        dateFrom && { key: "dateFrom", label: `From: ${dateFrom}`, clear: () => setDateFrom("") },
-        dateTo && { key: "dateTo", label: `To: ${dateTo}`, clear: () => setDateTo("") },
+        dateFrom && { key: "dateFrom", label: `Desde: ${dateFrom}`, clear: () => setDateFrom("") },
+        dateTo && { key: "dateTo", label: `Hasta: ${dateTo}`, clear: () => setDateTo("") },
         reviewState && {
           key: "reviewState",
-          label: `State: ${reviewState.replace(/_/g, " ")}`,
+          label: `Estado: ${REVIEW_STATE_LABELS[reviewState as ReviewState] ?? reviewState}`,
           clear: () => setReviewState(""),
         },
       ].filter(Boolean) as { key: string; label: string; clear: () => void }[],
@@ -163,10 +165,10 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
 
   return (
     <section
-      aria-label="Transaction filters"
+      aria-label="Filtros de transacciones"
       className="rounded-xl border border-border/80 bg-card/60 shadow-sm shadow-black/20"
     >
-      <span className="sr-only">Filter transactions</span>
+      <span className="sr-only">Filtros de transacciones</span>
 
       <form
         onSubmit={(event) => {
@@ -183,7 +185,7 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
             <Input
               id="filter-query"
               name="query"
-              placeholder="Search reference, concept, originator…"
+              placeholder="Buscar referencia, concepto, originador…"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               className="pl-9"
@@ -198,7 +200,7 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
             aria-controls="filter-advanced-panel"
           >
             <Filter className="h-3.5 w-3.5" aria-hidden />
-            Filters
+            Filtros
             {advancedActiveCount > 0 ? (
               <Badge variant="secondary" className="ml-1">
                 {advancedActiveCount}
@@ -206,7 +208,7 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
             ) : null}
           </Button>
           <Button type="submit" size="sm" disabled={isPending}>
-            {isPending ? "Applying…" : "Apply filters"}
+            {isPending ? "Aplicando…" : "Aplicar filtros"}
           </Button>
         </div>
 
@@ -218,10 +220,10 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
               : "hidden"
           }
         >
-          <Field icon={Building2} label="Bank" htmlFor="filter-bankId">
+          <Field icon={Building2} label="Banco" htmlFor="filter-bankId">
             <Select value={bankId} onValueChange={setBankId}>
               <SelectTrigger id="filter-bankId" className="w-full">
-                <SelectValue placeholder="All banks" />
+                <SelectValue placeholder="Todos los bancos" />
               </SelectTrigger>
               <SelectContent>
                 {BANK_OPTIONS.map((option) => (
@@ -233,21 +235,21 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
             </Select>
           </Field>
 
-          <Field icon={Wallet} label="Amount" htmlFor="filter-amount">
+          <Field icon={Wallet} label="Monto" htmlFor="filter-amount">
             <Input
               id="filter-amount"
               name="amount"
               inputMode="decimal"
-              placeholder="e.g. 1500.50"
+              placeholder="ej. 1500.50"
               value={amount}
               onChange={(event) => setAmount(event.target.value)}
             />
           </Field>
 
-          <Field icon={CreditCard} label="Currency" htmlFor="filter-currency">
+          <Field icon={CreditCard} label="Moneda" htmlFor="filter-currency">
             <Select value={currency} onValueChange={setCurrency}>
               <SelectTrigger id="filter-currency" className="w-full">
-                <SelectValue placeholder="Any currency" />
+                <SelectValue placeholder="Cualquier moneda" />
               </SelectTrigger>
               <SelectContent>
                 {CURRENCY_OPTIONS.map((option) => (
@@ -259,17 +261,17 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
             </Select>
           </Field>
 
-          <Field icon={Hash} label="Account fingerprint" htmlFor="filter-accountFingerprint">
+          <Field icon={Hash} label="Identificador de cuenta" htmlFor="filter-accountFingerprint">
             <Input
               id="filter-accountFingerprint"
               name="accountFingerprint"
-              placeholder="acct-main"
+              placeholder="cuenta-principal"
               value={accountFingerprint}
               onChange={(event) => setAccountFingerprint(event.target.value)}
             />
           </Field>
 
-          <Field icon={CalendarClock} label="From" htmlFor="filter-dateFrom">
+          <Field icon={CalendarClock} label="Desde" htmlFor="filter-dateFrom">
             <Input
               id="filter-dateFrom"
               name="dateFrom"
@@ -279,7 +281,7 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
             />
           </Field>
 
-          <Field icon={CalendarClock} label="To" htmlFor="filter-dateTo">
+          <Field icon={CalendarClock} label="Hasta" htmlFor="filter-dateTo">
             <Input
               id="filter-dateTo"
               name="dateTo"
@@ -289,15 +291,15 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
             />
           </Field>
 
-          <Field icon={FileText} label="Review state" htmlFor="filter-reviewState">
+          <Field icon={FileText} label="Estado de revisión" htmlFor="filter-reviewState">
             <Select value={reviewState} onValueChange={setReviewState}>
               <SelectTrigger id="filter-reviewState" className="w-full">
-                <SelectValue placeholder="Any state" />
+                <SelectValue placeholder="Cualquier estado" />
               </SelectTrigger>
               <SelectContent>
-                {REVIEW_STATE_OPTIONS.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
+                {REVIEW_STATE_VALUES.map((value) => (
+                  <SelectItem key={value} value={value}>
+                    {REVIEW_STATE_LABELS[value]}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -314,7 +316,7 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
                 disabled={isPending}
               >
                 <X className="h-3.5 w-3.5" aria-hidden />
-                Clear all
+                Limpiar todo
               </Button>
             ) : null}
           </div>
@@ -324,11 +326,11 @@ export function FilterBar({ filters, activeCount, resultCount }: FilterBarProps)
       {activeChips.length > 0 ? (
         <div
           className="flex flex-wrap items-center gap-1.5 border-t border-border/60 bg-muted/30 px-4 py-2.5"
-          aria-label="Active filters"
+          aria-label="Filtros activos"
         >
           <span className="mr-auto inline-flex items-center gap-1.5 text-xs text-muted-foreground">
             <CircleDot className="h-3 w-3 text-success" aria-hidden />
-            {resultCount} {resultCount === 1 ? "result" : "results"}
+            {resultCount} {resultCount === 1 ? "resultado" : "resultados"}
           </span>
           {activeChips.map((chip) => (
             <button
@@ -372,7 +374,16 @@ function Field({ icon: Icon, label, htmlFor, className, children }: FieldProps) 
 
 function toDateInputValue(value: string | Date | undefined): string | undefined {
   if (!value) return undefined;
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return undefined;
-  return date.toISOString().slice(0, 10);
+  // Pure YYYY-MM-DD strings (e.g. straight from the URL) are already valid
+  // date-input values — return them as-is so we don't reinterpret them as
+  // UTC midnight (which would shift the Santo Domingo day back by one).
+  if (typeof value === "string") {
+    return value.length >= 10 ? value.slice(0, 10) : undefined;
+  }
+  if (Number.isNaN(value.getTime())) return undefined;
+  // The filters now carry UTC instants bounding a Santo Domingo local day
+  // (start for dateFrom, end for dateTo). Derive the input value from the
+  // Santo Domingo day key so the control shows the local day the operator
+  // actually chose, not the UTC day of the bound instant.
+  return getSantoDomingoDayKey(value);
 }

@@ -8,6 +8,7 @@ import {
   toDashboardTransaction,
 } from "./index";
 import type { BankMovement, TransactionRecord } from "./index";
+import { santoDomingoDayRange } from "../../lib/banking-day";
 
 const baseMovement: BankMovement = {
   bankId: "popular",
@@ -129,6 +130,52 @@ describe("filterTransactions", () => {
       bankId: "popular",
       query: "not-present",
     });
+
+    expect(result).toEqual([]);
+  });
+
+  it("interprets dateTo as the Santo Domingo local day end so late-evening DR transactions are included", () => {
+    // Regression for the UTC-midnight bug: a postedAt at 23:30Z on June 7 is
+    // 19:30 in Santo Domingo and MUST be included by dateTo=2026-06-07. The
+    // old behaviour (new Date("2026-06-07") = 00:00:00Z) excluded it.
+    const lateEvening = normalizeBankMovement(
+      { ...baseMovement, reference: "REF-LATE", postedAt: "2026-06-07T23:30:00.000Z" },
+      { id: "tx-late" },
+    );
+    const range = santoDomingoDayRange("2026-06-07");
+
+    const result = filterTransactions([lateEvening], { dateTo: range.end });
+
+    expect(result.map((record) => record.id)).toEqual(["tx-late"]);
+  });
+
+  it("interprets dateFrom as the Santo Domingo local day start so early-morning DR transactions are included", () => {
+    // A postedAt at 05:30Z on June 7 is 01:30 in Santo Domingo on June 7 and
+    // MUST be included by dateFrom=2026-06-07. The old behaviour
+    // (new Date("2026-06-07") = 00:00:00Z) would also include it, but this
+    // guards the start bound against a future regression that flips the
+    // offset sign.
+    const earlyMorning = normalizeBankMovement(
+      { ...baseMovement, reference: "REF-EARLY", postedAt: "2026-06-07T05:30:00.000Z" },
+      { id: "tx-early" },
+    );
+    const range = santoDomingoDayRange("2026-06-07");
+
+    const result = filterTransactions([earlyMorning], { dateFrom: range.start });
+
+    expect(result.map((record) => record.id)).toEqual(["tx-early"]);
+  });
+
+  it("excludes transactions that fall outside the Santo Domingo local day range", () => {
+    // A postedAt at 03:30Z on June 7 is 23:30 on June 6 in Santo Domingo and
+    // MUST be excluded by dateFrom=2026-06-07.
+    const previousLocalDay = normalizeBankMovement(
+      { ...baseMovement, reference: "REF-PREV", postedAt: "2026-06-07T03:30:00.000Z" },
+      { id: "tx-prev" },
+    );
+    const range = santoDomingoDayRange("2026-06-07");
+
+    const result = filterTransactions([previousLocalDay], { dateFrom: range.start });
 
     expect(result).toEqual([]);
   });
