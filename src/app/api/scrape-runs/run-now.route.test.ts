@@ -58,7 +58,7 @@ describe("POST /api/scrape-runs/run-now", () => {
     ]);
   });
 
-  it("supports local admin preview when explicitly enabled", async () => {
+  it("does NOT honor previewRole=admin as an admin bypass", async () => {
     const previousValue = process.env.RD_SYNC_DEV_PREVIEW;
     const scrapeRuns = new InMemoryScrapeRunRepository();
     const queue = new FakeQueue();
@@ -77,11 +77,12 @@ describe("POST /api/scrape-runs/run-now", () => {
         }),
       );
 
-      expect(response.status).toBe(202);
-      expect(await response.json()).toEqual({
-        run: expect.objectContaining({ runId: "popular-preview-run", status: "queued" }),
-      });
-      expect(queue.addCalls).toHaveLength(1);
+      // The previewRole backdoor is removed — without a real principal, the
+      // request is rejected (401). Even with the dev preview flag, query
+      // params must not substitute for a signed cookie / trusted headers.
+      expect(response.status).toBe(401);
+      expect(await scrapeRuns.list({})).toEqual([]);
+      expect(queue.addCalls).toEqual([]);
     } finally {
       if (previousValue === undefined) {
         delete process.env.RD_SYNC_DEV_PREVIEW;
@@ -107,7 +108,9 @@ describe("POST /api/scrape-runs/run-now", () => {
     );
 
     expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({ error: "Admin role required" });
+    // User-safe message — the raw "Admin role required" authz detail must
+    // never leak to the browser.
+    expect(await response.json()).toEqual({ error: "Unable to schedule run" });
     expect(await scrapeRuns.list({})).toEqual([]);
     expect(queue.addCalls).toEqual([]);
   });
@@ -124,6 +127,7 @@ describe("POST /api/scrape-runs/run-now", () => {
     );
 
     expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Unable to schedule run" });
     expect(await scrapeRuns.list({})).toEqual([]);
     expect(queue.addCalls).toEqual([]);
   });

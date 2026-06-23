@@ -1,7 +1,8 @@
 import { popularPortalFixture, parsePopularTransactionRows } from "../../../modules/bank-adapters/popular";
 import { createIngestionProcessor } from "../../../worker/queues";
-import type { IngestionScraper } from "../../../worker/queues";
+import type { IngestionJob, IngestionScraper } from "../../../worker/queues";
 import { createInMemoryIngestionConsumer, type InMemoryIngestionConsumer } from "../../../worker/ingestion-consumer";
+import { redactDiagnosticText } from "../../../worker/scraper";
 import { resolveDefaultAlertSink } from "../../../worker/alerts/email-alert-sink";
 import { createPopularCdpScraper } from "../../../worker/scraper/navigation/popular-cdp";
 import { defaultAuditSink } from "../audit/defaults";
@@ -84,7 +85,19 @@ function createDefaultIngestionConsumer(): InMemoryIngestionConsumer | undefined
     adminAlerts: resolveDefaultAlertSink(),
     scraper: resolveDefaultScraper(),
   });
-  return createInMemoryIngestionConsumer({ queue: defaultIngestionQueue, processor });
+  return createInMemoryIngestionConsumer({
+    queue: defaultIngestionQueue,
+    processor,
+    // Recovery for the in-memory drain orphan: when a dequeued job's
+    // processor throws before its own failure catch (e.g. `markRunning`
+    // rejecting), mark the scrape run `failed` with a redacted summary so it
+    // is never left in `queued` with no pending job. Mirrors the queue-failure
+    // recovery in run-now.ts.
+    onJobError: async (job: IngestionJob, error: Error) => {
+      const safeSummary = redactDiagnosticText(error.message);
+      await defaultScrapeRunRepository.markFailed(job.data.runId, safeSummary, new Date());
+    },
+  });
 }
 
 function getOrCreateDefaultIngestionConsumer(): InMemoryIngestionConsumer | undefined {
