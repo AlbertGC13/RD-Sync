@@ -24,7 +24,8 @@ export function TransactionRow({ transaction, actions, reviewerMode }: Transacti
   const directionLabel = isCredit ? "Crédito" : "Débito";
   const amountClass = isCredit ? "text-emerald-300" : "text-amber-300";
   const amountSign = isCredit ? "+" : "−";
-  const formattedAmount = `${amountSign} ${transaction.currency} ${transaction.amount}`;
+  const formattedNumericAmount = formatTransactionAmount(transaction.amount);
+  const formattedAmount = `${amountSign} ${transaction.currency} ${formattedNumericAmount}`;
   const formattedTime = formatPostedAt(transaction.postedAt);
   const bankMeta = getBankMeta(transaction.bankId);
 
@@ -63,7 +64,7 @@ export function TransactionRow({ transaction, actions, reviewerMode }: Transacti
         <div className="flex-shrink-0 text-right">
           <strong
             className={`font-mono text-sm font-semibold tabular-nums tracking-tight ${amountClass}`}
-            aria-label={`${directionLabel} de ${transaction.currency} ${transaction.amount}`}
+            aria-label={`${directionLabel} de ${transaction.currency} ${formattedNumericAmount}`}
           >
             {formattedAmount}
           </strong>
@@ -131,4 +132,14 @@ function formatPostedAt(value: string): string {
     day: "2-digit",
     timeZone: "America/Santo_Domingo",
   });
+}
+
+function formatTransactionAmount(value: string): string {
+  const numericValue = Number(value.replace(/,/g, ""));
+  if (!Number.isFinite(numericValue)) return value;
+
+  return new Intl.NumberFormat("es-DO", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(numericValue);
 }

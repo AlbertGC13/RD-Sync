@@ -26,7 +26,7 @@ describe("TransactionRow", () => {
     );
     expect(html).toContain("Crédito");
     expect(html).toContain("+");
-    expect(html).toContain("DOP 1500.50");
+    expect(html).toContain("DOP 1,500.50");
   });
 
   it("renders debit direction with the warning badge variant", () => {
@@ -56,6 +56,18 @@ describe("TransactionRow", () => {
       <TransactionRow transaction={baseTx} reviewerMode={false} />,
     );
     expect(html).toContain("Banco Popular");
+  });
+
+  it("formats amounts with RD separators", () => {
+    const html = renderToStaticMarkup(
+      <TransactionRow
+        transaction={{ ...baseTx, amount: "155000.00" }}
+        reviewerMode={false}
+      />,
+    );
+
+    expect(html).toContain("DOP 155,000.00");
+    expect(html).toContain('aria-label="Crédito de DOP 155,000.00"');
   });
 });
 

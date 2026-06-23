@@ -62,7 +62,7 @@ describe("TransactionsDashboard", () => {
     expect(html).toContain("Banco Popular");
     expect(html).toContain("REF-123");
     expect(html).toContain("Cliente Uno");
-    expect(html).toContain("DOP 1500.50");
+    expect(html).toContain("DOP 1,500.50");
     expect(html).toContain("Crédito");
     // Data minimization: source hash and metadata MUST NOT appear.
     expect(html).not.toContain("sourceHash");
