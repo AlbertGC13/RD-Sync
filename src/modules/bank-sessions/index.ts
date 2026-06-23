@@ -137,7 +137,7 @@ export function createCdpSessionChecker(
   options: CdpSessionCheckerOptions = {},
 ): CdpSessionChecker {
   const {
-    cdpUrl = "http://localhost:9222",
+    cdpUrl = "http://127.0.0.1:9222",
     baseUrl = "https://ib.bpd.com.do",
     waitTimeoutMs = 15_000,
     connect = lazyPlaywrightConnect,

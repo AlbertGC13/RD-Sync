@@ -131,3 +131,75 @@ Set `RD_SYNC_REDIS_URL` before starting the worker.
 - No bank navigation is configured.  Set `RD_SYNC_SCRAPER=popular-cdp` and
   `RD_SYNC_CDP_URL` to attach to the bank browser, or set
   `RD_SYNC_DEV_PREVIEW=enabled` for the fixture scraper.
+
+---
+
+## Linux server setup — Banco Popular browser orchestration
+
+RD-Sync runs on a Linux server. The bank browser is Brave/Chromium (not
+Firefox for this slice) because the existing working path is CDP attach
+(`chromium.connectOverCDP`). The employee never sees the browser process —
+the worker attaches to a server-side browser that an admin has logged into.
+
+### 1. Install a browser
+
+Install Brave or Chromium on the server:
+
+```bash
+# Debian/Ubuntu — Brave
+sudo apt install curl
+sudo curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main" | sudo tee /etc/apt/sources.list.d/brave-browser-release.list
+sudo apt update && sudo apt install brave-browser
+
+# Or Chromium
+sudo apt install chromium-browser
+```
+
+### 2. Configure environment variables
+
+```bash
+export RD_SYNC_SCRAPER=popular-cdp
+export RD_SYNC_CDP_URL=http://127.0.0.1:9222
+export RD_SYNC_BANK_BROWSER_AUTO_LAUNCH=enabled
+export RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND=./scripts/launch-bank-browser.sh
+```
+
+With auto-launch enabled, the worker calls the launch command before
+connecting if CDP is not already alive, then polls until CDP responds (or
+times out after `RD_SYNC_BANK_BROWSER_READY_TIMEOUT_MS`, default 30 s).
+
+Without auto-launch, the admin must run `./scripts/launch-bank-browser.sh`
+manually before the worker can scrape.
+
+### 3. Run the server and worker
+
+```bash
+# Terminal 1 — Next.js API
+pnpm dev
+
+# Terminal 2 — ingestion worker
+RD_SYNC_REDIS_URL=redis://localhost:6379 pnpm worker
+```
+
+### 4. Admin first-time login / MFA
+
+The first time (or whenever the bank session expires):
+
+1. Run `./scripts/launch-bank-browser.sh` (or let the worker auto-launch it).
+2. In the browser window that opens on the server, log in to the bank portal
+   with credentials and complete MFA.
+3. Leave the browser open. The worker attaches via CDP on the next scrape.
+
+The admin accesses the server browser through a secure remote desktop
+(VNC/noVNC over SSH tunnel). CDP is bound to 127.0.0.1 only — never expose
+it to the Internet.
+
+### Security constraints
+
+- **No automated login or MFA.** The worker never enters credentials or
+  completes MFA. Banco Popular blocks CDP-driven login attempts.
+- **No anti-bot evasion.** RD-Sync does not bypass Imperva or other bank
+  defences. The scraper is read-only over a human-opened session.
+- **CDP on 127.0.0.1 only.** The launch script always binds
+  `--remote-debugging-address=127.0.0.1`. Do not change this to 0.0.0.0.

@@ -8,6 +8,8 @@ The bank portal (Banco Popular) expires sessions after a short inactivity window
 
 ## Launching the dedicated browser
 
+### Windows (local development)
+
 Use the provided PowerShell script to open Brave with an isolated profile reserved for the bank session:
 
 ```powershell
@@ -19,7 +21,66 @@ The script:
 - Opens Brave on CDP port 9222
 - Detects Brave at the two standard install paths and exits with a clear error if absent
 
+### Linux server (production)
+
+Use the provided Bash script to open Brave/Chromium with an isolated profile:
+
+```bash
+./scripts/launch-bank-browser.sh
+```
+
+The script:
+- Detects the first available browser binary in this order: `brave-browser`, `brave`, `chromium-browser`, `chromium`, `google-chrome` (override with `RD_SYNC_BANK_BROWSER_BIN`)
+- Creates a persistent profile at `~/.local/share/rd-sync/bank-browser` (override with `RD_SYNC_BANK_BROWSER_PROFILE_DIR`)
+- Binds CDP to **127.0.0.1 only** on port 9222 (override with `RD_SYNC_BANK_BROWSER_DEBUG_PORT`) — never exposes CDP to the network
+- Opens the bank portal at `https://ib.bpd.com.do` (override with `RD_SYNC_BANK_BROWSER_START_URL`)
+- If CDP is already alive on the port, prints a message and exits without relaunching
+- Writes browser logs to `~/.local/share/rd-sync/bank-browser/browser.log` (override with `RD_SYNC_BANK_BROWSER_LOG_FILE`)
+
+**Importante:** No navegue sitios personales en este perfil. Manténgalo exclusivo para el banco para que las cookies de sesión no se invaliden.
+
+#### Auto-lanzamiento desde el worker (opcional)
+
+Cuando se configuran estas variables de entorno, el worker puede iniciar el navegador del banco automáticamente antes de conectarse por CDP:
+
+| Variable | Descripción |
+|----------|-------------|
+| `RD_SYNC_BANK_BROWSER_AUTO_LAUNCH` | `enabled` para activar el auto-lanzamiento |
+| `RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND` | Comando confiable de servidor que inicia el navegador (p. ej. `./scripts/launch-bank-browser.sh`) |
+| `RD_SYNC_BANK_BROWSER_READY_TIMEOUT_MS` | Tiempo máximo de espera tras lanzar (por defecto 30000) |
+| `RD_SYNC_BANK_BROWSER_POLL_INTERVAL_MS` | Intervalo de sondeo de CDP (por defecto 500) |
+
+**Seguridad:** `RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND` es configuración de servidor gestionada por el operador. Nunca se debe establecer desde entrada no confiable ni desde la interfaz de usuario. El resumen de error que ve el empleado nunca incluye la ruta del comando ni su salida — esos detalles quedan solo en logs del servidor.
+
+El verificador de estado de sesión (`/api/bank-sessions/status`) **no** lanza el navegador. Solo reporta el estado actual. Si el navegador está caído, reporta `browser_unavailable` para que el administrador lo inicie.
+
 **Important:** Never browse personal sites in this profile. Keep it bank-only so the session cookies are not invalidated by other activity.
+
+#### Rollback — deshabilitar el auto-lanzamiento y limpiar huérfanos
+
+Si el auto-lanzamiento causa problemas (procesos duplicados, navegador en mal estado, perfil corrupto), siga estos pasos en orden:
+
+1. **Deshabilite el auto-lanzamiento** eliminando o comentando `RD_SYNC_BANK_BROWSER_AUTO_LAUNCH` (o poniéndolo en cualquier valor distinto de `enabled`) en la configuración del servidor. El worker volverá a conectar directamente a CDP sin lanzar nada.
+2. **Reinicie el worker** para que relea la configuración:
+   ```bash
+   kill -SIGTERM <worker-pid>
+   RD_SYNC_REDIS_URL=redis://localhost:6379 pnpm worker
+   ```
+3. **Termine cualquier navegador huérfano** lanzado por el perfil o el puerto CDP:
+   ```bash
+   # Por puerto CDP (más seguro — apunta solo al navegador de debug):
+   pkill -f "remote-debugging-port=9222"
+
+   # O por directorio de perfil (si el puerto por defecto cambió):
+   pkill -f "user-data-dir=$HOME/.local/share/rd-sync/bank-browser"
+   ```
+   Verifique que no queden procesos: `pgrep -af "remote-debugging-port"`.
+4. **Verifique el estado** antes de reanudar:
+   ```bash
+   curl -fsS http://127.0.0.1:9222/json/version >/dev/null && echo "CDP activo" || echo "CDP caído"
+   ```
+   Y consulte `GET /api/bank-sessions/status` (requiere principal admin). Debe reportar `active` tras un relanzamiento manual limpio, o `browser_unavailable` si decide dejarlo caído hasta que un admin inicie sesión de nuevo.
+5. **Relance manualmente** solo cuando esté listo: `./scripts/launch-bank-browser.sh` y complete el login/MFA.
 
 ## Logging in
 
@@ -86,11 +147,24 @@ Response shape:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RD_SYNC_SCRAPER` | — | Set to `popular-cdp` to enable the CDP-backed scraper and session checker |
-| `RD_SYNC_CDP_URL` | `http://localhost:9222` | CDP endpoint for the running Brave session |
+| `RD_SYNC_CDP_URL` | `http://127.0.0.1:9222` | CDP endpoint for the running Brave session (bind to 127.0.0.1 only) |
 | `RD_SYNC_SESSION_MONITOR` | — | Set to `enabled` to start the background session monitor |
 | `RD_SYNC_SESSION_CHECK_INTERVAL_MS` | `300000` (5 min) | Poll interval in milliseconds; minimum 60000 (1 min) |
 | `RD_SYNC_ALERT_SMTP_URL` | — | SMTP URL for alert emails; falls back to console.warn if absent |
 | `RD_SYNC_ADMIN_EMAIL` | — | Recipient address for alert emails |
+| `RD_SYNC_BANK_BROWSER_AUTO_LAUNCH` | — | Set to `enabled` to let the worker start the bank browser before connecting |
+| `RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND` | — | Trusted local command that starts the bank browser (server config only) |
+| `RD_SYNC_BANK_BROWSER_READY_TIMEOUT_MS` | `30000` | Max wait for CDP after launching the browser |
+| `RD_SYNC_BANK_BROWSER_POLL_INTERVAL_MS` | `500` | Poll interval while waiting for CDP |
+| `RD_SYNC_BANK_BROWSER_PROFILE_DIR` | `~/.local/share/rd-sync/bank-browser` | Persistent browser profile dir (used by the launch script) |
+| `RD_SYNC_BANK_BROWSER_DEBUG_PORT` | `9222` | CDP debug port (used by the launch script) |
+
+## Security warnings
+
+- **CDP bound to 127.0.0.1 only.** El script de lanzamiento siempre usa `--remote-debugging-address=127.0.0.1`. Nunca exponga CDP a Internet o a la red local — cualquiera con acceso al endpoint CDP podría controlar la sesión bancaria autenticada.
+- **No automated credential entry.** RD-Sync no introduce credenciales ni completa MFA. El administrador inicia sesión manualmente en el navegador del servidor.
+- **No Imperva/anti-bot bypass.** RD-Sync no evade las defensas anti-bot del banco. El scraper es de solo lectura: navega y extrae transacciones sobre una sesión abierta por un humano.
+- **Launch command is trusted server config.** `RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND` solo se establece en la configuración del servidor gestionada por el operador. Nunca desde entrada de usuario ni desde la interfaz de empleado.
 
 ## Dev-mode caveats
 

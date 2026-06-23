@@ -7,7 +7,7 @@
  *
  * Relevant env vars:
  *   RD_SYNC_SCRAPER            — "popular-cdp" enables the CDP-backed checker
- *   RD_SYNC_CDP_URL            — CDP endpoint (default http://localhost:9222)
+ *   RD_SYNC_CDP_URL            — CDP endpoint (default http://127.0.0.1:9222)
  *   RD_SYNC_SESSION_MONITOR    — "enabled" activates the background monitor
  *   RD_SYNC_SESSION_CHECK_INTERVAL_MS — poll interval in ms (default 300000, min 60000)
  */
@@ -30,6 +30,13 @@ import { defaultAuditSink } from "../audit/defaults";
  * Returns a session checker based on the current env configuration.
  * - RD_SYNC_SCRAPER === "popular-cdp" → real CDP-backed checker
  * - Otherwise → stub that always reports browser_unavailable (safe default)
+ *
+ * NOTE: the session checker deliberately does NOT auto-launch the bank
+ * browser. Launching is a side effect reserved for the worker/scraper path
+ * (actual scrape runs). A read-only status check should only REPORT the
+ * current state — if the browser is down it returns browser_unavailable so
+ * the admin knows to start it, rather than silently spawning processes from
+ * a status endpoint.
  */
 export function resolveDefaultSessionChecker(): CdpSessionChecker {
   if (process.env.RD_SYNC_SCRAPER === "popular-cdp") {

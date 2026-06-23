@@ -32,7 +32,7 @@ describe("resolveDefaultSessionChecker — env branches", () => {
 
   it("returns a CdpSessionChecker (has check()) when RD_SYNC_SCRAPER=popular-cdp", async () => {
     process.env.RD_SYNC_SCRAPER = "popular-cdp";
-    process.env.RD_SYNC_CDP_URL = "http://localhost:9222";
+    process.env.RD_SYNC_CDP_URL = "http://127.0.0.1:9222";
 
     const { resolveDefaultSessionChecker } = await import("./defaults");
     const checker = resolveDefaultSessionChecker();

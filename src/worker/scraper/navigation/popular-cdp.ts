@@ -177,6 +177,15 @@ export class CdpPopularPortalPage implements PopularPortalPage {
 // createPopularCdpScraper — factory
 // ---------------------------------------------------------------------------
 
+/**
+ * Result of the optional browser-availability check performed before the
+ * scraper connects via CDP. When `ok` is false the scraper returns
+ * `needs_admin_action` immediately — it never attempts to connect.
+ */
+export type EnsureBrowserResult =
+  | { ok: true }
+  | { ok: false; safeErrorSummary: string };
+
 export interface PopularCdpScraperOptions {
   cdpUrl?: string;
   baseUrl?: string;
@@ -191,6 +200,15 @@ export interface PopularCdpScraperOptions {
    * Defaults to () => new Date().
    */
   clock?: () => Date;
+  /**
+   * Optional seam that ensures the CDP-enabled bank browser is running before
+   * the scraper attempts to connect. When provided, it is awaited BEFORE
+   * `connect`. A failed check short-circuits to `needs_admin_action` with the
+   * safe summary — connect is never attempted.
+   *
+   * When omitted (default), the scraper connects directly as before.
+   */
+  ensureBrowser?: () => Promise<EnsureBrowserResult>;
   /**
    * Injectable CDP connect function.
    * Defaults to a LAZY DYNAMIC IMPORT of playwright-core chromium.connectOverCDP
@@ -218,7 +236,7 @@ export interface PopularCdpScraperOptions {
   ) => Promise<CollectPopularPortalRowsResult>;
 }
 
-const DEFAULT_CDP_URL = "http://localhost:9222";
+const DEFAULT_CDP_URL = "http://127.0.0.1:9222";
 // NOTE: This constant is Banco Popular–specific. Do not share it across bank adapters.
 const DEFAULT_BASE_URL = "https://ib.bpd.com.do";
 
@@ -246,6 +264,7 @@ export function createPopularCdpScraper(options: PopularCdpScraperOptions = {}):
     clock = () => new Date(),
     connect = lazyPlaywrightConnect,
     collectRows = collectPopularPortalRows,
+    ensureBrowser,
   } = options;
 
   return {
@@ -254,6 +273,20 @@ export function createPopularCdpScraper(options: PopularCdpScraperOptions = {}):
       let cdpPage: CdpPageLike | null = null;
 
       try {
+        // Ensure the CDP-enabled bank browser is running before connecting.
+        // A failed check short-circuits to needs_admin_action — connect is
+        // never attempted, so no transient CDP error leaks to the employee.
+        if (ensureBrowser) {
+          const browserCheck = await ensureBrowser();
+          if (!browserCheck.ok) {
+            return {
+              status: "needs_admin_action",
+              movements: [],
+              safeErrorSummary: browserCheck.safeErrorSummary,
+            };
+          }
+        }
+
         try {
           browser = await connect(cdpUrl);
         } catch {

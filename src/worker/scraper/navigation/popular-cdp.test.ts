@@ -145,7 +145,7 @@ describe("createPopularCdpScraper — happy path", () => {
   it("returns status collected with movements parsed from the portal rows", async () => {
     const browser = new FakeCdpBrowser(() => makeFakeCdpPage());
     const scraper = createPopularCdpScraper({
-      cdpUrl: "http://localhost:9222",
+      cdpUrl: "http://127.0.0.1:9222",
       clock: () => new Date("2025-01-01T04:00:00Z"),
       connect: async (cdpEndpoint: string) => { void cdpEndpoint; return browser; },
       collectRows: async () => ({ kind: "rows" as const, rows: FIXTURE_ROWS }),
@@ -163,7 +163,7 @@ describe("createPopularCdpScraper — happy path", () => {
   it("returns status needs_admin_action when collectRows returns needs_admin_action", async () => {
     const browser = new FakeCdpBrowser(() => makeFakeCdpPage());
     const scraper = createPopularCdpScraper({
-      cdpUrl: "http://localhost:9222",
+      cdpUrl: "http://127.0.0.1:9222",
       clock: () => new Date("2025-01-01T04:00:00Z"),
       connect: async (cdpEndpoint: string) => { void cdpEndpoint; return browser; },
       collectRows: async () => ({
@@ -191,7 +191,7 @@ describe("createPopularCdpScraper — session context", () => {
     // the login redirect. The page must come from contexts()[0].
     const browser = new FakeCdpBrowser(() => makeFakeCdpPage());
     const scraper = createPopularCdpScraper({
-      cdpUrl: "http://localhost:9222",
+      cdpUrl: "http://127.0.0.1:9222",
       clock: () => new Date("2025-01-01T04:00:00Z"),
       connect: async (cdpEndpoint: string) => { void cdpEndpoint; return browser; },
       collectRows: async () => ({ kind: "rows" as const, rows: FIXTURE_ROWS }),
@@ -206,7 +206,7 @@ describe("createPopularCdpScraper — session context", () => {
   it("falls back to browser.newPage() when no default context is exposed", async () => {
     const browser = new FakeCdpBrowser(() => makeFakeCdpPage(), { hasDefaultContext: false });
     const scraper = createPopularCdpScraper({
-      cdpUrl: "http://localhost:9222",
+      cdpUrl: "http://127.0.0.1:9222",
       clock: () => new Date("2025-01-01T04:00:00Z"),
       connect: async (cdpEndpoint: string) => { void cdpEndpoint; return browser; },
       collectRows: async () => ({ kind: "rows" as const, rows: FIXTURE_ROWS }),
@@ -226,7 +226,7 @@ describe("createPopularCdpScraper — session context", () => {
 describe("createPopularCdpScraper — connect failure", () => {
   it("returns needs_admin_action (does not throw) when connect rejects", async () => {
     const scraper = createPopularCdpScraper({
-      cdpUrl: "http://localhost:9222",
+      cdpUrl: "http://127.0.0.1:9222",
       clock: () => new Date("2025-01-01T04:00:00Z"),
       connect: async (cdpEndpoint: string) => {
         void cdpEndpoint;
@@ -244,6 +244,76 @@ describe("createPopularCdpScraper — connect failure", () => {
 });
 
 // ---------------------------------------------------------------------------
+// createPopularCdpScraper — ensureBrowser seam
+// ---------------------------------------------------------------------------
+
+describe("createPopularCdpScraper — ensureBrowser seam", () => {
+  it("calls ensureBrowser before connect and proceeds when it succeeds", async () => {
+    const callOrder: string[] = [];
+    const browser = new FakeCdpBrowser(() => makeFakeCdpPage());
+    const scraper = createPopularCdpScraper({
+      cdpUrl: "http://127.0.0.1:9222",
+      clock: () => new Date("2025-01-01T04:00:00Z"),
+      ensureBrowser: async () => {
+        callOrder.push("ensureBrowser");
+        return { ok: true };
+      },
+      connect: async (cdpEndpoint: string) => {
+        void cdpEndpoint;
+        callOrder.push("connect");
+        return browser;
+      },
+      collectRows: async () => ({ kind: "rows" as const, rows: FIXTURE_ROWS }),
+    });
+
+    const result = await scraper.collect();
+
+    expect(result.status).toBe("collected");
+    expect(callOrder).toEqual(["ensureBrowser", "connect"]);
+  });
+
+  it("returns needs_admin_action without connecting when ensureBrowser fails", async () => {
+    let connectCalled = false;
+    const scraper = createPopularCdpScraper({
+      cdpUrl: "http://127.0.0.1:9222",
+      clock: () => new Date("2025-01-01T04:00:00Z"),
+      ensureBrowser: async () => ({
+        ok: false,
+        safeErrorSummary: "Bank browser is not running",
+      }),
+      connect: async (cdpEndpoint: string) => {
+        void cdpEndpoint;
+        connectCalled = true;
+        throw new Error("should not be called");
+      },
+      collectRows: async () => ({ kind: "rows" as const, rows: FIXTURE_ROWS }),
+    });
+
+    const result = await scraper.collect();
+
+    expect(result.status).toBe("needs_admin_action");
+    expect(result.movements).toEqual([]);
+    expect(result.safeErrorSummary).toBe("Bank browser is not running");
+    expect(connectCalled).toBe(false);
+  });
+
+  it("does not call ensureBrowser when not provided (backward compatible)", async () => {
+    const browser = new FakeCdpBrowser(() => makeFakeCdpPage());
+    const scraper = createPopularCdpScraper({
+      cdpUrl: "http://127.0.0.1:9222",
+      clock: () => new Date("2025-01-01T04:00:00Z"),
+      connect: async (cdpEndpoint: string) => { void cdpEndpoint; return browser; },
+      collectRows: async () => ({ kind: "rows" as const, rows: FIXTURE_ROWS }),
+    });
+
+    const result = await scraper.collect();
+
+    // No ensureBrowser → behaves exactly as before
+    expect(result.status).toBe("collected");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // createPopularCdpScraper — resource cleanup
 // ---------------------------------------------------------------------------
 
@@ -257,7 +327,7 @@ describe("createPopularCdpScraper — resource cleanup", () => {
     });
 
     const scraper = createPopularCdpScraper({
-      cdpUrl: "http://localhost:9222",
+      cdpUrl: "http://127.0.0.1:9222",
       clock: () => new Date("2025-01-01T04:00:00Z"),
       connect: async (cdpEndpoint: string) => { void cdpEndpoint; return browser; },
       collectRows: async () => ({ kind: "rows" as const, rows: FIXTURE_ROWS }),
@@ -278,7 +348,7 @@ describe("createPopularCdpScraper — resource cleanup", () => {
     });
 
     const scraper = createPopularCdpScraper({
-      cdpUrl: "http://localhost:9222",
+      cdpUrl: "http://127.0.0.1:9222",
       clock: () => new Date("2025-01-01T04:00:00Z"),
       connect: async (cdpEndpoint: string) => { void cdpEndpoint; return browser; },
       collectRows: async () => {
@@ -308,7 +378,7 @@ describe("createPopularCdpScraper — resource cleanup", () => {
     };
 
     const scraper = createPopularCdpScraper({
-      cdpUrl: "http://localhost:9222",
+      cdpUrl: "http://127.0.0.1:9222",
       clock: () => new Date("2025-01-01T04:00:00Z"),
       connect: async (cdpEndpoint: string) => { void cdpEndpoint; return browser; },
       collectRows: async () => ({ kind: "rows" as const, rows: [badRow] }),
@@ -329,7 +399,7 @@ describe("createPopularCdpScraper — lazy connect", () => {
   it("does not call connect at construction time", () => {
     let connectCalled = false;
     createPopularCdpScraper({
-      cdpUrl: "http://localhost:9222",
+      cdpUrl: "http://127.0.0.1:9222",
       clock: () => new Date(),
       connect: async (cdpEndpoint: string) => {
         void cdpEndpoint;
@@ -351,7 +421,7 @@ describe("CdpPopularPortalPage — openDashboardAccount", () => {
     // The evaluate stub returns true (row found) when called
     const page = makeFakeCdpPage({ evaluateResult: true });
     const scraper = createPopularCdpScraper({
-      cdpUrl: "http://localhost:9222",
+      cdpUrl: "http://127.0.0.1:9222",
       clock: () => new Date("2025-01-01T04:00:00Z"),
       connect: async () => new FakeCdpBrowser(() => page),
       // Use the real collectRows flow so openDashboardAccount IS called
@@ -378,7 +448,7 @@ describe("CdpPopularPortalPage — openDashboardAccount", () => {
   it("returns false when evaluate returns false (row not found)", async () => {
     const page = makeFakeCdpPage({ evaluateResult: false });
     const scraper = createPopularCdpScraper({
-      cdpUrl: "http://localhost:9222",
+      cdpUrl: "http://127.0.0.1:9222",
       clock: () => new Date("2025-01-01T04:00:00Z"),
       connect: async () => new FakeCdpBrowser(() => page),
       collectRows: async (portalPage) => {
@@ -401,7 +471,7 @@ describe("CdpPopularPortalPage — openDashboardAccount", () => {
     // would break for inputs containing special characters and prevent sandboxing).
     const page = makeFakeCdpPage({ evaluateResult: true });
     const scraper = createPopularCdpScraper({
-      cdpUrl: "http://localhost:9222",
+      cdpUrl: "http://127.0.0.1:9222",
       clock: () => new Date("2025-01-01T04:00:00Z"),
       connect: async () => new FakeCdpBrowser(() => page),
       collectRows: async (portalPage) => {
@@ -423,7 +493,7 @@ describe("CdpPopularPortalPage — pause", () => {
   it("delegates pause(ms) to page.waitForTimeout(ms)", async () => {
     const page = makeFakeCdpPage();
     const scraper = createPopularCdpScraper({
-      cdpUrl: "http://localhost:9222",
+      cdpUrl: "http://127.0.0.1:9222",
       clock: () => new Date("2025-01-01T04:00:00Z"),
       connect: async () => new FakeCdpBrowser(() => page),
       collectRows: async (portalPage) => {
