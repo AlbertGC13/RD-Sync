@@ -54,9 +54,9 @@ export function TransactionRow({ transaction, actions, reviewerMode }: Transacti
             <p className="text-xs text-muted-foreground truncate">{transaction.originator}</p>
           ) : null}
           {reviewerMode ? (
-            <span className="inline-flex items-center gap-1 mt-0.5">
+            <div className="mt-0.5">
               <ReviewStatePill state={transaction.reviewState} />
-            </span>
+            </div>
           ) : null}
         </div>
 

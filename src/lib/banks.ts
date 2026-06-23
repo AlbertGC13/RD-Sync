@@ -98,3 +98,22 @@ const SCRAPE_RUN_STATUS_LABELS: Record<ScrapeRunStatus, string> = {
 export function scrapeRunStatusLabel(status: ScrapeRunStatus): string {
   return SCRAPE_RUN_STATUS_LABELS[status];
 }
+
+/**
+ * Bank-connection session statuses surfaced to operators on the admin
+ * banking pages. Mirrors the `AdminBankConnection["sessionStatus"]` union so
+ * the badge never echoes the raw underscored enum (e.g. `needs_admin_action`)
+ * to a Dominican banking operator. This is the single source of truth — the
+ * admin bank-connections pages import from here instead of redefining the map.
+ */
+export type BankSessionStatus = "active" | "needs_admin_action" | "expired";
+
+export const BANK_SESSION_STATUS_LABELS: Record<BankSessionStatus, string> = {
+  active: "Sesión activa",
+  needs_admin_action: "Necesita acción administrativa",
+  expired: "Sesión expirada",
+};
+
+export function bankSessionStatusLabel(status: BankSessionStatus): string {
+  return BANK_SESSION_STATUS_LABELS[status];
+}

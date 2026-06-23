@@ -6,6 +6,7 @@ import { Badge } from "../../../components/ui/badge";
 import { Button } from "../../../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../../components/ui/card";
 import { PageHeader } from "../../../components/ui/page-header";
+import { bankSessionStatusLabel } from "../../../lib/banks";
 import { AdminAccessRequiredBanking, canManageBanking, type Principal } from "./_components";
 
 export interface AdminBankConnection {
@@ -29,19 +30,11 @@ export const popularBankConnection: AdminBankConnection = {
 };
 
 /**
- * Operator-facing Spanish labels for bank-session statuses. Keep this map
- * complete — the badge MUST NEVER echo the raw underscored enum value
+ * Operator-facing Spanish labels for bank-session statuses come from
+ * `src/lib/banks.ts` (`BANK_SESSION_STATUS_LABELS`) — the single source of
+ * truth — so the badge never echoes the raw underscored enum value
  * (e.g. `needs_admin_action`) to a Dominican banking operator.
  */
-export const BANK_SESSION_STATUS_LABELS: Record<AdminBankConnection["sessionStatus"], string> = {
-  active: "Sesión activa",
-  needs_admin_action: "Necesita acción administrativa",
-  expired: "Sesión expirada",
-};
-
-function bankSessionStatusLabel(status: AdminBankConnection["sessionStatus"]): string {
-  return BANK_SESSION_STATUS_LABELS[status];
-}
 
 export default async function AdminBankConnectionsPage() {
   const principal = await getCurrentPrincipal();
