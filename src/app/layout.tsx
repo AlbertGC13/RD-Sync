@@ -2,38 +2,25 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Toaster } from "sonner";
 import type { ReactNode } from "react";
-import {
-  ArrowLeftRight,
-  Building2,
-  History,
-  KeyRound,
-  LayoutDashboard,
-  ScrollText,
-} from "lucide-react";
+import { Building2, History } from "lucide-react";
 
+import { NavLinks } from "../components/ui/nav-links";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "RD-Sync",
-  description: "Private read-only bank transaction visibility dashboard.",
+  description: "Panel de visibilidad privada y de solo lectura sobre transacciones bancarias.",
 };
-
-const NAV_LINKS = [
-  { href: "/transactions", label: "Transactions", icon: LayoutDashboard },
-  { href: "/admin/bank-connections", label: "Connections", icon: KeyRound },
-  { href: "/admin/scrape-runs", label: "Admin", icon: ArrowLeftRight },
-  { href: "/admin/audit", label: "Audit log", icon: ScrollText },
-] as const;
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="es">
       <body className="min-h-dvh bg-background font-sans text-foreground antialiased">
         <a
           href="#main"
           className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-primary focus:px-3 focus:py-2 focus:text-primary-foreground"
         >
-          Skip to main content
+          Ir al contenido principal
         </a>
 
         <header className="sticky top-0 z-30 border-b border-border/80 bg-background/80 backdrop-blur-md">
@@ -50,26 +37,12 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
                   RD<span className="text-primary">·</span>Sync
                 </span>
                 <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                  Bank visibility
+                  Visibilidad bancaria
                 </span>
               </span>
             </Link>
 
-            <nav aria-label="Primary" className="flex items-center gap-1">
-              {NAV_LINKS.map((link) => {
-                const Icon = link.icon;
-                return (
-                  <Link
-                    key={link.href}
-                    href={link.href}
-                    className="group inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:bg-muted focus-visible:text-foreground"
-                  >
-                    <Icon className="h-4 w-4 transition-transform group-hover:scale-110" aria-hidden />
-                    <span className="hidden sm:inline">{link.label}</span>
-                  </Link>
-                );
-              })}
-            </nav>
+            <NavLinks />
           </div>
         </header>
 
@@ -83,10 +56,10 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
 
         <footer className="border-t border-border/60 py-6">
           <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 text-xs text-muted-foreground sm:px-6 lg:px-8">
-            <span>RD-Sync · Read-only bank visibility</span>
+            <span>RD-Sync · Visibilidad bancaria de solo lectura</span>
             <span className="inline-flex items-center gap-1.5">
               <History className="h-3 w-3" aria-hidden />
-              <span>Last sync: live</span>
+              <span>Última sincronización: en vivo</span>
             </span>
           </div>
         </footer>

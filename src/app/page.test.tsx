@@ -4,13 +4,17 @@ import { describe, expect, it } from "vitest";
 import HomePage from "./page";
 
 describe("HomePage", () => {
-  it("shows clear preview navigation for employee and admin flows", () => {
+  it("shows clear preview navigation for employee and admin flows in Spanish", () => {
     const html = renderToStaticMarkup(<HomePage />);
 
-    // Strings preserved for the E2E suite.
-    expect(html).toContain("Employee flow");
+    expect(html).toContain("Flujo de empleado");
     expect(html).toContain('href="/transactions"');
-    expect(html).toContain("Admin demo flow");
-    expect(html).toContain('href="/admin/scrape-runs?previewRole=admin"');
+    expect(html).toContain("Flujo de administrador");
+    expect(html).toContain('href="/admin/scrape-runs"');
+    // Operator-facing copy is Spanish (Dominican banking staff).
+    expect(html).toContain("Abrir transacciones");
+    expect(html).toContain("Abrir operaciones admin");
+    // previewRole backdoor must NOT be present
+    expect(html).not.toContain("previewRole");
   });
 });

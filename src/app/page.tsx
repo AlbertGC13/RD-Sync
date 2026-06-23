@@ -12,34 +12,35 @@ export default function HomePage() {
         <div className="relative grid gap-4">
           <Badge variant="outline" className="w-fit gap-1.5">
             <ShieldCheck className="h-3 w-3 text-primary" aria-hidden />
-            Read-only · Encrypted in transit · Audit-logged
+            Solo lectura · Cifrado en tránsito · Con auditoría
           </Badge>
           <h1 className="max-w-2xl text-3xl font-bold leading-tight tracking-tight text-foreground sm:text-4xl">
-            RD-Sync gives your team a safe window into bank movements.
+            RD-Sync ofrece a tu equipo una ventana segura sobre los movimientos bancarios.
           </h1>
           <p className="max-w-2xl text-base leading-relaxed text-muted-foreground sm:text-lg">
-            Private, employee-safe visibility into recent transactions. No bank logins shared,
-            no MFA in employees&apos; hands, no money ever moves through this product.
+            Visibilidad privada y segura para empleados sobre transacciones recientes. Sin
+            credenciales bancarias compartidas, sin MFA en manos de empleados, sin movimiento de
+            dinero en este producto.
           </p>
         </div>
       </section>
 
-      <section aria-label="MVP preview flows" className="grid gap-4 sm:grid-cols-2">
+      <section aria-label="Flujos de vista previa MVP" className="grid gap-4 sm:grid-cols-2">
         <FlowCard
-          eyebrow="Employee flow"
+          eyebrow="Flujo de empleado"
           icon={Building2}
-          title="View recent transactions"
-          description="Browse the redesigned transaction dashboard with filters, search, and review states."
+          title="Ver transacciones recientes"
+          description="Explora el panel de transacciones rediseñado con filtros, búsqueda y estados de revisión."
           href="/transactions"
-          cta="Open transactions"
+          cta="Abrir transacciones"
         />
         <FlowCard
-          eyebrow="Admin demo flow"
+          eyebrow="Flujo de administrador"
           icon={Lock}
-          title="Review scrape run operations"
-          description="Preview MFA/session intervention, run history, and safe failure summaries."
-          href="/admin/scrape-runs?previewRole=admin"
-          cta="Open admin ops"
+          title="Revisar operaciones de extracción"
+          description="Intervención de MFA/sesión, historial de corridas y resúmenes seguros de fallos."
+          href="/admin/scrape-runs"
+          cta="Abrir operaciones admin"
         />
       </section>
     </div>

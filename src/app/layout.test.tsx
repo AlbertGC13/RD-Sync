@@ -19,7 +19,7 @@ describe("RootLayout", () => {
     expect(html).toMatch(/aria-label="Notifications[^"]*"/);
   });
 
-  it("renders an admin nav placeholder with Transactions and Admin links", () => {
+  it("renders an admin nav placeholder with Spanish Transactions and Admin links", () => {
     const html = renderToStaticMarkup(
       <RootLayout>
         <main>page content</main>
@@ -27,10 +27,13 @@ describe("RootLayout", () => {
     );
 
     expect(html).toContain('href="/transactions"');
-    expect(html).toContain("Transactions");
+    expect(html).toContain("Transacciones");
     expect(html).toContain('href="/admin/scrape-runs"');
-    expect(html).toContain("Admin");
+    expect(html).toContain("Administración");
     expect(html).toContain('href="/admin/bank-connections"');
-    expect(html).toContain("Connections");
+    expect(html).toContain("Conexiones");
+    // Operator-facing footer copy is Spanish.
+    expect(html).toContain("Visibilidad bancaria de solo lectura");
+    expect(html).toContain("Última sincronización: en vivo");
   });
 });
