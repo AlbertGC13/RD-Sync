@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-import { assertCanAccessBankSession, type Principal } from "../../../modules/auth";
+import { requireRole, type Principal } from "../../../modules/auth";
 import { popularScraperProfile } from "../../../modules/bank-adapters/popular";
 import { createAuditEvent, type AuditSink } from "../../../modules/audit";
 import type { CreateQueuedScrapeRunInput } from "../../../modules/scrape-runs";
@@ -84,11 +84,16 @@ export class ActiveRunExistsError extends Error {
 let lastRunIdTimestamp = "";
 let lastRunIdSequence = 0;
 
-export async function scheduleAdminIngestionRunNow(
+export async function scheduleIngestionRunNow(
   request: RunNowRequest,
   dependencies: RunNowDependencies,
 ): Promise<RunNowResult> {
-  const principal = assertCanAccessBankSession(request.principal);
+  // Any authenticated user (viewer/reviewer/admin) may trigger a manual
+  // "Run now" from the transactions page. The real authorization boundary
+  // lives here on the backend — UI role checks are only affordances.
+  // assertCanAccessBankSession is intentionally NOT used here; it remains
+  // reserved for admin-only surfaces (bank-connections, session renewal).
+  const principal = requireRole(request.principal, ["admin", "reviewer", "viewer"]);
 
   const now = dependencies.now?.() ?? new Date();
   const requestedBankId = request.bankId ?? popularScraperProfile.bankId;

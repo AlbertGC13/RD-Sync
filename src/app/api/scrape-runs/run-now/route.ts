@@ -4,7 +4,7 @@ import { defaultIngestionQueue, defaultScrapeRunRepository } from "../defaults";
 import { defaultIngestionConsumer } from "../consumer-defaults";
 import {
   ActiveRunExistsError,
-  scheduleAdminIngestionRunNow,
+  scheduleIngestionRunNow,
   UnsupportedRunNowBankError,
   type RunNowDependencies,
   type RunNowRequest,
@@ -53,8 +53,12 @@ const SAFE_CONFLICT_MESSAGE = "An active scrape run already exists for this bank
 
 function isAuthenticationError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  // Thrown by assertCanAccessBankSession when no principal / wrong role.
-  // Thrown by requireRole when a role check fails inside the route.
+  // Thrown by requireRole (run-now path) when no principal is resolved, or
+  // when a role check fails. The run-now path now allows every authenticated
+  // role, so in practice only "Authentication required" (null principal) can
+  // surface here. The "Admin role required" branch is retained as
+  // defense-in-depth for any future caller that reintroduces
+  // assertCanAccessBankSession on this path.
   if (error.message === "Admin role required") return true;
   if (error.message === "Authentication required") return true;
   if (/^Role .* is not allowed$/.test(error.message)) return true;
@@ -78,7 +82,7 @@ export function createPostScrapeRunNowHandler(dependencies: RunNowHandlerDepende
     const payload = await readOptionalJson(request);
 
     try {
-      const run = await scheduleAdminIngestionRunNow(
+      const run = await scheduleIngestionRunNow(
         {
           principal,
           bankId: optionalString(payload.bankId),

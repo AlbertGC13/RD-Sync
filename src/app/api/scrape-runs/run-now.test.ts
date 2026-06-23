@@ -4,7 +4,7 @@ import { InMemoryScrapeRunRepository } from "../../../modules/scrape-runs";
 import {
   ActiveRunExistsError,
   createRunId,
-  scheduleAdminIngestionRunNow,
+  scheduleIngestionRunNow,
 } from "./run-now";
 import type { IngestionJobData, QueueLike } from "../../../worker/queues";
 import { InMemoryAuditSink } from "../../../modules/audit";
@@ -25,12 +25,12 @@ describe("createRunId", () => {
   });
 });
 
-describe("scheduleAdminIngestionRunNow", () => {
+describe("scheduleIngestionRunNow", () => {
   it("creates a queued Popular scrape run and schedules ingestion for admins", async () => {
     const scrapeRuns = new InMemoryScrapeRunRepository();
     const queue = new FakeQueue();
 
-    const result = await scheduleAdminIngestionRunNow(
+    const result = await scheduleIngestionRunNow(
       { principal: { id: "admin-1", role: "admin" } },
       {
         scrapeRuns,
@@ -73,11 +73,11 @@ describe("scheduleAdminIngestionRunNow", () => {
     const queue = new FakeQueue();
     const now = () => new Date("2026-06-09T12:00:00.123Z");
 
-    const first = await scheduleAdminIngestionRunNow(
+    const first = await scheduleIngestionRunNow(
       { principal: { id: "admin-1", role: "admin" } },
       { scrapeRuns, queue, now },
     );
-    const second = await scheduleAdminIngestionRunNow(
+    const second = await scheduleIngestionRunNow(
       { principal: { id: "admin-1", role: "admin" } },
       { scrapeRuns, queue, now },
     );
@@ -87,29 +87,74 @@ describe("scheduleAdminIngestionRunNow", () => {
     expect(queue.addCalls).toHaveLength(2);
   });
 
-  it("denies viewers without creating runs or scheduling jobs", async () => {
+  it("allows viewers to schedule runs (authz relaxed for the transactions refresh)", async () => {
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+
+    const result = await scheduleIngestionRunNow(
+      { principal: { id: "viewer-1", role: "viewer" } },
+      {
+        scrapeRuns,
+        queue,
+        now: () => new Date("2026-06-09T12:00:00.000Z"),
+        createRunId: () => "run-viewer-now",
+      },
+    );
+
+    expect(result).toMatchObject({
+      runId: "run-viewer-now",
+      bankId: "popular",
+      status: "queued",
+    });
+    expect(await scrapeRuns.list({})).toHaveLength(1);
+    expect(queue.addCalls).toHaveLength(1);
+  });
+
+  it("allows reviewers to schedule runs (authz relaxed for the transactions refresh)", async () => {
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+
+    const result = await scheduleIngestionRunNow(
+      { principal: { id: "reviewer-1", role: "reviewer" } },
+      {
+        scrapeRuns,
+        queue,
+        now: () => new Date("2026-06-09T12:00:00.000Z"),
+        createRunId: () => "run-reviewer-now",
+      },
+    );
+
+    expect(result).toMatchObject({
+      runId: "run-reviewer-now",
+      bankId: "popular",
+      status: "queued",
+    });
+    expect(queue.addCalls).toHaveLength(1);
+  });
+
+  it("denies unauthenticated requests (null principal) without creating runs or jobs", async () => {
     const scrapeRuns = new InMemoryScrapeRunRepository();
     const queue = new FakeQueue();
 
     await expect(
-      scheduleAdminIngestionRunNow(
-        { principal: { id: "viewer-1", role: "viewer" } },
+      scheduleIngestionRunNow(
+        { principal: null },
         { scrapeRuns, queue },
       ),
-    ).rejects.toThrow("Admin role required");
+    ).rejects.toThrow("Authentication required");
 
     expect(await scrapeRuns.list({})).toEqual([]);
     expect(queue.addCalls).toEqual([]);
   });
 });
 
-describe("scheduleAdminIngestionRunNow — audit events", () => {
+describe("scheduleIngestionRunNow — audit events", () => {
   it("emits scrape_run.scheduled with the admin actor id and bankId metadata", async () => {
     const auditSink = new InMemoryAuditSink();
     const scrapeRuns = new InMemoryScrapeRunRepository();
     const queue = new FakeQueue();
 
-    await scheduleAdminIngestionRunNow(
+    await scheduleIngestionRunNow(
       { principal: { id: "admin-1", role: "admin" } },
       {
         scrapeRuns,
@@ -135,29 +180,91 @@ describe("scheduleAdminIngestionRunNow — audit events", () => {
     });
   });
 
-  it("does not emit anything when the request is denied", async () => {
+  it("emits scrape_run.scheduled with the viewer actor id and role when a viewer triggers the run", async () => {
+    const auditSink = new InMemoryAuditSink();
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+
+    await scheduleIngestionRunNow(
+      { principal: { id: "viewer-1", role: "viewer" } },
+      {
+        scrapeRuns,
+        queue,
+        now: () => new Date("2026-06-09T12:00:00.000Z"),
+        createRunId: () => "run-viewer-audit",
+        auditSink,
+      },
+    );
+
+    const events = await auditSink.list();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      actorId: "viewer-1",
+      actorRole: "viewer",
+      action: "scrape_run.scheduled",
+      target: "scrape_run",
+      targetId: "run-viewer-audit",
+      metadata: {
+        bankId: "popular",
+        accountFingerprint: "popular-0000000000",
+      },
+    });
+  });
+
+  it("emits scrape_run.scheduled with the reviewer actor id and role when a reviewer triggers the run", async () => {
+    const auditSink = new InMemoryAuditSink();
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+
+    await scheduleIngestionRunNow(
+      { principal: { id: "reviewer-1", role: "reviewer" } },
+      {
+        scrapeRuns,
+        queue,
+        now: () => new Date("2026-06-09T12:00:00.000Z"),
+        createRunId: () => "run-reviewer-audit",
+        auditSink,
+      },
+    );
+
+    const events = await auditSink.list();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      actorId: "reviewer-1",
+      actorRole: "reviewer",
+      action: "scrape_run.scheduled",
+      target: "scrape_run",
+      targetId: "run-reviewer-audit",
+      metadata: {
+        bankId: "popular",
+        accountFingerprint: "popular-0000000000",
+      },
+    });
+  });
+
+  it("does not emit anything when the request is denied (unauthenticated)", async () => {
     const auditSink = new InMemoryAuditSink();
     const scrapeRuns = new InMemoryScrapeRunRepository();
     const queue = new FakeQueue();
 
     await expect(
-      scheduleAdminIngestionRunNow(
-        { principal: { id: "viewer-1", role: "viewer" } },
+      scheduleIngestionRunNow(
+        { principal: null },
         { scrapeRuns, queue, auditSink },
       ),
-    ).rejects.toThrow("Admin role required");
+    ).rejects.toThrow("Authentication required");
 
     expect(await auditSink.list()).toEqual([]);
   });
 });
 
-describe("scheduleAdminIngestionRunNow — supported-bank whitelist", () => {
+describe("scheduleIngestionRunNow — supported-bank whitelist", () => {
   it("throws UnsupportedRunNowBankError for a bank that is not in the supported list", async () => {
     const scrapeRuns = new InMemoryScrapeRunRepository();
     const queue = new FakeQueue();
 
     await expect(
-      scheduleAdminIngestionRunNow(
+      scheduleIngestionRunNow(
         {
           principal: { id: "admin-1", role: "admin" },
           bankId: "banreservas",
@@ -177,7 +284,7 @@ describe("scheduleAdminIngestionRunNow — supported-bank whitelist", () => {
     const queue = new FakeQueue();
 
     await expect(
-      scheduleAdminIngestionRunNow(
+      scheduleIngestionRunNow(
         {
           principal: { id: "admin-1", role: "admin" },
           bankId: "banreservas",
@@ -200,7 +307,7 @@ describe("scheduleAdminIngestionRunNow — supported-bank whitelist", () => {
     const scrapeRuns = new InMemoryScrapeRunRepository();
     const queue = new FakeQueue();
 
-    const result = await scheduleAdminIngestionRunNow(
+    const result = await scheduleIngestionRunNow(
       { principal: { id: "admin-1", role: "admin" } },
       {
         scrapeRuns,
@@ -215,7 +322,7 @@ describe("scheduleAdminIngestionRunNow — supported-bank whitelist", () => {
   });
 });
 
-describe("scheduleAdminIngestionRunNow — active-run lock", () => {
+describe("scheduleIngestionRunNow — active-run lock", () => {
   // Wraps an InMemoryScrapeRunRepository with the same list-based
   // hasActiveRunForBank the production route wires, so the lock tests
   // exercise the real detection logic against the repo state.
@@ -240,7 +347,7 @@ describe("scheduleAdminIngestionRunNow — active-run lock", () => {
     const queue = new FakeQueue();
 
     await expect(
-      scheduleAdminIngestionRunNow(
+      scheduleIngestionRunNow(
         { principal: { id: "admin-1", role: "admin" }, bankId: "popular" },
         {
           scrapeRuns,
@@ -266,7 +373,7 @@ describe("scheduleAdminIngestionRunNow — active-run lock", () => {
     const queue = new FakeQueue();
 
     await expect(
-      scheduleAdminIngestionRunNow(
+      scheduleIngestionRunNow(
         { principal: { id: "admin-1", role: "admin" }, bankId: "popular" },
         {
           scrapeRuns,
@@ -293,7 +400,7 @@ describe("scheduleAdminIngestionRunNow — active-run lock", () => {
     const scrapeRuns = withRealLock(repo);
     const queue = new FakeQueue();
 
-    const result = await scheduleAdminIngestionRunNow(
+    const result = await scheduleIngestionRunNow(
       { principal: { id: "admin-1", role: "admin" }, bankId: "popular" },
       {
         scrapeRuns,
@@ -311,7 +418,7 @@ describe("scheduleAdminIngestionRunNow — active-run lock", () => {
     const scrapeRuns = new InMemoryScrapeRunRepository();
     const queue = new FakeQueue();
 
-    const result = await scheduleAdminIngestionRunNow(
+    const result = await scheduleIngestionRunNow(
       { principal: { id: "admin-1", role: "admin" }, bankId: "popular" },
       {
         scrapeRuns,
@@ -326,7 +433,7 @@ describe("scheduleAdminIngestionRunNow — active-run lock", () => {
   });
 });
 
-describe("scheduleAdminIngestionRunNow — queue failure recovery", () => {
+describe("scheduleIngestionRunNow — queue failure recovery", () => {
   it("marks the persisted run failed with a SAFE summary (no raw queue error) when the queue throws", async () => {
     const scrapeRuns = new InMemoryScrapeRunRepository();
     // Note: redactDiagnosticText targets credential tokens, account numbers,
@@ -336,7 +443,7 @@ describe("scheduleAdminIngestionRunNow — queue failure recovery", () => {
     const queue = new FailingQueue(new Error("Redis ECONNREFUSED token=abc123 password=hunter2 account 9999888877"));
 
     await expect(
-      scheduleAdminIngestionRunNow(
+      scheduleIngestionRunNow(
         { principal: { id: "admin-1", role: "admin" } },
         {
           scrapeRuns,
@@ -369,7 +476,7 @@ describe("scheduleAdminIngestionRunNow — queue failure recovery", () => {
     const queue = new FailingQueue(new Error("Redis ECONNREFUSED token=abc123"));
 
     await expect(
-      scheduleAdminIngestionRunNow(
+      scheduleIngestionRunNow(
         { principal: { id: "admin-1", role: "admin" } },
         {
           scrapeRuns,
@@ -409,7 +516,7 @@ describe("scheduleAdminIngestionRunNow — queue failure recovery", () => {
 
     try {
       await expect(
-        scheduleAdminIngestionRunNow(
+        scheduleIngestionRunNow(
           { principal: { id: "admin-1", role: "admin" } },
           {
             scrapeRuns: partialRepo,

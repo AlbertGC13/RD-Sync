@@ -92,10 +92,15 @@ describe("POST /api/scrape-runs/run-now", () => {
     }
   });
 
-  it("denies non-admin users without scheduling a job", async () => {
+  it("allows non-admin users (viewer) to schedule a run from the transactions refresh", async () => {
     const scrapeRuns = new InMemoryScrapeRunRepository();
     const queue = new FakeQueue();
-    const handler = createPostScrapeRunNowHandler({ scrapeRuns, queue });
+    const handler = createPostScrapeRunNowHandler({
+      scrapeRuns,
+      queue,
+      now: () => new Date("2026-06-09T12:15:00.000Z"),
+      createRunId: () => "viewer-manual-run",
+    });
 
     const response = await handler(
       new Request("http://localhost/api/scrape-runs/run-now", {
@@ -107,12 +112,35 @@ describe("POST /api/scrape-runs/run-now", () => {
       }),
     );
 
-    expect(response.status).toBe(403);
-    // User-safe message — the raw "Admin role required" authz detail must
-    // never leak to the browser.
-    expect(await response.json()).toEqual({ error: "Unable to schedule run" });
-    expect(await scrapeRuns.list({})).toEqual([]);
-    expect(queue.addCalls).toEqual([]);
+    expect(response.status).toBe(202);
+    expect(await scrapeRuns.list({})).toMatchObject([
+      { id: "viewer-manual-run", bankId: "popular", status: "queued" },
+    ]);
+    expect(queue.addCalls).toHaveLength(1);
+  });
+
+  it("allows reviewers to schedule a run from the transactions refresh", async () => {
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+    const handler = createPostScrapeRunNowHandler({
+      scrapeRuns,
+      queue,
+      now: () => new Date("2026-06-09T12:15:00.000Z"),
+      createRunId: () => "reviewer-manual-run",
+    });
+
+    const response = await handler(
+      new Request("http://localhost/api/scrape-runs/run-now", {
+        method: "POST",
+        headers: {
+          "x-rd-sync-user-id": "reviewer-1",
+          "x-rd-sync-role": "reviewer",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(queue.addCalls).toHaveLength(1);
   });
 
   it("returns 401 when no identity is provided", async () => {
