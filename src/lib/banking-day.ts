@@ -31,3 +31,41 @@ export function getSantoDomingoDayKey(input: string | Date): string {
 }
 
 export const BANKING_TIMEZONE = SANTO_DOMINGO_TIMEZONE;
+
+/**
+ * Returns the UTC instants bounding a Santo Domingo local day, so date
+ * filters sent as `YYYY-MM-DD` are interpreted by the local day boundary
+ * (not by UTC midnight, which would shift late-evening DR transactions into
+ * the wrong filter bucket).
+ *
+ * `start` is 00:00:00.000 America/Santo_Domingo and `end` is
+ * 23:59:59.999 America/Santo_Domingo — both expressed as UTC Date objects so
+ * they can be compared directly against stored UTC instants.
+ *
+ * DR observes no DST (UTC-4 year-round), so the offset is a fixed -4 hours.
+ * A pure `YYYY-MM-DD` string is treated as a calendar date in Santo Domingo
+ * (NOT parsed as UTC midnight, which is the bug this helper fixes); a full
+ * ISO string or Date is bucketed into its Santo Domingo day first.
+ */
+export function santoDomingoDayRange(input: string | Date): { start: Date; end: Date } {
+  let dayKey: string;
+  if (input instanceof Date) {
+    dayKey = getSantoDomingoDayKey(input);
+  } else if (/^\d{4}-\d{2}-\d{2}$/.test(input)) {
+    // Pure calendar date — treat it as a Santo Domingo local day directly.
+    dayKey = input;
+  } else {
+    dayKey = getSantoDomingoDayKey(new Date(input));
+  }
+
+  const [year, month, day] = dayKey.split("-").map(Number);
+  if (!year || !month || !day) {
+    throw new Error(`Invalid Santo Domingo day key: ${dayKey}`);
+  }
+
+  // 00:00:00 local (UTC-4) = 04:00:00Z. DR has no DST so this offset is stable.
+  const start = new Date(Date.UTC(year, month - 1, day, 4, 0, 0, 0));
+  // 23:59:59.999 local = start + 24h - 1ms.
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1);
+  return { start, end };
+}
