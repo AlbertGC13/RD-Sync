@@ -12,6 +12,7 @@ import {
 } from "../../../modules/transactions";
 import { TransactionRow } from "../../../components/transactions/transaction-row";
 import { FilterBar } from "../../../components/transactions/filter-bar";
+import { RefreshButton } from "../../../components/transactions/refresh-button";
 import { EmptyState } from "../../../components/ui/empty-state";
 import { PageHeader } from "../../../components/ui/page-header";
 import { Badge } from "../../../components/ui/badge";
@@ -44,12 +45,15 @@ export default async function TransactionsPage({ searchParams }: TransactionsPag
       <PageHeader
         title="Transacciones recientes"
         actions={
-          <Badge variant="outline" className="gap-1.5">
-            <Sparkles className="h-3 w-3 text-primary" aria-hidden />
-            {totals.total} {totals.total === 1 ? "movimiento" : "movimientos"} ·{" "}
-            <span className="text-emerald-300 tabular-nums">+{totals.credits}</span> /{" "}
-            <span className="text-amber-300 tabular-nums">−{totals.debits}</span>
-          </Badge>
+          <div className="flex items-center gap-3">
+            <RefreshButton />
+            <Badge variant="outline" className="gap-1.5">
+              <Sparkles className="h-3 w-3 text-primary" aria-hidden />
+              {totals.total} {totals.total === 1 ? "movimiento" : "movimientos"} ·{" "}
+              <span className="text-emerald-300 tabular-nums">+{totals.credits}</span> /{" "}
+              <span className="text-amber-300 tabular-nums">−{totals.debits}</span>
+            </Badge>
+          </div>
         }
       />
 
@@ -108,12 +112,15 @@ export function TransactionsDashboard({
       <PageHeader
         title="Transacciones recientes"
         actions={
-          <Badge variant="outline" className="gap-1.5">
-            <Sparkles className="h-3 w-3 text-primary" aria-hidden />
-            {totals.total} {totals.total === 1 ? "movimiento" : "movimientos"} ·{" "}
-            <span className="text-emerald-300 tabular-nums">+{totals.credits}</span> /{" "}
-            <span className="text-amber-300 tabular-nums">−{totals.debits}</span>
-          </Badge>
+          <div className="flex items-center gap-3">
+            <RefreshButton />
+            <Badge variant="outline" className="gap-1.5">
+              <Sparkles className="h-3 w-3 text-primary" aria-hidden />
+              {totals.total} {totals.total === 1 ? "movimiento" : "movimientos"} ·{" "}
+              <span className="text-emerald-300 tabular-nums">+{totals.credits}</span> /{" "}
+              <span className="text-amber-300 tabular-nums">−{totals.debits}</span>
+            </Badge>
+          </div>
         }
       />
       <FilterBar filters={filters} activeCount={activeCount} resultCount={transactions.length} />
