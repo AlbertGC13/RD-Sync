@@ -23,34 +23,34 @@ export function NewBankConnectionShell({ principal }: { principal: Principal | n
   return (
     <div className="grid gap-6">
       <PageHeader
-        eyebrow="Admin bank operations"
-        title="New bank connection"
-        description="Create the first Banco Popular connection reference before opening a controlled session."
-        actions={<Badge variant="outline">Popular first</Badge>}
+        eyebrow="Operaciones bancarias administrativas"
+        title="Nueva conexión bancaria"
+        description="Cree la primera referencia de conexión de Banco Popular antes de abrir una sesión controlada."
+        actions={<Badge variant="outline">Popular primero</Badge>}
       />
 
       <Card>
         <CardHeader>
           <CardTitle>Banco Popular</CardTitle>
           <CardDescription>
-            Configure account {popularBankConnection.accountNumber} as a read-only scraping target.
+            Configure la cuenta {popularBankConnection.accountNumber} como objetivo de consulta de solo lectura.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
           <p className="text-sm text-muted-foreground">
-            Account {popularBankConnection.accountType} · {popularBankConnection.accountNumber}.
-            Search mode: {popularBankConnection.extractionMode}. Worker: Local server first,
-            VPS later.
+            Cuenta {popularBankConnection.accountType} · {popularBankConnection.accountNumber}.
+            Modo de búsqueda: {popularBankConnection.extractionMode}. Worker: servidor local primero,
+            VPS más adelante.
           </p>
 
           <p className="rounded-lg border border-border/60 bg-muted/20 p-4 text-sm text-muted-foreground">
-            This shell records the product contract only. Credentials are entered later in the
-            controlled bank-session flow and are never stored in plain text.
+            Esta pantalla registra solo el contrato del producto. Las credenciales se ingresan luego en el
+            flujo controlado de sesión bancaria y nunca se almacenan en texto plano.
           </p>
 
           <Button asChild className="w-fit">
             <Link href={`/admin/bank-connections/${popularBankConnection.id}/session`}>
-              Continue to session setup
+              Continuar a configuración de sesión
               <ArrowRight className="h-4 w-4" aria-hidden />
             </Link>
           </Button>

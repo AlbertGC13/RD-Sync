@@ -13,13 +13,15 @@ describe("BankSessionShell", () => {
     );
 
     [
-      "Popular session setup",
+      "Configuración de sesión de Popular",
       "0000000000",
-      "Token entry is admin-only",
-      "Physical token device",
-      "needs_admin_action",
+      "El token solo lo ingresa un administrador",
+      "Dispositivo físico de token",
+      "Necesita acción administrativa",
     ].forEach((text) => expect(html).toContain(text));
-    ["password=", "cookie=", "token="].forEach((text) => expect(html).not.toContain(text));
+    ["password=", "cookie=", "token=", "needs_admin_action"].forEach((text) =>
+      expect(html).not.toContain(text),
+    );
   });
 
   it("denies viewers without showing account or token instructions", () => {
@@ -27,7 +29,7 @@ describe("BankSessionShell", () => {
       <BankSessionShell connectionId="popular-0000000000" principal={viewer} />,
     );
 
-    expect(html).toContain("Admin access required");
-    ["0000000000", "Token entry is admin-only", "Physical token device", "MFA"].forEach((text) => expect(html).not.toContain(text));
+    expect(html).toContain("Acceso de administrador requerido");
+    ["0000000000", "El token solo lo ingresa un administrador", "Dispositivo físico de token", "MFA"].forEach((text) => expect(html).not.toContain(text));
   });
 });

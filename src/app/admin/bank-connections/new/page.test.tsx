@@ -11,11 +11,11 @@ describe("NewBankConnectionShell", () => {
     const html = renderToStaticMarkup(<NewBankConnectionShell principal={admin} />);
 
     [
-      "New bank connection",
+      "Nueva conexión bancaria",
       "Banco Popular",
       "0000000000",
-      "Current-day date search",
-      "Continue to session setup",
+      "Búsqueda por fecha del día actual",
+      "Continuar a configuración de sesión",
     ].forEach((text) => expect(html).toContain(text));
     ["password=", "cookie=", "token="].forEach((text) => expect(html).not.toContain(text));
   });
@@ -23,7 +23,7 @@ describe("NewBankConnectionShell", () => {
   it("denies viewers before showing bank setup fields", () => {
     const html = renderToStaticMarkup(<NewBankConnectionShell principal={viewer} />);
 
-    expect(html).toContain("Admin access required");
-    ["0000000000", "Continue to session setup", "Token", "MFA"].forEach((text) => expect(html).not.toContain(text));
+    expect(html).toContain("Acceso de administrador requerido");
+    ["0000000000", "Continuar a configuración de sesión", "Token", "MFA"].forEach((text) => expect(html).not.toContain(text));
   });
 });

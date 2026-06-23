@@ -14,12 +14,12 @@ export function canManageBanking(principal: Principal | null) {
 export function AdminAccessRequiredBanking() {
   return (
     <section className="grid gap-3 rounded-lg border border-border/60 bg-card p-6">
-      <p className="text-lg font-semibold text-foreground">Admin access required</p>
+      <p className="text-lg font-semibold text-foreground">Acceso de administrador requerido</p>
       <p className="text-sm text-muted-foreground">
-        Only admins can manage bank connections, session renewal, or restricted bank operations.
-        Ask the workspace owner for the{" "}
+        Solo los administradores pueden gestionar conexiones bancarias, renovar sesiones o ejecutar operaciones bancarias restringidas.
+        Solicite al propietario del espacio el rol{" "}
         <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">admin</code>{" "}
-        role if you need to manage bank connection setup.
+        si necesita configurar conexiones bancarias.
       </p>
     </section>
   );
