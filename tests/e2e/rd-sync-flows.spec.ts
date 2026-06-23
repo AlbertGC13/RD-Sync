@@ -19,11 +19,11 @@ test.describe("RD-Sync MVP flows", () => {
   test("viewer sees an employee-safe transactions dashboard", async ({ page }) => {
     await page.goto("/transactions?bankId=popular&query=factura");
 
-    await expect(page.getByRole("heading", { name: "Recent transactions", exact: true })).toBeVisible();
-    await expect(page.getByRole("form", { name: "Transaction filters" })).toBeVisible();
-    await expect(page.getByText("No recent transactions are available")).toBeVisible();
-    await expect(page.getByText("Scrape run operations")).toHaveCount(0);
-    await expect(page.getByText("MFA/session handling")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Transacciones recientes", exact: true })).toBeVisible();
+    await expect(page.getByRole("form", { name: "Filtros de transacciones" })).toBeVisible();
+    await expect(page.getByText("No hay transacciones recientes disponibles")).toBeVisible();
+    await expect(page.getByText("Operaciones de extracción")).toHaveCount(0);
+    await expect(page.getByText("Gestión de MFA / sesión")).toHaveCount(0);
   });
 
   test("unauthorized callers are denied transaction data", async ({ request }) => {
@@ -64,10 +64,10 @@ test.describe("RD-Sync MVP flows", () => {
 
     await page.goto("/admin/scrape-runs");
 
-    await expect(page.getByRole("heading", { name: "Scrape run operations" })).toBeVisible();
-    await expect(page.getByText("Admin intervention required")).toBeVisible();
-    await expect(page.getByText("Resume only after session renewal is completed by an admin.")).toBeVisible();
-    await expect(page.getByText("Confirm the alert contains no credentials, cookies, or raw bank session data.")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Operaciones de extracción" })).toBeVisible();
+    await expect(page.getByText("Intervención administrativa requerida")).toBeVisible();
+    await expect(page.getByText("Reanuda solo después de que un administrador complete la renovación de sesión.")).toBeVisible();
+    await expect(page.getByText("Confirma que la alerta no contenga credenciales, cookies ni datos crudos de sesión bancaria.")).toBeVisible();
     await expect(page.getByText("session-token=")).toHaveCount(0);
 
     await context.close();

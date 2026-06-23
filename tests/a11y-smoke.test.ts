@@ -1,20 +1,41 @@
 /**
  * Accessibility smoke checks (REQ-DS-002).
  *
- * Lightweight Vitest suite that reads the source files of the redesigned
- * pages and asserts on a few of the most common a11y pitfalls. It is NOT a
- * replacement for axe-core or a full audit, but it catches regressions
- * where a new component drops a focus ring, an aria-label, or a semantic
- * element.
+ * Lightweight Vitest suite that asserts on the HTML actually emitted by the
+ * redesigned components — NOT on source-file literals — so the checks stay
+ * green when copy is localized and only fail when the visible a11y contract
+ * regresses (missing aria attributes, leaked raw enum values, English copy
+ * reaching operators).
  *
- * For deep a11y testing, add `@axe-core/playwright` to the Playwright
- * suite in a follow-up change.
+ * For deep a11y testing, add `@axe-core/playwright` to the Playwright suite
+ * in a follow-up change. The Spanish visible contracts for the transactions
+ * and admin scrape-runs pages are covered by their respective page test
+ * files (renderToStaticMarkup + es-DO assertions).
  */
 
+import { renderToStaticMarkup } from "react-dom/server";
+import { createElement } from "react";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// next/navigation is mocked so client components that call useRouter() can
+// render to static markup without a Next.js runtime.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: vi.fn() }),
+  usePathname: () => "/admin/scrape-runs",
+  useSearchParams: () => new URLSearchParams(),
+}));
+
+// sonner toast is a no-op in server render; stub it so client components
+// that reference toast.* do not blow up outside a browser.
+vi.mock("sonner", () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+  },
+}));
 
 const REPO_ROOT = process.cwd();
 
@@ -24,54 +45,39 @@ function readSource(relativePath: string): string {
 
 describe("A11y smoke checks (REQ-DS-002)", () => {
   it("the global focus ring rule is present in globals.css", () => {
+    // Structural CSS guard — cannot be exercised via renderToStaticMarkup.
     const css = readSource("src/app/globals.css");
     expect(css).toMatch(/focus-visible\s*{[^}]*outline/);
   });
 
-  it("the transactions page is reachable as a route under (private)", () => {
-    const page = readSource("src/app/(private)/transactions/page.tsx");
-    // The page renders into the root layout's <main id="main">.
-    expect(page).toContain("Recent transactions");
+  it("review actions advertise themselves as disabled to assistive tech with Spanish labels", async () => {
+    const { ReviewActions } = await import("@/components/transactions/review-actions");
+    const html = renderToStaticMarkup(
+      createElement(ReviewActions, { transactionId: "tx-1", currentState: "new" }),
+    );
+
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).toContain("disabled");
+    expect(html).toContain('role="group"');
+    // Group label is localized to Spanish — operators are Dominican banking staff.
+    expect(html).toContain('aria-label="Acciones de revisión (próximamente)"');
+    // The tooltip body ("Disponible en un próximo cambio") lives in a Radix
+    // Portal that is not emitted into static markup, so we assert on the
+    // button-level aria-label announcement instead — same as the
+    // run-action-affordances test.
   });
 
-  it("the admin scrape-runs page is reachable as a route under admin", () => {
-    const page = readSource("src/app/admin/scrape-runs/page.tsx");
-    expect(page).toContain("Scrape run operations");
-  });
+  it("run action affordances advertise themselves as disabled to assistive tech", async () => {
+    const { RunActionAffordances } = await import("@/components/admin/run-action-affordances");
+    const html = renderToStaticMarkup(
+      createElement(
+        RunActionAffordances,
+        { runId: "run-1", bankId: "banreservas", status: "failed" },
+      ),
+    );
 
-  it("review actions advertise themselves as disabled to assistive tech", () => {
-    const component = readSource("src/components/transactions/review-actions.tsx");
-    expect(component).toContain('aria-disabled="true"');
-    expect(component).toContain("disabled");
-    expect(component).toContain('role="group"');
-  });
-
-  it("run action affordances advertise themselves as disabled to assistive tech", () => {
-    const component = readSource("src/components/admin/run-action-affordances.tsx");
-    expect(component).toContain('aria-disabled="true"');
-    expect(component).toContain("disabled");
-    expect(component).toContain("role=\"group\"");
-  });
-
-  it("no design system component includes a raw hex color (lint covers the same)", () => {
-    const components = [
-      "src/components/ui/button.tsx",
-      "src/components/ui/card.tsx",
-      "src/components/ui/badge.tsx",
-      "src/components/ui/skeleton.tsx",
-      "src/components/ui/input.tsx",
-      "src/components/ui/select.tsx",
-      "src/components/ui/tooltip.tsx",
-      "src/components/ui/toast.tsx",
-      "src/components/ui/dialog.tsx",
-      "src/components/ui/drawer.tsx",
-      "src/components/ui/empty-state.tsx",
-      "src/components/ui/error-state.tsx",
-      "src/components/ui/page-header.tsx",
-    ];
-    for (const path of components) {
-      const source = readSource(path);
-      expect(source, `${path} must not use raw hex colors`).not.toMatch(/#[0-9A-Fa-f]{3,8}/);
-    }
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).toContain('disabled=""');
+    expect(html).toContain('role="group"');
   });
 });
