@@ -96,11 +96,28 @@ export class InMemoryScrapeRunRepository implements WorkerScrapeRunRepository {
     };
 
     this.records.set(record.id, record);
-    return { ...record };
+    return cloneScrapeRunRecord(record);
   }
 
   async list(filters: ScrapeRunFilters): Promise<ScrapeRunRecord[]> {
-    return filterScrapeRuns([...this.records.values()], filters).map((record) => ({ ...record }));
+    return filterScrapeRuns([...this.records.values()], filters).map(cloneScrapeRunRecord);
+  }
+
+  /**
+   * Read a single scrape run by id, or null when it does not exist.
+   *
+   * Used by the single-run status endpoint (GET /api/scrape-runs/[runId])
+   * so the client can poll a run until it reaches a terminal state. This is
+   * a direct map lookup rather than `list({})` + filter to avoid loading
+   * every run into memory just to find one.
+   *
+   * Returns a defensive copy with cloned Date fields so callers cannot mutate
+   * repository state — neither by reassigning a property nor by mutating a
+   * Date object in place (`returned.createdAt.setTime(...)`).
+   */
+  async findById(runId: string): Promise<ScrapeRunRecord | null> {
+    const record = this.records.get(runId);
+    return record ? cloneScrapeRunRecord(record) : null;
   }
 
   async markRunning(runId: string, startedAt = new Date()): Promise<void> {
@@ -167,6 +184,23 @@ function normalizeDate(value: string | Date): Date {
   }
 
   return date;
+}
+
+/**
+ * Return a defensive copy of a scrape run record, cloning the Date fields so
+ * callers cannot mutate repository state. A plain `{ ...record }` only
+ * shallow-copies, which leaves the Date objects shared — mutating a returned
+ * Date in place (`returned.createdAt.setTime(...)`) would leak into the stored
+ * record. Reused by every read path (createQueued / list / findById).
+ */
+function cloneScrapeRunRecord(record: ScrapeRunRecord): ScrapeRunRecord {
+  return {
+    ...record,
+    startedAt: record.startedAt ? new Date(record.startedAt) : null,
+    endedAt: record.endedAt ? new Date(record.endedAt) : null,
+    createdAt: new Date(record.createdAt),
+    updatedAt: new Date(record.updatedAt),
+  };
 }
 
 function runActivityTime(record: ScrapeRunRecord): number {
