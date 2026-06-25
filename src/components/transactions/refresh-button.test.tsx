@@ -20,7 +20,14 @@ vi.mock("sonner", () => ({
   },
 }));
 
-import { RefreshButton, refreshTransactions } from "./refresh-button";
+import {
+  RefreshButton,
+  refreshTransactions,
+  pollScrapeRunStatus,
+  describePollOutcome,
+  refreshResultToastOptions,
+  REFRESH_RESULT_TOAST_DURATION_MS,
+} from "./refresh-button";
 import { toast } from "sonner";
 
 // ---------------------------------------------------------------------------
@@ -41,15 +48,22 @@ function post202Response(runId: string, bankId = "popular"): Response {
   );
 }
 
-function statusResponse(status: string, runId = "r"): Response {
+function statusResponse(
+  status: string,
+  runId = "r",
+  counts: { insertedCount: number; skippedCount: number } = {
+    insertedCount: 0,
+    skippedCount: 0,
+  },
+): Response {
   return new Response(
     JSON.stringify({
       run: {
         id: runId,
         bankId: "popular",
         status,
-        insertedCount: 0,
-        skippedCount: 0,
+        insertedCount: counts.insertedCount,
+        skippedCount: counts.skippedCount,
       },
     }),
     { status: 200, headers: { "Content-Type": "application/json" } },
@@ -100,7 +114,7 @@ describe("refreshTransactions — 202 polling contract", () => {
   beforeEach(resetToasts);
   afterEach(resetToasts);
 
-  it("on 202 polls until succeeded, then fires the success toast + onRefresh (router.refresh) — not on the 202 itself", async () => {
+  it("on 202 polls until succeeded, then fires the terminal result toast + onRefresh (router.refresh) — not on the 202 itself", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
     // Default for any poll beyond the explicit sequence: succeed.
     fetchImpl.mockResolvedValue(statusResponse("succeeded"));
@@ -123,15 +137,20 @@ describe("refreshTransactions — 202 polling contract", () => {
     expect(pollCall[0]).toBe("/api/scrape-runs/run-internal-1");
     expect(pollCall[1]?.method).toBe("GET");
 
-    // Informational toast fires once (queued), success toast fires once (terminal).
-    expect(toast.info).toHaveBeenCalledTimes(1);
+    // Informational toast fires once for queued and once for the no-new result.
+    expect(toast.info).toHaveBeenCalledTimes(2);
     expect(toast.info).toHaveBeenCalledWith("Corrida solicitada. Verificando resultado…");
-    expect(toast.success).toHaveBeenCalledTimes(1);
-    expect(toast.success).toHaveBeenCalledWith("Transacciones actualizadas.");
+    expect(toast.success).not.toHaveBeenCalled();
+    // Zero inserted → the "no new transactions" message (NOT the old generic
+    // "Transacciones actualizadas." copy, which no longer exists).
+    expect(toast.info).toHaveBeenCalledWith(
+      "No hay nuevas transacciones. La información visible ya está al día.",
+      expect.objectContaining({ duration: REFRESH_RESULT_TOAST_DURATION_MS }),
+    );
     // onRefresh fires exactly once — AFTER the terminal poll, never on the 202.
     expect(onRefresh).toHaveBeenCalledTimes(1);
-    // The success toast must not leak the internal run id.
-    const message = vi.mocked(toast.success).mock.calls[0]?.[0] as string;
+    // The result toast must not leak the internal run id.
+    const message = vi.mocked(toast.info).mock.calls[1]?.[0] as string;
     expect(message).not.toContain("run-internal-1");
   });
 
@@ -149,9 +168,13 @@ describe("refreshTransactions — 202 polling contract", () => {
     // call 0 = POST, call 1 = poll (queued), call 2 = poll (running),
     // call 3 = poll (succeeded via default) → terminal.
     expect(fetchImpl.mock.calls.length).toBe(4);
-    expect(toast.info).toHaveBeenCalledTimes(1);
-    expect(toast.success).toHaveBeenCalledTimes(1);
-    expect(toast.success).toHaveBeenCalledWith("Transacciones actualizadas.");
+    expect(toast.info).toHaveBeenCalledTimes(2);
+    expect(toast.success).not.toHaveBeenCalled();
+    // Zero inserted (default) → "no new transactions" copy.
+    expect(toast.info).toHaveBeenCalledWith(
+      "No hay nuevas transacciones. La información visible ya está al día.",
+      expect.objectContaining({ duration: REFRESH_RESULT_TOAST_DURATION_MS }),
+    );
     expect(onRefresh).toHaveBeenCalledTimes(1);
   });
 
@@ -166,6 +189,7 @@ describe("refreshTransactions — 202 polling contract", () => {
 
     expect(toast.error).toHaveBeenCalledWith(
       "La sesión del banco requiere acción del administrador.",
+      expect.objectContaining({ duration: REFRESH_RESULT_TOAST_DURATION_MS }),
     );
     expect(toast.success).not.toHaveBeenCalled();
     expect(onRefresh).toHaveBeenCalledTimes(1);
@@ -182,6 +206,7 @@ describe("refreshTransactions — 202 polling contract", () => {
 
     expect(toast.error).toHaveBeenCalledWith(
       "No se pudo completar la actualización. Intente nuevamente.",
+      expect.objectContaining({ duration: REFRESH_RESULT_TOAST_DURATION_MS }),
     );
     expect(toast.success).not.toHaveBeenCalled();
     expect(onRefresh).toHaveBeenCalledTimes(1);
@@ -205,6 +230,7 @@ describe("refreshTransactions — 202 polling contract", () => {
 
     expect(toast.error).toHaveBeenCalledWith(
       "La corrida sigue procesándose. Actualice nuevamente en unos momentos.",
+      expect.objectContaining({ duration: REFRESH_RESULT_TOAST_DURATION_MS }),
     );
     expect(toast.success).not.toHaveBeenCalled();
     expect(toast.info).toHaveBeenCalledTimes(1);
@@ -228,6 +254,7 @@ describe("refreshTransactions — 202 polling contract", () => {
 
     expect(toast.error).toHaveBeenCalledWith(
       "No se pudo verificar el resultado de la corrida. Actualice nuevamente en unos momentos.",
+      expect.objectContaining({ duration: REFRESH_RESULT_TOAST_DURATION_MS }),
     );
     // A missing run must NOT be reported as "still processing".
     expect(toast.error).not.toHaveBeenCalledWith(
@@ -267,6 +294,7 @@ describe("refreshTransactions — 202 polling contract", () => {
     // outcome) — never leaving the button disabled.
     expect(toast.error).toHaveBeenCalledWith(
       "La corrida sigue procesándose. Actualice nuevamente en unos momentos.",
+      expect.objectContaining({ duration: REFRESH_RESULT_TOAST_DURATION_MS }),
     );
     expect(toast.success).not.toHaveBeenCalled();
     expect(toast.info).toHaveBeenCalledTimes(1);
@@ -311,6 +339,7 @@ describe("refreshTransactions — 202 polling contract", () => {
 
     expect(toast.error).toHaveBeenCalledWith(
       "La corrida sigue procesándose. Actualice nuevamente en unos momentos.",
+      expect.objectContaining({ duration: REFRESH_RESULT_TOAST_DURATION_MS }),
     );
     expect(toast.success).not.toHaveBeenCalled();
     expect(toast.info).toHaveBeenCalledTimes(1);
@@ -526,5 +555,253 @@ describe("refreshTransactions — failure paths (no leaked error.message, no onR
     expect(message).not.toContain("ECONNREFUSED");
     expect(message).not.toContain("stack");
     expect(message).not.toContain("127.0.0.1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pollScrapeRunStatus — succeeded carries the inserted count so the
+// visible message can distinguish "nothing new" from "imported N".
+// ---------------------------------------------------------------------------
+
+describe("pollScrapeRunStatus — succeeded carries inserted count", () => {
+  it("returns insertedCount for a zero-import succeeded run", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    fetchImpl.mockResolvedValueOnce(
+      statusResponse("succeeded", "r", { insertedCount: 0, skippedCount: 4 }),
+    );
+
+    const outcome = await pollScrapeRunStatus({
+      runId: "r",
+      fetchImpl,
+      sleep: instantSleep,
+    });
+
+    expect(outcome).toEqual({ status: "succeeded", insertedCount: 0 });
+  });
+
+  it("returns insertedCount for a succeeded run that imported new transactions", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    fetchImpl.mockResolvedValueOnce(
+      statusResponse("succeeded", "r", { insertedCount: 7, skippedCount: 2 }),
+    );
+
+    const outcome = await pollScrapeRunStatus({
+      runId: "r",
+      fetchImpl,
+      sleep: instantSleep,
+    });
+
+    expect(outcome).toEqual({ status: "succeeded", insertedCount: 7 });
+  });
+
+  it("coerces a missing/malformed count to 0 instead of trusting parsed JSON", async () => {
+    // The backend always sends finite counts, but the client must defend
+    // against drift. A response omitting the counts must not yield NaN.
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ run: { id: "r", bankId: "popular", status: "succeeded" } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const outcome = await pollScrapeRunStatus({
+      runId: "r",
+      fetchImpl,
+      sleep: instantSleep,
+    });
+
+    expect(outcome).toEqual({ status: "succeeded", insertedCount: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// refreshTransactions — visible result messages (the result-toast payload)
+// ---------------------------------------------------------------------------
+
+describe("refreshTransactions — visible result messages", () => {
+  beforeEach(resetToasts);
+  afterEach(resetToasts);
+
+  it("succeeded with zero inserted returns the no-new-transactions message and fires an info toast", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    fetchImpl.mockResolvedValue(
+      statusResponse("succeeded", "r", { insertedCount: 0, skippedCount: 0 }),
+    );
+    fetchImpl.mockResolvedValueOnce(post202Response("r"));
+
+    const onRefresh = vi.fn();
+    const result = await refreshTransactions({ fetchImpl, onRefresh, sleep: instantSleep });
+
+    // The returned message is the safe copy the UI surfaces via the result
+    // toast (no inline banner anymore).
+    expect(result?.message).toBe(
+      "No hay nuevas transacciones. La información visible ya está al día.",
+    );
+    expect(result?.tone).toBe("info");
+    // The no-new result is informational and uses the longer 12s result duration.
+    expect(toast.info).toHaveBeenCalledWith(
+      "No hay nuevas transacciones. La información visible ya está al día.",
+      expect.objectContaining({ duration: REFRESH_RESULT_TOAST_DURATION_MS }),
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("succeeded with insertedCount > 1 returns the plural count message and a success tone", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    fetchImpl.mockResolvedValue(
+      statusResponse("succeeded", "r", { insertedCount: 3, skippedCount: 1 }),
+    );
+    fetchImpl.mockResolvedValueOnce(post202Response("r"));
+
+    const result = await refreshTransactions({
+      fetchImpl,
+      onRefresh: () => undefined,
+      sleep: instantSleep,
+    });
+
+    expect(result?.message).toBe(
+      "Actualización completada. Se importaron 3 transacciones nuevas.",
+    );
+    expect(result?.tone).toBe("success");
+    expect(toast.success).toHaveBeenCalledWith(
+      "Actualización completada. Se importaron 3 transacciones nuevas.",
+      expect.objectContaining({ duration: REFRESH_RESULT_TOAST_DURATION_MS }),
+    );
+  });
+
+  it("succeeded with insertedCount === 1 uses the Spanish singular form", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    fetchImpl.mockResolvedValue(
+      statusResponse("succeeded", "r", { insertedCount: 1, skippedCount: 0 }),
+    );
+    fetchImpl.mockResolvedValueOnce(post202Response("r"));
+
+    const result = await refreshTransactions({
+      fetchImpl,
+      onRefresh: () => undefined,
+      sleep: instantSleep,
+    });
+
+    expect(result?.message).toBe(
+      "Actualización completada. Se importó 1 transacción nueva.",
+    );
+    expect(toast.success).toHaveBeenCalledWith(
+      "Actualización completada. Se importó 1 transacción nueva.",
+      expect.objectContaining({ duration: REFRESH_RESULT_TOAST_DURATION_MS }),
+    );
+  });
+
+  it("terminal failure states map to error tone (still safe Spanish, no leak)", async () => {
+    // `describePollOutcome` is the single source of truth for tone, so
+    // pin it directly for every non-succeeded terminal state.
+    expect(describePollOutcome({ status: "failed" })).toEqual({
+      message: "No se pudo completar la actualización. Intente nuevamente.",
+      tone: "error",
+    });
+    expect(describePollOutcome({ status: "needs_admin_action" })).toEqual({
+      message: "La sesión del banco requiere acción del administrador.",
+      tone: "error",
+    });
+    expect(describePollOutcome({ status: "unverified" })).toEqual({
+      message:
+        "No se pudo verificar el resultado de la corrida. Actualice nuevamente en unos momentos.",
+      tone: "error",
+    });
+    expect(describePollOutcome({ status: "timeout" })).toEqual({
+      message:
+        "La corrida sigue procesándose. Actualice nuevamente en unos momentos.",
+      tone: "error",
+    });
+  });
+
+  it("gate failures return null (no result toast) and stay conflict-toast-only", async () => {
+    // 409: an active run already exists — no run completed, so no result toast.
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "active run" }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    const result = await refreshTransactions({
+      fetchImpl,
+      onRefresh: () => undefined,
+    });
+
+    expect(result).toBeNull();
+    // 409 keeps the existing conflict-toast behavior: message only, no 12s
+    // result-toast options (Sonner default duration). This stays a normal,
+    // shorter toast — distinct from terminal refresh results.
+    expect(toast.error).toHaveBeenCalledWith(
+      "Ya hay una corrida en proceso. Espere a que termine.",
+    );
+    expect(toast.error).not.toHaveBeenCalledWith(
+      "Ya hay una corrida en proceso. Espere a que termine.",
+      expect.objectContaining({ duration: REFRESH_RESULT_TOAST_DURATION_MS }),
+    );
+  });
+
+  it("never leaks the run id into the visible result message", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    fetchImpl.mockResolvedValue(
+      statusResponse("succeeded", "run-secret-abc", { insertedCount: 2, skippedCount: 0 }),
+    );
+    fetchImpl.mockResolvedValueOnce(post202Response("run-secret-abc"));
+
+    const result = await refreshTransactions({
+      fetchImpl,
+      onRefresh: () => undefined,
+      sleep: instantSleep,
+    });
+
+    expect(result?.message).not.toContain("run-secret");
+    expect(result?.message).not.toContain("abc");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// refreshResultToastOptions — central terminal-result toast options.
+//
+// Terminal refresh outcomes share one longer duration (12s) so the operator
+// has time to read the result. Tests assert on `duration` only (via the
+// exported constant), never on the non-asserted visual className, so the
+// styling can evolve without breaking tests.
+// ---------------------------------------------------------------------------
+
+describe("refreshResultToastOptions — central terminal-result toast options", () => {
+  it("uses a 12000ms duration so terminal results outlast the default toast", () => {
+    expect(REFRESH_RESULT_TOAST_DURATION_MS).toBe(12_000);
+    expect(refreshResultToastOptions()).toMatchObject({ duration: 12_000 });
+  });
+
+  it("does not leak run ids, raw errors, stacks, or diagnostics into the toast options", () => {
+    const serialized = JSON.stringify(refreshResultToastOptions());
+    expect(serialized).not.toContain("runId");
+    expect(serialized).not.toContain("error");
+    expect(serialized).not.toContain("stack");
+    expect(serialized).not.toContain("safeErrorSummary");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RefreshButton — results are toast-only (no inline banner markup)
+//
+// The inline banner was removed so the Refresh button never shifts and never
+// holds a persistent status node. The static markup therefore must contain no
+// status/alert landmark and no result copy — terminal results live only in the
+// transient Sonner toast.
+// ---------------------------------------------------------------------------
+
+describe("RefreshButton — no inline result markup", () => {
+  it("renders no status/alert landmark and no result copy in its static markup", () => {
+    const html = renderToStaticMarkup(<RefreshButton />);
+
+    // No banner exists anymore → no status/alert roles and no result copy in
+    // the initial (or any) view; results are surfaced only via toast.
+    expect(html).not.toContain('role="status"');
+    expect(html).not.toContain('role="alert"');
+    expect(html).not.toContain("No hay nuevas transacciones");
+    expect(html).not.toContain("Actualización completada");
   });
 });
