@@ -5,6 +5,7 @@ import {
   createIngestionQueueOptions,
   scheduleIngestionJob,
   type IngestionJobData,
+  type ResolveScraper,
   type ScrapeRunStatus,
 } from "./index";
 import type { BankMovement } from "../../modules/transactions";
@@ -350,6 +351,146 @@ describe("BullMQ ingestion scheduling", () => {
       },
     ]);
     expect(createIngestionQueueOptions("run-2").jobId).toBe("run-2");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveScraper routing — BLOCKER fix coverage.
+//
+// These tests prove the processor actually routes by job.data.bankId via
+// the resolveScraper dependency, NOT by a single scraper injected at
+// construction time. This is the runtime path the reviewer flagged: the
+// in-memory consumer and the BullMQ worker both call the processor with
+// job.data.bankId, so the processor must resolve the scraper per job.
+// ---------------------------------------------------------------------------
+
+describe("ingestion processor — resolveScraper routing", () => {
+  const popularMovements: BankMovement[] = [
+    {
+      bankId: "popular",
+      accountFingerprint: "acct-main",
+      postedAt: "2026-06-07T13:45:00.000Z",
+      amount: "100.00",
+      currency: "DOP",
+      direction: "credit",
+      reference: "REF-POP",
+    },
+  ];
+
+  it("resolves the scraper by job.data.bankId and processes with the bank-specific scraper", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const transactions = new FakeTransactionRepository({ inserted: 1, skipped: 0 });
+    const resolveScraper: ResolveScraper = (bankCode) => ({
+      collect: async () => ({
+        status: "collected" as const,
+        movements: popularMovements.map((m) => ({ ...m, bankId: bankCode ?? "popular" })),
+      }),
+    });
+
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions,
+      resolveScraper,
+    });
+
+    const result = await processor({
+      data: { runId: "run-routing", bankId: "popular", accountFingerprint: "acct-main" },
+    });
+
+    expect(result).toEqual({ status: "succeeded", inserted: 1, skipped: 0 });
+    expect(transactions.received[0]?.bankId).toBe("popular");
+  });
+
+  it("fails closed for an explicit unknown bankCode (needs_admin_action, no Popular fallback)", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const resolveScraper: ResolveScraper = (bankCode) => {
+      if (bankCode && bankCode !== "popular") {
+        return {
+          collect: async () => ({
+            status: "needs_admin_action" as const,
+            movements: [],
+            safeErrorSummary: "Bank not configured for automated scraping",
+          }),
+        };
+      }
+      return {
+        collect: async () => ({
+          status: "collected" as const,
+          movements: popularMovements,
+        }),
+      };
+    };
+
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      resolveScraper,
+    });
+
+    const result = await processor({
+      data: { runId: "run-unknown", bankId: "banreservas", accountFingerprint: "acct-main" },
+    });
+
+    expect(result).toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-unknown", status: "running" },
+      {
+        runId: "run-unknown",
+        status: "needs_admin_action",
+        safeErrorSummary: "Bank not configured for automated scraping",
+      },
+    ]);
+  });
+
+  it("defaults to Popular when job.data.bankId is empty (legacy/default run)", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const transactions = new FakeTransactionRepository({ inserted: 1, skipped: 0 });
+    const resolveScraper: ResolveScraper = (bankCode) => {
+      // Absent bankCode should default to popular
+      const code = bankCode && bankCode.trim() ? bankCode.trim() : "popular";
+      return {
+        collect: async () => ({
+          status: "collected" as const,
+          movements: popularMovements.map((m) => ({ ...m, bankId: code })),
+        }),
+      };
+    };
+
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions,
+      resolveScraper,
+    });
+
+    const result = await processor({
+      data: { runId: "run-legacy", bankId: "", accountFingerprint: "acct-main" },
+    });
+
+    expect(result).toEqual({ status: "succeeded", inserted: 1, skipped: 0 });
+    expect(transactions.received[0]?.bankId).toBe("popular");
+  });
+
+  it("throws when neither resolveScraper nor scraper is provided", () => {
+    expect(() =>
+      createIngestionProcessor({
+        scrapeRuns: new FakeScrapeRunRepository(),
+        transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      }),
+    ).toThrow("createIngestionProcessor requires either resolveScraper or scraper");
+  });
+
+  it("falls back to the legacy scraper when resolveScraper is absent", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const transactions = new FakeTransactionRepository({ inserted: 1, skipped: 0 });
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions,
+      scraper: { collect: async () => ({ status: "collected", movements: popularMovements }) },
+    });
+
+    const result = await processor({ data: jobData });
+
+    expect(result).toEqual({ status: "succeeded", inserted: 1, skipped: 0 });
   });
 });
 

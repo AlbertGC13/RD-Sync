@@ -8,6 +8,11 @@ export type ScrapeRunStatus = "queued" | "running" | "succeeded" | "failed" | "n
 
 export interface IngestionJobData {
   runId: string;
+  /**
+   * Canonical bank code (`Bank.code`), e.g. `"popular"`. Named `bankId` for
+   * backward compatibility with the existing BullMQ job payload contract, but
+   * the value is a domain code, NOT the Prisma `Bank.id` cuid.
+   */
   bankId: string;
   accountFingerprint: string;
 }
@@ -25,6 +30,14 @@ export interface IngestionResult {
 export interface IngestionScraper {
   collect(): Promise<ScrapeCollectionResult>;
 }
+
+/**
+ * Resolves the appropriate `IngestionScraper` for a given canonical bank code
+ * (`Bank.code`). Absent/empty bankCode must resolve to the default (Popular)
+ * scraper for backward compatibility. An explicitly unknown bankCode must fail
+ * closed (return a `needs_admin_action` stub) and never fall back to Popular.
+ */
+export type ResolveScraper = (bankCode?: string) => IngestionScraper;
 
 export interface ScrapeRunRepository {
   markRunning(runId: string, startedAt?: Date): Promise<void>;
@@ -54,7 +67,19 @@ export interface AdminAlertSink {
 export interface IngestionProcessorDependencies {
   scrapeRuns: ScrapeRunRepository;
   transactions: TransactionUpsertRepository;
-  scraper: IngestionScraper;
+  /**
+   * Resolves the scraper for each job by its canonical `bankCode`. The
+   * processor calls `resolveScraper(job.data.bankId)` per job so the worker
+   * and in-memory consumer no longer hardcode a single Popular scraper at
+   * construction time.
+   */
+  resolveScraper?: ResolveScraper;
+  /**
+   * @deprecated Use `resolveScraper` instead. Retained for backward
+   * compatibility with tests that inject a single scraper directly. When
+   * `resolveScraper` is provided it takes precedence.
+   */
+  scraper?: IngestionScraper;
   adminAlerts?: AdminAlertSink;
   auditSink?: Pick<AuditSink, "record">;
   now?: () => Date;
@@ -69,17 +94,30 @@ const SYSTEM_INGESTION_ACTOR = "system:ingestion-worker";
 
 export function createIngestionProcessor(dependencies: IngestionProcessorDependencies) {
   const now = dependencies.now ?? (() => new Date());
+  const resolveScraper = dependencies.resolveScraper;
+  const legacyScraper = dependencies.scraper;
+
+  if (!resolveScraper && !legacyScraper) {
+    throw new Error(
+      "createIngestionProcessor requires either resolveScraper or scraper in dependencies",
+    );
+  }
 
   return async function processIngestionJob(job: IngestionJob): Promise<IngestionResult> {
+    const requestedBankCode = job.data.bankId;
+    const scraper = resolveScraper
+      ? resolveScraper(requestedBankCode)
+      : legacyScraper!;
+
     await dependencies.scrapeRuns.markRunning(job.data.runId, now());
     await emitAuditEvent(dependencies.auditSink, {
       action: "scrape_run.started",
       runId: job.data.runId,
-      bankId: job.data.bankId,
+      bankId: requestedBankCode,
     });
 
     try {
-      const scrapeResult = await dependencies.scraper.collect();
+      const scrapeResult = await scraper.collect();
 
       if (scrapeResult.status === "needs_admin_action") {
         const safeErrorSummary = scrapeResult.safeErrorSummary ?? "Bank session requires admin action";
@@ -92,7 +130,7 @@ export function createIngestionProcessor(dependencies: IngestionProcessorDepende
         await emitAuditEvent(dependencies.auditSink, {
           action: "scrape_run.needs_admin_action",
           runId: job.data.runId,
-          bankId: job.data.bankId,
+          bankId: requestedBankCode,
           metadata: { safeErrorSummary },
         });
 
@@ -110,7 +148,7 @@ export function createIngestionProcessor(dependencies: IngestionProcessorDepende
       await emitAuditEvent(dependencies.auditSink, {
         action: "scrape_run.succeeded",
         runId: job.data.runId,
-        bankId: job.data.bankId,
+        bankId: requestedBankCode,
         metadata: { inserted: counts.inserted, skipped: counts.skipped },
       });
 
@@ -122,7 +160,7 @@ export function createIngestionProcessor(dependencies: IngestionProcessorDepende
       await emitAuditEvent(dependencies.auditSink, {
         action: "scrape_run.failed",
         runId: job.data.runId,
-        bankId: job.data.bankId,
+        bankId: requestedBankCode,
         metadata: { safeErrorSummary },
       });
       return { status: "failed", inserted: 0, skipped: 0 };
@@ -175,6 +213,9 @@ async function emitAuditEvent(
         action: input.action,
         target: "scrape_run",
         targetId: input.runId,
+        // bankId in audit metadata is the canonical bank code (Bank.code),
+        // NOT the Prisma Bank.id. Kept as "bankId" for backward compat with
+        // existing audit event consumers.
         metadata: { bankId: input.bankId, ...input.metadata },
       }),
     );

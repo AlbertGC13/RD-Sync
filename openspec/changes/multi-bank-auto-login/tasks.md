@@ -33,13 +33,13 @@ Tracker branch `feature/multi-bank-auto-login` (base = current/main per repo con
 
 ## PR1: Adapter registry + Popular migration
 
-- [ ] 1.1 `prisma/schema.prisma`: add `@unique` on `Bank.code`; migration (no data change).
-- [ ] 1.2 Create `src/modules/bank-adapters/registry.ts`: `BankAdapter` + `BankAdapterRegistry` keyed by `bankCode`.
-- [ ] 1.3 Modify `src/modules/bank-adapters/popular.ts`: expose Popular as `BankAdapter` (`bankCode:"popular"`); `createAutoLoginStrategy` stub (not-implemented).
-- [ ] 1.4 Modify `src/app/api/scrape-runs/consumer-defaults.ts`: `resolveDefaultScraper`->registry routing by `bankCode`; explicit unknown->400 fail-closed; absent/empty->default Popular.
-- [ ] 1.5 Modify `src/app/api/scrape-runs/run-now.ts` + `src/lib/banks.ts`: bankCode-aware defaults, 400 on unsupported; `SUPPORTED_RUN_NOW_BANK_CODES` derived from registry presence (rename from `_IDS`).
-- [ ] 1.6 Tests: route by bankCode; unknown fails closed (400+audit); absent->Popular; Popular path unchanged.
-- Gate: full gates; <=400 lines; no behavior change.
+- [x] 1.1 `prisma/schema.prisma`: `Bank.code` already has `@unique` in the baseline schema — no migration needed. Verified existing constraint satisfies the adapter registry routing requirement.
+- [x] 1.2 Create `src/modules/bank-adapters/registry.ts`: `BankAdapter` + `BankAdapterRegistry` keyed by `bankCode`.
+- [x] 1.3 Modify `src/modules/bank-adapters/popular.ts`: expose Popular as `BankAdapter` (`bankCode:"popular"`); `createAutoLoginStrategy` stub (not-implemented).
+- [x] 1.4 Modify `src/app/api/scrape-runs/consumer-defaults.ts`: `resolveDefaultScraper`->registry routing by `bankCode`; explicit unknown worker jobs fail closed as `needs_admin_action`; absent/empty->default Popular.
+- [x] 1.5 Modify `src/app/api/scrape-runs/run-now.ts` + `src/lib/banks.ts`: bankCode-aware defaults, HTTP 400 on unsupported run-now requests; `SUPPORTED_RUN_NOW_BANK_CODES` is a client-safe mirrored whitelist guarded by registry parity tests (rename from `_IDS`).
+- [x] 1.6 Tests: route by bankCode; unknown fails closed (400+audit); absent->Popular; Popular path unchanged.
+- Gate: full gates; maintainer-approved `size:exception` for PR1 foundation slice; no behavior change.
 
 ## PR2: Per-bank browser/CDP isolation + loopback + backpressure + portal configs
 
