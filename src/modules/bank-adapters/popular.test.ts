@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
+import type { IngestionScraper } from "../../worker/queues";
 import {
+  createPopularAutoLoginStrategy,
+  createPopularBankAdapter,
   parsePopularTransactionRows,
+  popularBankCode,
   popularPortalFixture,
   popularScraperProfile,
 } from "./popular";
@@ -69,5 +73,52 @@ describe("parsePopularTransactionRows", () => {
     expect(() =>
       parsePopularTransactionRows([{ ...popularPortalFixture.transactions[0], amount: "RD$ --" }]),
     ).toThrow("Invalid Popular amount format");
+  });
+});
+
+describe("popularBankCode — canonical adapter identity", () => {
+  it("exposes the immutable domain code (not the cuid DB id)", () => {
+    expect(popularBankCode).toBe("popular");
+  });
+});
+
+describe("createPopularBankAdapter", () => {
+  // A deterministic scraper stub so the adapter test never touches a real CDP
+  // endpoint or env. The adapter must hand back whatever scraper factory it is
+  // given so the server wiring layer (registry) owns the heavyweight wiring.
+  const stubScraper: IngestionScraper = {
+    collect: async () => ({ status: "collected", movements: [] }),
+  };
+
+  it("exposes Popular as a BankAdapter keyed by the canonical bankCode", () => {
+    const adapter = createPopularBankAdapter({ createScraper: () => stubScraper });
+
+    expect(adapter.bankCode).toBe("popular");
+  });
+
+  it("delegates createScraper to the injected factory (no env/CDP coupling in the domain module)", () => {
+    let called = 0;
+    const adapter = createPopularBankAdapter({
+      createScraper: () => {
+        called += 1;
+        return stubScraper;
+      },
+    });
+
+    const scraper = adapter.createScraper();
+    expect(scraper).toBe(stubScraper);
+    expect(called).toBe(1);
+  });
+
+  it("createAutoLoginStrategy is a not-implemented stub in PR1 (no auto-login surface yet)", () => {
+    const adapter = createPopularBankAdapter({ createScraper: () => stubScraper });
+
+    expect(() => adapter.createAutoLoginStrategy()).toThrow(/not implemented/i);
+  });
+});
+
+describe("createPopularAutoLoginStrategy", () => {
+  it("throws a not-implemented error directly (PR1 has no auto-login)", () => {
+    expect(() => createPopularAutoLoginStrategy()).toThrow(/not implemented/i);
   });
 });

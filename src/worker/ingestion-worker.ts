@@ -62,7 +62,7 @@ const processor = createIngestionProcessor({
   transactions: defaultTransactionRepository,
   adminAlerts: resolveDefaultAlertSink(),
   auditSink: defaultAuditSink,
-  scraper: resolveDefaultScraper(),
+  resolveScraper: resolveDefaultScraper,
 });
 
 // ---------------------------------------------------------------------------

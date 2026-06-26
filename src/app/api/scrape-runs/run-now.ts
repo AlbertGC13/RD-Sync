@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 
 import { requireRole, type Principal } from "../../../modules/auth";
 import { popularScraperProfile } from "../../../modules/bank-adapters/popular";
+import { bankAdapterRegistry } from "../../../modules/bank-adapters/registry";
 import { createAuditEvent, type AuditSink } from "../../../modules/audit";
 import type { CreateQueuedScrapeRunInput } from "../../../modules/scrape-runs";
 import {
@@ -10,10 +11,11 @@ import {
   type ScrapeRunStatus,
 } from "../../../worker/queues";
 import { redactDiagnosticText } from "../../../worker/scraper";
-import { isSupportedRunNowBankId } from "../../../lib/banks";
 
 export interface RunNowRequest {
   principal: Principal | null;
+  /** Canonical bank code (`Bank.code`), e.g. `"popular"`. Misnamed for
+   *  backward compatibility with the existing POST body contract. */
   bankId?: string;
   accountFingerprint?: string;
 }
@@ -96,12 +98,14 @@ export async function scheduleIngestionRunNow(
   const principal = requireRole(request.principal, ["admin", "reviewer", "viewer"]);
 
   const now = dependencies.now?.() ?? new Date();
-  const requestedBankId = request.bankId ?? popularScraperProfile.bankId;
+  const requestedBankCode = request.bankId ?? popularScraperProfile.bankId;
 
   // Reject unsupported banks explicitly. Without this check the backend would
   // queue a job that the worker can never satisfy (no adapter registered),
   // and the UI would claim a run was queued for a bank we cannot service.
-  if (request.bankId !== undefined && !isSupportedRunNowBankId(request.bankId)) {
+  // Validation is derived from adapter registry presence (authoritative) so
+  // the backend enforcement and the registered adapters can never drift.
+  if (request.bankId !== undefined && !bankAdapterRegistry.get(request.bankId)) {
     if (dependencies.auditSink) {
       try {
         await dependencies.auditSink.record(
@@ -121,7 +125,7 @@ export async function scheduleIngestionRunNow(
     throw new UnsupportedRunNowBankError(request.bankId);
   }
 
-  const bankId = requestedBankId;
+  const bankCode = requestedBankCode;
   const accountFingerprint =
     request.accountFingerprint ?? popularScraperProfile.accountFingerprint;
 
@@ -132,7 +136,7 @@ export async function scheduleIngestionRunNow(
   // that don't exercise the lock can omit the dependency; the production
   // default wires it from the shared scrape-run repository.
   if (dependencies.scrapeRuns.hasActiveRunForBank) {
-    const hasActiveRun = await dependencies.scrapeRuns.hasActiveRunForBank(bankId);
+    const hasActiveRun = await dependencies.scrapeRuns.hasActiveRunForBank(bankCode);
     if (hasActiveRun) {
       if (dependencies.auditSink) {
         try {
@@ -143,22 +147,22 @@ export async function scheduleIngestionRunNow(
               action: "scrape_run.duplicate_rejected",
               target: "scrape_run",
               targetId: null,
-              metadata: { bankId },
+              metadata: { bankId: bankCode },
             }),
           );
         } catch {
           // audit failure must not mask the lock rejection
         }
       }
-      throw new ActiveRunExistsError(bankId);
+      throw new ActiveRunExistsError(bankCode);
     }
   }
 
-  const runId = dependencies.createRunId?.({ bankId, now }) ?? createRunId({ bankId, now });
-  const run = await dependencies.scrapeRuns.createQueued({ id: runId, bankId, createdAt: now });
+  const runId = dependencies.createRunId?.({ bankId: bankCode, now }) ?? createRunId({ bankId: bankCode, now });
+  const run = await dependencies.scrapeRuns.createQueued({ id: runId, bankId: bankCode, createdAt: now });
 
   try {
-    await scheduleIngestionJob(dependencies.queue, { runId, bankId, accountFingerprint });
+    await scheduleIngestionJob(dependencies.queue, { runId, bankId: bankCode, accountFingerprint });
   } catch (queueError) {
     // The run is already persisted as `queued` at this point. If the queue
     // rejects the job we must not leave it misleadingly in `queued` state —
@@ -176,7 +180,7 @@ export async function scheduleIngestionRunNow(
     } catch (markFailedError) {
       console.error("[run-now] could not mark scrape run failed after queue error", {
         runId,
-        bankId,
+        bankId: bankCode,
         queueError: queueError instanceof Error
           ? { name: queueError.name, message: queueError.message }
           : queueError,
@@ -195,7 +199,7 @@ export async function scheduleIngestionRunNow(
             action: "scrape_run.queue_failed",
             target: "scrape_run",
             targetId: runId,
-            metadata: { bankId, safeErrorSummary: safeQueueSummary },
+            metadata: { bankId: bankCode, safeErrorSummary: safeQueueSummary },
           }),
         );
       } catch {
@@ -215,7 +219,7 @@ export async function scheduleIngestionRunNow(
           action: "scrape_run.scheduled",
           target: "scrape_run",
           targetId: runId,
-          metadata: { bankId, accountFingerprint },
+          metadata: { bankId: bankCode, accountFingerprint },
         }),
       );
     } catch {
@@ -223,7 +227,7 @@ export async function scheduleIngestionRunNow(
     }
   }
 
-  return { runId, bankId, accountFingerprint, status: run.status as "queued" };
+  return { runId, bankId: bankCode, accountFingerprint, status: run.status as "queued" };
 }
 
 export function createRunId({ bankId, now }: { bankId: string; now: Date }): string {

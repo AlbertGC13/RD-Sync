@@ -1,17 +1,17 @@
-import { popularPortalFixture, parsePopularTransactionRows } from "../../../modules/bank-adapters/popular";
 import { createIngestionProcessor } from "../../../worker/queues";
 import type { IngestionJob, IngestionScraper } from "../../../worker/queues";
 import { createInMemoryIngestionConsumer, type InMemoryIngestionConsumer } from "../../../worker/ingestion-consumer";
 import { redactDiagnosticText } from "../../../worker/scraper";
 import { resolveDefaultAlertSink } from "../../../worker/alerts/email-alert-sink";
-import {
-  createPopularCdpScraper,
-  type PopularCdpScraperOptions,
-} from "../../../worker/scraper/navigation/popular-cdp";
-import { createEnsureBrowserFromEnv, type EnsureBrowserSeam } from "../../../worker/scraper/browser-runtime";
+import { bankAdapterRegistry } from "../../../modules/bank-adapters/registry";
 import { defaultAuditSink } from "../audit/defaults";
 import { defaultTransactionRepository } from "../transactions/defaults";
 import { defaultIngestionQueue, defaultScrapeRunRepository, InMemoryScheduledIngestionQueue } from "./defaults";
+
+// Re-exported so existing imports of the env-wiring helper from this module
+// keep working. The implementation now lives in the adapter registry, which
+// owns Popular scraper wiring.
+export { buildPopularCdpScraperOptionsFromEnv } from "../../../modules/bank-adapters/registry";
 
 const globalRegistry = globalThis as typeof globalThis & {
   __rdSyncIngestionConsumer?: InMemoryIngestionConsumer | undefined;
@@ -19,72 +19,38 @@ const globalRegistry = globalThis as typeof globalThis & {
 };
 
 /**
- * Builds the Popular CDP scraper options from the given env. Pure and
- * testable — it never touches process.env directly when env is injected.
- *
- * Returns `undefined` when the popular-cdp scraper is not selected, so callers
- * can fall through to the other branches.
- *
- * The `ensureBrowser` seam is included only when
- * `RD_SYNC_BANK_BROWSER_AUTO_LAUNCH=enabled` (and `RD_SYNC_CDP_URL` is set);
- * otherwise it is `undefined` and the scraper connects directly as before
- * (backward compatible). This is the env-wiring contract the scraper relies
- * on — see consumer-defaults-popular-cdp.test.ts for the behaviour proof.
- */
-export function buildPopularCdpScraperOptionsFromEnv(
-  env: Record<string, string | undefined> = process.env,
-): PopularCdpScraperOptions | undefined {
-  if (env.RD_SYNC_SCRAPER !== "popular-cdp") {
-    return undefined;
-  }
-
-  const ensureBrowser: EnsureBrowserSeam | undefined = createEnsureBrowserFromEnv(env);
-  return {
-    cdpUrl: env.RD_SYNC_CDP_URL,
-    ensureBrowser,
-  };
-}
-
-/**
- * Resolves the default IngestionScraper based on env vars read at call time.
+ * Resolves the default IngestionScraper by routing through the bank adapter
+ * registry keyed by canonical `bankCode` (`Bank.code`).
  *
  * Note: this function is also called once at module-load time (line below) to
- * construct the module-level `defaultProcessor`. Env vars are therefore read at
- * import time for that instance, not lazily per request.
+ * construct the module-level `defaultProcessor`. Env vars are therefore read
+ * lazily inside the Popular adapter's `createScraper` at call time.
  *
- * - RD_SYNC_SCRAPER=popular-cdp → CDP-attach scraper (Via B: attaches to
- *   a human-opened Brave session; cdpUrl from RD_SYNC_CDP_URL). When
- *   RD_SYNC_BANK_BROWSER_AUTO_LAUNCH=enabled, an ensureBrowser seam is wired
- *   in so the worker starts the browser before connecting.
- * - RD_SYNC_DEV_PREVIEW=enabled → fixture-backed scraper (Popular portal fixture).
- * - Otherwise → stub that reports needs_admin_action so production never
- *   fabricates data while real bank navigation is not configured.
+ * Routing contract (PR1, no behaviour change for Popular):
+ * - `bankCode` absent/empty/whitespace -> defaults to `popular` for backward
+ *   compatibility (legacy/default runs). Only absent bankCode may default to
+ *   Popular.
+ * - `bankCode` explicitly present and registered -> that bank's adapter scraper
+ *   (Popular env logic: popular-cdp > dev-preview fixture > needs_admin_action
+ *   stub, exactly as before).
+ * - `bankCode` explicitly present but NOT registered -> fail closed
+ *   (needs_admin_action with a safe summary). It NEVER falls back to Popular.
+ *   The 400 + audit for unknown banks is enforced in run-now; this consumer
+ *   path fails safely if an unknown code ever reaches it.
  */
-export function resolveDefaultScraper(): IngestionScraper {
-  const popularOptions = buildPopularCdpScraperOptionsFromEnv();
-  if (popularOptions) {
-    // Only the worker/scraper path launches the browser — the read-only
-    // session checker never does. The ensureBrowser seam (when present) is
-    // built from env by buildPopularCdpScraperOptionsFromEnv.
-    return createPopularCdpScraper(popularOptions);
-  }
-
-  if (process.env.RD_SYNC_DEV_PREVIEW === "enabled") {
+export function resolveDefaultScraper(bankCode?: string): IngestionScraper {
+  const code = bankCode && bankCode.trim() ? bankCode.trim() : "popular";
+  const adapter = bankAdapterRegistry.get(code);
+  if (!adapter) {
     return {
       collect: async () => ({
-        status: "collected" as const,
-        movements: parsePopularTransactionRows(popularPortalFixture.transactions),
+        status: "needs_admin_action" as const,
+        movements: [],
+        safeErrorSummary: "Bank not configured for automated scraping",
       }),
     };
   }
-
-  return {
-    collect: async () => ({
-      status: "needs_admin_action" as const,
-      movements: [],
-      safeErrorSummary: "Bank portal navigation not configured yet",
-    }),
-  };
+  return adapter.createScraper();
 }
 
 /**
@@ -118,7 +84,7 @@ function createDefaultIngestionConsumer(): InMemoryIngestionConsumer | undefined
     transactions: defaultTransactionRepository,
     auditSink: defaultAuditSink,
     adminAlerts: resolveDefaultAlertSink(),
-    scraper: resolveDefaultScraper(),
+    resolveScraper: resolveDefaultScraper,
   });
   return createInMemoryIngestionConsumer({
     queue: defaultIngestionQueue,

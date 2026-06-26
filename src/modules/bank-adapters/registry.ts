@@ -1,0 +1,177 @@
+/**
+ * Bank adapter registry — the canonical routing surface keyed by `bankCode`
+ * (`Bank.code`, the immutable domain code), replacing the Popular-hardcoded
+ * `resolveDefaultScraper`/`run-now`/`bank-sessions` resolution.
+ *
+ * `Bank.id` (cuid) remains the internal DB PK for existing relations
+ * (`ScrapeRun`); `Bank.code` is the canonical adapter/job/API/credential
+ * identity. Adapters are registered by `bankCode` and resolved by `bankCode`.
+ *
+ * PR1 scope: interface + factory + a Popular adapter instance. The full design
+ * interface also exposes `portalConfig` and `createSessionChecker`; those are
+ * intentionally added in PR2/PR5 when per-bank browser isolation and the
+ * Banreservas/BHD read-only scrapers land, so PR1 stays a focused,
+ * no-behavior-change routing refactor.
+ */
+
+import type { IngestionScraper } from "../../worker/queues";
+import {
+  createPopularCdpScraper,
+  type PopularCdpScraperOptions,
+} from "../../worker/scraper/navigation/popular-cdp";
+import {
+  createEnsureBrowserFromEnv,
+  type EnsureBrowserSeam,
+} from "../../worker/scraper/browser-runtime";
+import {
+  createPopularBankAdapter,
+  parsePopularTransactionRows,
+  popularBankCode,
+  popularPortalFixture,
+} from "./popular";
+
+/**
+ * Placeholder for the auto-login strategy contract. PR4 fleshes this out into
+ * the state machine + `LoginMutationGuard` + Redis `AutoLoginLock` wiring.
+ * In PR1 every adapter's `createAutoLoginStrategy()` is a not-implemented stub
+ * — there is NO auto-login surface in PR1.
+ */
+export interface BankAutoLoginStrategy {
+  readonly bankCode: string;
+}
+
+/**
+ * A bank adapter. Each bank exposes its canonical `bankCode` plus the
+ * factories the runtime needs. `createScraper` produces the read-only
+ * `IngestionScraper`; `createAutoLoginStrategy` is stubbed in PR1.
+ */
+export interface BankAdapter {
+  /** Canonical immutable domain code (`Bank.code`), e.g. `popular`. */
+  readonly bankCode: string;
+  /** Builds the read-only ingestion scraper for this bank. */
+  createScraper(): IngestionScraper;
+  /** PR1 stub — throws not-implemented. PR4 implements the real strategy. */
+  createAutoLoginStrategy(): BankAutoLoginStrategy;
+}
+
+/**
+ * Registry of bank adapters keyed by `bankCode`. Routing and run-now
+ * validation resolve adapters through this surface so an explicit unknown
+ * `bankCode` fails closed instead of falling back to Popular.
+ */
+export interface BankAdapterRegistry {
+  /** Returns the adapter for `bankCode`, or `undefined` when none is registered. */
+  get(bankCode: string): BankAdapter | undefined;
+  /** Canonical list of registered bank codes (derived from registered adapters). */
+  supportedBankCodes(): readonly string[];
+}
+
+/**
+ * Builds a `BankAdapterRegistry` from an explicit adapter list. The supported
+ * codes are derived from the registered adapters' `bankCode` values — there is
+ * no separate whitelist to drift out of sync.
+ */
+export function createBankAdapterRegistry(adapters: readonly BankAdapter[]): BankAdapterRegistry {
+  const byCode = new Map<string, BankAdapter>();
+  for (const adapter of adapters) {
+    byCode.set(adapter.bankCode, adapter);
+  }
+
+  return {
+    get(bankCode: string): BankAdapter | undefined {
+      return byCode.get(bankCode);
+    },
+    supportedBankCodes(): readonly string[] {
+      return Array.from(byCode.keys());
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Popular scraper factory + default registry instance (server wiring).
+//
+// The env-based scraper construction previously lived inline in
+// `consumer-defaults.resolveDefaultScraper`. It is relocated here so the
+// registry owns adapter wiring and `resolveDefaultScraper` becomes a thin
+// bankCode router. Behaviour is preserved exactly: popular-cdp takes
+// precedence, then the dev-preview fixture, then a needs_admin_action stub.
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the Popular CDP scraper options from the given env. Pure and
+ * testable — it never touches process.env directly when env is injected.
+ *
+ * Returns `undefined` when the popular-cdp scraper is not selected, so callers
+ * can fall through to the other branches. The `ensureBrowser` seam is included
+ * only when `RD_SYNC_BANK_BROWSER_AUTO_LAUNCH=enabled` (and `RD_SYNC_CDP_URL`
+ * is set); otherwise it is `undefined` and the scraper connects directly as
+ * before (backward compatible).
+ */
+export function buildPopularCdpScraperOptionsFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): PopularCdpScraperOptions | undefined {
+  if (env.RD_SYNC_SCRAPER !== "popular-cdp") {
+    return undefined;
+  }
+
+  const ensureBrowser: EnsureBrowserSeam | undefined = createEnsureBrowserFromEnv(env);
+  return {
+    cdpUrl: env.RD_SYNC_CDP_URL,
+    ensureBrowser,
+  };
+}
+
+/**
+ * Constructs the Popular read-only ingestion scraper from env read at call
+ * time (lazy — no env read at module import). Mirrors the previous
+ * `resolveDefaultScraper` branch order exactly so Popular behaviour is
+ * unchanged:
+ * - RD_SYNC_SCRAPER=popular-cdp -> CDP-attach scraper.
+ * - RD_SYNC_DEV_PREVIEW=enabled -> fixture-backed scraper.
+ * - Otherwise -> stub that reports needs_admin_action (production never
+ *   fabricates data while real bank navigation is not configured).
+ */
+export function createPopularScraperFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): IngestionScraper {
+  const popularOptions = buildPopularCdpScraperOptionsFromEnv(env);
+  if (popularOptions) {
+    // Only the worker/scraper path launches the browser — the read-only
+    // session checker never does. The ensureBrowser seam (when present) is
+    // built from env by buildPopularCdpScraperOptionsFromEnv.
+    return createPopularCdpScraper(popularOptions);
+  }
+
+  if (env.RD_SYNC_DEV_PREVIEW === "enabled") {
+    return {
+      collect: async () => ({
+        status: "collected" as const,
+        movements: parsePopularTransactionRows(popularPortalFixture.transactions),
+      }),
+    };
+  }
+
+  return {
+    collect: async () => ({
+      status: "needs_admin_action" as const,
+      movements: [],
+      safeErrorSummary: "Bank portal navigation not configured yet",
+    }),
+  };
+}
+
+const popularAdapter: BankAdapter = createPopularBankAdapter({
+  createScraper: () => createPopularScraperFromEnv(),
+});
+
+/**
+ * Default bank adapter registry. PR1 registers only Popular; Banreservas and
+ * BHD adapters are added in PR5. Routing and run-now validation resolve
+ * through this instance so an explicit unknown `bankCode` fails closed.
+ */
+export const bankAdapterRegistry: BankAdapterRegistry = createBankAdapterRegistry([
+  popularAdapter,
+]);
+
+// Re-export the canonical Popular code alongside the registry for convenience.
+export { popularBankCode };

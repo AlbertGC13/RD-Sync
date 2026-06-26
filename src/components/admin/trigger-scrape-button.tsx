@@ -7,19 +7,19 @@ import { toast } from "sonner";
 
 import { Button } from "../ui/button";
 import {
-  DEFAULT_RUN_NOW_BANK_ID,
-  isSupportedRunNowBankId,
-  SUPPORTED_RUN_NOW_BANK_IDS,
-  type SupportedRunNowBankId,
+  DEFAULT_RUN_NOW_BANK_CODE,
+  isSupportedRunNowBankCode,
+  SUPPORTED_RUN_NOW_BANK_CODES,
+  type SupportedRunNowBankCode,
 } from "../../lib/banks";
 
 // Re-export the shared whitelist so existing imports from this module keep
 // working while the single source of truth lives in `src/lib/banks.ts`.
 export {
-  DEFAULT_RUN_NOW_BANK_ID,
-  isSupportedRunNowBankId,
-  SUPPORTED_RUN_NOW_BANK_IDS,
-  type SupportedRunNowBankId,
+  DEFAULT_RUN_NOW_BANK_CODE,
+  isSupportedRunNowBankCode,
+  SUPPORTED_RUN_NOW_BANK_CODES,
+  type SupportedRunNowBankCode,
 };
 
 interface TriggerScrapeButtonProps {
@@ -42,7 +42,7 @@ const USER_SAFE_RUN_FAILURE = "No se pudo programar la corrida. Inténtalo nueva
 const USER_SAFE_RUN_CONFLICT = "Ya hay una corrida activa para este banco. Espera a que finalice.";
 
 export function TriggerScrapeButton({
-  bankId = DEFAULT_RUN_NOW_BANK_ID,
+  bankId = DEFAULT_RUN_NOW_BANK_CODE,
   disabled = false,
 }: TriggerScrapeButtonProps = {}) {
   const router = useRouter();
@@ -99,7 +99,7 @@ export async function triggerRunNow({
   fetchImpl,
   onSuccess,
 }: TriggerRunNowOptions): Promise<void> {
-  const effectiveBankId = bankId ?? DEFAULT_RUN_NOW_BANK_ID;
+  const effectiveBankId = bankId ?? DEFAULT_RUN_NOW_BANK_CODE;
 
   let response: Response;
   try {

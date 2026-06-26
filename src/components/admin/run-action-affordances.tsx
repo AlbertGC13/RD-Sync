@@ -10,8 +10,8 @@ import { notImplemented } from "../../app/(private)/transactions/_actions/not-im
 import type { ScrapeRunStatus } from "../../worker/queues";
 import {
   bankDisplayName,
-  isSupportedRunNowBankId,
-  SUPPORTED_RUN_NOW_BANK_IDS,
+  isSupportedRunNowBankCode,
+  SUPPORTED_RUN_NOW_BANK_CODES,
   scrapeRunStatusLabel,
 } from "../../lib/banks";
 
@@ -30,7 +30,7 @@ const USER_SAFE_RUN_CONFLICT = "Ya hay una corrida activa para este banco. Esper
 
 // Re-export the shared label/bank helpers so consumers that import from this
 // module keep working. The single source of truth lives in `src/lib/banks.ts`.
-export { bankDisplayName, scrapeRunStatusLabel, SUPPORTED_RUN_NOW_BANK_IDS };
+export { bankDisplayName, scrapeRunStatusLabel, SUPPORTED_RUN_NOW_BANK_CODES };
 
 /**
  * Pure per-card run-now trigger, extracted for testability without a DOM.
@@ -54,7 +54,7 @@ export async function triggerRunNowForBank({
   fetchImpl: typeof fetch;
   onSuccess: () => void;
 }): Promise<void> {
-  if (!isSupportedRunNowBankId(bankId)) {
+  if (!isSupportedRunNowBankCode(bankId)) {
     // Never claim success for an unsupported bank — refuse up front.
     toast.error(UNSUPPORTED_BANK_MESSAGE);
     return;
@@ -145,7 +145,7 @@ export function createRunNowClickHandler({
 export function RunActionAffordances({ runId, bankId, status }: RunActionAffordancesProps) {
   const router = useRouter();
   const [runNowPending, setRunNowPending] = useState(false);
-  const isSupportedBank = isSupportedRunNowBankId(bankId);
+  const isSupportedBank = isSupportedRunNowBankCode(bankId);
   // Triple-belt: bank-unsupported OR a request is in flight OR the run is
   // already processing locally.
   const isRunNowDisabled = !isSupportedBank || runNowPending || status === "running" || status === "queued";
