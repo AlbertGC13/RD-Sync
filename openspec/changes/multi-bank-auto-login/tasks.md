@@ -52,10 +52,10 @@ Tracker branch `feature/multi-bank-auto-login` (base = current/main per repo con
 
 ## PR2B: Browser capacity/backpressure + metrics (deferred)
 
-- [ ] 2B.1 Add browser semaphore/backpressure runtime behavior (`RD_SYNC_BANK_BROWSER_MAX_CONCURRENCY`, bounded queue, safe throttled result).
-- [ ] 2B.2 Add `src/modules/observability/bank-metrics.ts` capacity metrics and production wiring.
-- [ ] 2B.3 Add throttle/capacity tests and any 503/Retry-After sync-facing behavior.
-- [ ] 2B.4 Keep Banreservas/BHD placeholder portal configs deferred to PR5; no production-looking placeholder selectors in PR2B unless real read-only adapters land.
+- [x] 2B.1 Add and wire browser semaphore/backpressure into the production Popular CDP scraper path (`RD_SYNC_BANK_BROWSER_MAX_CONCURRENCY`, bounded queue, acquire timeout, safe throttled result, release in `finally`).
+- [ ] 2B.2 Capacity metrics exporter/alert wiring deferred; removed standalone test-only metrics scaffolding from PR2B rather than marking production metrics complete.
+- [x] 2B.3 Add deterministic throttle/capacity tests for scraper backpressure. No HTTP 503/Retry-After surface is implemented in this worker-only slice.
+- [x] 2B.4 Keep Banreservas/BHD placeholder portal configs deferred to PR5; no production-looking placeholder selectors in PR2B unless real read-only adapters land.
 - Gate: full gates; <=400 changed-line target; no credential vault or auto-login logic.
 
 ## PR3: Credential model + AES-GCM envelope + admin API + audit (NO auto-login) [HIGH RISK]

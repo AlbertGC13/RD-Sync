@@ -143,6 +143,181 @@ const SAFE_SUMMARY_NOT_READY = "Bank browser did not become ready in time";
 const DEFAULT_CHECK_TIMEOUT_MS = 2_000;
 const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_INTERVAL_MS = 500;
+const DEFAULT_BROWSER_ACQUIRE_TIMEOUT_MS = 30_000;
+
+/** Default maximum concurrent browser sessions across all banks. */
+export const DEFAULT_BROWSER_MAX_CONCURRENCY = 2;
+/** Maximum callers allowed to wait before returning `throttled`. */
+const DEFAULT_QUEUE_LIMIT = 10;
+export const SAFE_SUMMARY_BROWSER_CAPACITY_THROTTLED = "Bank browser capacity is temporarily exhausted";
+export interface BrowserCapacity {
+  active: number;
+  queueDepth: number;
+  max: number;
+}
+export type BrowserAcquireResult =
+  | { kind: "acquired"; release(): Promise<void> }
+  | { kind: "throttled" };
+export type AcquireBrowserSlot = () => Promise<BrowserAcquireResult>;
+interface BrowserQueueWaiter {
+  resolve: (value: BrowserAcquireResult) => void;
+  settled: boolean;
+  timer?: ReturnType<typeof setTimeout>;
+}
+/** Bounded concurrency semaphore for CDP browser launches/sessions. */
+export class BrowserSemaphore {
+  private activeCount = 0;
+  private readonly queue: BrowserQueueWaiter[] = [];
+  private _throttleCount = 0;
+  private released = new WeakSet<{ kind: "acquired"; release(): Promise<void> }>();
+
+  constructor(
+    private readonly max: number,
+    private readonly queueLimit: number = DEFAULT_QUEUE_LIMIT,
+  ) {}
+
+  /** Factory: reads browser concurrency/queue settings from env. */
+  static fromEnv(env: Record<string, string | undefined> = process.env): BrowserSemaphore {
+    return new BrowserSemaphore(
+      parseOptionalPositiveInt(
+        env.RD_SYNC_BANK_BROWSER_MAX_CONCURRENCY,
+        DEFAULT_BROWSER_MAX_CONCURRENCY,
+      ),
+      parseOptionalNonNegativeInt(env.RD_SYNC_BANK_BROWSER_QUEUE_LIMIT, DEFAULT_QUEUE_LIMIT),
+    );
+  }
+
+  async acquire(options: { timeoutMs?: number } = {}): Promise<BrowserAcquireResult> {
+    // max=0 means no slots are ever available — immediate throttle.
+    if (this.max <= 0) {
+      this._throttleCount++;
+      return { kind: "throttled" };
+    }
+
+    if (this.activeCount < this.max) {
+      this.activeCount++;
+      const handle: BrowserAcquireResult = {
+        kind: "acquired",
+        release: async () => {
+          this.releaseSlot(handle);
+        },
+      };
+      return handle;
+    }
+
+    // At capacity — try to enqueue.
+    if (this.queue.length >= this.queueLimit) {
+      this._throttleCount++;
+      return { kind: "throttled" };
+    }
+
+    return new Promise<BrowserAcquireResult>((resolve) => {
+      const waiter: BrowserQueueWaiter = { resolve, settled: false };
+      const timeoutMs = options.timeoutMs;
+      if (timeoutMs !== undefined && timeoutMs > 0) {
+        waiter.timer = setTimeout(() => {
+          if (waiter.settled) return;
+          waiter.settled = true;
+          const index = this.queue.indexOf(waiter);
+          if (index >= 0) {
+            this.queue.splice(index, 1);
+          }
+          this._throttleCount++;
+          resolve({ kind: "throttled" });
+        }, timeoutMs);
+      }
+      this.queue.push(waiter);
+    });
+  }
+
+  private releaseSlot(handle: BrowserAcquireResult): void {
+    // Idempotent: already released.
+    if (this.released.has(handle as { kind: "acquired"; release(): Promise<void> })) {
+      return;
+    }
+    this.released.add(handle as { kind: "acquired"; release(): Promise<void> });
+
+    // Wake the next queued waiter, or decrement active count.
+    let next = this.queue.shift();
+    while (next?.settled) {
+      next = this.queue.shift();
+    }
+
+    if (next) {
+      // Transfer the slot directly — activeCount stays the same.
+      next.settled = true;
+      if (next.timer) clearTimeout(next.timer);
+      const newHandle: BrowserAcquireResult = {
+        kind: "acquired",
+        release: async () => {
+          this.releaseSlot(newHandle);
+        },
+      };
+      next.resolve(newHandle);
+    } else {
+      this.activeCount = Math.max(0, this.activeCount - 1);
+    }
+  }
+
+  /** Current capacity snapshot. */
+  capacity(): BrowserCapacity {
+    return {
+      active: this.activeCount,
+      queueDepth: this.queue.length,
+      max: this.max,
+    };
+  }
+
+  /** Total number of throttled acquire attempts. */
+  get throttleCount(): number {
+    return this._throttleCount;
+  }
+}
+
+const globalBrowserRuntime = globalThis as typeof globalThis & {
+  __rdSyncBrowserSemaphore?: { key: string; semaphore: BrowserSemaphore };
+};
+
+export function createAcquireBrowserSlotFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): AcquireBrowserSlot {
+  const semaphore = getSharedBrowserSemaphore(env);
+  const timeoutMs = parseOptionalPositiveInt(
+    env.RD_SYNC_BANK_BROWSER_ACQUIRE_TIMEOUT_MS,
+    DEFAULT_BROWSER_ACQUIRE_TIMEOUT_MS,
+  );
+  return () => semaphore.acquire({ timeoutMs });
+}
+
+function getSharedBrowserSemaphore(env: Record<string, string | undefined>): BrowserSemaphore {
+  const max = parseOptionalPositiveInt(
+    env.RD_SYNC_BANK_BROWSER_MAX_CONCURRENCY,
+    DEFAULT_BROWSER_MAX_CONCURRENCY,
+  );
+  const queueLimit = parseOptionalNonNegativeInt(env.RD_SYNC_BANK_BROWSER_QUEUE_LIMIT, DEFAULT_QUEUE_LIMIT);
+  const key = `${max}:${queueLimit}`;
+
+  if (globalBrowserRuntime.__rdSyncBrowserSemaphore?.key !== key) {
+    globalBrowserRuntime.__rdSyncBrowserSemaphore = {
+      key,
+      semaphore: new BrowserSemaphore(max, queueLimit),
+    };
+  }
+
+  return globalBrowserRuntime.__rdSyncBrowserSemaphore.semaphore;
+}
+
+function parseOptionalPositiveInt(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function parseOptionalNonNegativeInt(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
 
 // ---------------------------------------------------------------------------
 // Default dependency implementations

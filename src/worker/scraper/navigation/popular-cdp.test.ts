@@ -11,6 +11,7 @@ import {
 } from "./popular-cdp";
 import {
   SAFE_SUMMARY_NON_LOOPBACK_CDP,
+  SAFE_SUMMARY_BROWSER_CAPACITY_THROTTLED,
 } from "../browser-runtime";
 import type { PopularTransactionRow } from "../../../modules/bank-adapters/popular";
 
@@ -338,6 +339,52 @@ describe("createPopularCdpScraper — ensureBrowser seam", () => {
 
     // No ensureBrowser → behaves exactly as before
     expect(result.status).toBe("collected");
+  });
+});
+
+describe("createPopularCdpScraper — browser backpressure seam", () => {
+  it("throttles before launch/connect and releases acquired slots on failure", async () => {
+    const blockedCalls: string[] = [];
+    const throttledScraper = createPopularCdpScraper({
+      cdpUrl: "http://127.0.0.1:9222",
+      acquireBrowserSlot: async () => ({ kind: "throttled" }),
+      ensureBrowser: async () => {
+        blockedCalls.push("ensureBrowser");
+        return { ok: true };
+      },
+      connect: async () => {
+        blockedCalls.push("connect");
+        throw new Error("should not connect");
+      },
+      collectRows: async () => ({ kind: "rows" as const, rows: FIXTURE_ROWS }),
+    });
+
+    const throttledResult = await throttledScraper.collect();
+
+    expect(throttledResult).toEqual({
+      status: "needs_admin_action",
+      movements: [],
+      safeErrorSummary: SAFE_SUMMARY_BROWSER_CAPACITY_THROTTLED,
+    });
+    expect(blockedCalls).toEqual([]);
+
+    let releaseCount = 0;
+    const failingScraper = createPopularCdpScraper({
+      cdpUrl: "http://127.0.0.1:9222",
+      acquireBrowserSlot: async () => ({
+        kind: "acquired",
+        release: async () => { releaseCount++; },
+      }),
+      connect: async () => {
+        throw new Error("Connection refused");
+      },
+      collectRows: async () => ({ kind: "rows" as const, rows: FIXTURE_ROWS }),
+    });
+
+    const result = await failingScraper.collect();
+
+    expect(result.status).toBe("needs_admin_action");
+    expect(releaseCount).toBe(1);
   });
 });
 
