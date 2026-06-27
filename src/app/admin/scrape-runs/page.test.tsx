@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   default as AdminScrapeRunsPage,
   AdminScrapeRunsDashboard,
+  loadScrapeRuns,
   summarizeScrapeRuns,
   type AdminScrapeRun,
 } from "./page";
@@ -31,6 +32,11 @@ vi.mock("next/headers", () => ({
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: vi.fn() }),
   usePathname: () => "/admin/scrape-runs",
+}));
+
+const mockListScrapeRunsForPage = vi.fn().mockResolvedValue([]);
+vi.mock("../../api/scrape-runs/defaults", () => ({
+  listScrapeRunsForPage: (...args: unknown[]) => mockListScrapeRunsForPage(...args),
 }));
 
 const runs: AdminScrapeRun[] = [
@@ -189,5 +195,72 @@ describe("AdminScrapeRunsDashboard", () => {
     const runNowButton = html.match(/<button[^>]*>Ejecutar ahora<\/button>/)?.[0];
     expect(runNowButton).toBeDefined();
     expect(runNowButton).toContain('disabled=""');
+  });
+});
+
+describe("loadScrapeRuns (safe server-side fallback)", () => {
+  it("returns empty array when listScrapeRunsForPage throws (DB unavailable)", async () => {
+    mockListScrapeRunsForPage.mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+
+    const result = await loadScrapeRuns();
+
+    expect(result).toEqual([]);
+  });
+
+  it("does not leak internal error details to the returned value", async () => {
+    mockListScrapeRunsForPage.mockRejectedValueOnce(
+      new Error("prisma: Error: P1001: Can't reach database server at localhost:5432"),
+    );
+
+    const result = await loadScrapeRuns();
+
+    // Empty array — no error objects, no stack traces, no DB connection strings.
+    expect(result).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain("P1001");
+    expect(JSON.stringify(result)).not.toContain("localhost:5432");
+  });
+
+  it("records a safe server-side diagnostic when listing fails", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockListScrapeRunsForPage.mockRejectedValueOnce(
+      new Error("P1001: Can't reach database server at localhost:5432"),
+    );
+
+    try {
+      const result = await loadScrapeRuns();
+
+      // Failure is observable in server logs...
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      const [message, context] = consoleError.mock.calls[0];
+      expect(message).toContain("[admin/scrape-runs]");
+      // ...but the operator-facing result still carries no runs.
+      expect(result).toEqual([]);
+      // The structured context exposes only sanitized error metadata.
+      expect(context).toEqual({
+        error: {
+          name: "Error",
+          message: "P1001: Can't reach database server at localhost:5432",
+        },
+      });
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("delegates to listScrapeRunsForPage and returns its result on success", async () => {
+    const fakeRuns = [{ id: "ok-1", bankId: "popular", status: "succeeded" }];
+    mockListScrapeRunsForPage.mockResolvedValueOnce(fakeRuns);
+
+    const result = await loadScrapeRuns();
+
+    expect(result).toBe(fakeRuns);
+    expect(mockListScrapeRunsForPage).toHaveBeenCalledWith({});
+  });
+});
+
+describe("page segment config", () => {
+  it("exports dynamic = force-dynamic to prevent build-time prerendering", async () => {
+    const mod = await import("./page");
+    expect(mod.dynamic).toBe("force-dynamic");
   });
 });
