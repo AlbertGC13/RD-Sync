@@ -23,8 +23,17 @@ import { RunActionAffordances } from "../../../components/admin/run-action-affor
 import { TriggerScrapeButton } from "../../../components/admin/trigger-scrape-button";
 import type { ScrapeRunStatus } from "../../../worker/queues";
 import { listScrapeRunsForPage } from "../../api/scrape-runs/defaults";
+import type { DashboardScrapeRun } from "../../../modules/scrape-runs";
 import { BANKING_TIMEZONE } from "../../../lib/banking-day";
 import { bankDisplayName, scrapeRunStatusLabel } from "../../../lib/banks";
+
+/**
+ * Prevent Next.js from statically prerendering this page at build time.
+ * listScrapeRunsForPage hits Prisma / a live database, which is unavailable
+ * during `next build`.  Request-time rendering (SSR) is both correct and
+ * sufficient for this admin-only dashboard.
+ */
+export const dynamic = "force-dynamic";
 
 export interface AdminScrapeRun {
   id: string;
@@ -42,9 +51,38 @@ interface AdminScrapeRunsDashboardProps {
   runs: readonly AdminScrapeRun[];
 }
 
+/**
+ * Fetch scrape runs with a safe server-side fallback.
+ *
+ * Transient database errors (connection refused, timeouts, pool exhaustion)
+ * should not crash the admin dashboard at request time.  Instead, the page
+ * renders an empty state and the operator sees "no runs recorded yet" — a
+ * safe, honest default that never leaks internal error details to the
+ * browser.
+ */
+export async function loadScrapeRuns(): Promise<readonly DashboardScrapeRun[]> {
+  try {
+    return await listScrapeRunsForPage({});
+  } catch (error) {
+    // Never surface DB/Prisma details to the browser — render an empty state
+    // instead. Still record a safe, generic server-side diagnostic so the
+    // outage is observable in logs without leaking connection strings, query
+    // internals, or stack traces back to the UI.
+    console.error("[admin/scrape-runs] failed to load scrape runs", {
+      error:
+        error instanceof Error
+          ? { name: error.name, message: error.message }
+          : "unknown error",
+    });
+    return [];
+  }
+}
+
 export default async function AdminScrapeRunsPage() {
-  const principal = await getCurrentPrincipal();
-  const runs = await listScrapeRunsForPage({});
+  const [principal, runs] = await Promise.all([
+    getCurrentPrincipal(),
+    loadScrapeRuns(),
+  ]);
 
   return <AdminScrapeRunsDashboard principal={principal} runs={runs} />;
 }
