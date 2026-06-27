@@ -10,6 +10,7 @@ import {
   type CdpBrowserLike,
   type SessionProbePage,
 } from "./index";
+import { DEFAULT_CDP_URL } from "../../worker/scraper/browser-runtime";
 
 // ---------------------------------------------------------------------------
 // FakeSessionProbePage — implements SessionProbePage seam
@@ -232,6 +233,43 @@ describe("createCdpSessionChecker — connect failure", () => {
     });
 
     await expect(checker.check()).resolves.toBeDefined();
+  });
+
+  it("rejects non-loopback CDP URLs before connect is attempted", async () => {
+    let connectCalled = false;
+    const checker = createCdpSessionChecker({
+      cdpUrl: "http://10.0.0.5:9222",
+      connect: async () => {
+        connectCalled = true;
+        throw new Error("should not connect");
+      },
+    });
+
+    const result = await checker.check();
+
+    expect(result.status).toBe("browser_unavailable");
+    expect(result.safeSummary).toBe("Bank browser session is not available");
+    expect(connectCalled).toBe(false);
+  });
+});
+
+describe("createCdpSessionChecker — unconfigured CDP fallback", () => {
+  it("adopts the shared DEFAULT_CDP_URL when no cdpUrl is configured (LOW-2)", async () => {
+    // Neither a per-bank nor a global CDP URL is supplied here, mirroring the
+    // env state where RD_SYNC_BANK_POPULAR_CDP_URL and RD_SYNC_CDP_URL are both
+    // unset: the checker must fall back to the worker's shared DEFAULT_CDP_URL.
+    let connectedUrl = "";
+    const checker = createCdpSessionChecker({
+      connect: async (cdpUrl: string) => {
+        connectedUrl = cdpUrl;
+        throw new Error("ECONNREFUSED");
+      },
+    });
+
+    const result = await checker.check();
+
+    expect(connectedUrl).toBe(DEFAULT_CDP_URL);
+    expect(result.status).toBe("browser_unavailable");
   });
 });
 

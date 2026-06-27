@@ -11,5 +11,6 @@ test-results/
 .engram/
 .claude/
 .captures/
+.codegraph/
 /src/generated/prisma/
 

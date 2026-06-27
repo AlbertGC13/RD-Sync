@@ -23,16 +23,18 @@ The script:
 
 ### Linux server (production)
 
-Use the provided Bash script to open Brave/Chromium with an isolated profile:
+Use the provided Bash script to open Brave/Chromium with an isolated profile. **Pase siempre el código de banco** como argumento para que el perfil y el puerto CDP queden asociados al banco correcto:
 
 ```bash
-./scripts/launch-bank-browser.sh
+./scripts/launch-bank-browser.sh popular
 ```
+
+> **Importante (multi-banco):** cuando configure un endpoint por banco con `RD_SYNC_BANK_<BANCO>_CDP_URL`, **debe** lanzar el script con el mismo código de banco (`./scripts/launch-bank-browser.sh <banco>`). Solo así el lanzador abre el navegador en el mismo puerto loopback que el worker consulta para ese banco. Si ejecuta el script sin código de banco, la configuración por banco se ignora y se usa la URL CDP global/por defecto — el lanzador imprime una advertencia en stderr para avisarle.
 
 The script:
 - Detects the first available browser binary in this order: `brave-browser`, `brave`, `chromium-browser`, `chromium`, `google-chrome` (override with `RD_SYNC_BANK_BROWSER_BIN`)
-- Creates a persistent profile at `~/.local/share/rd-sync/bank-browser` (override with `RD_SYNC_BANK_BROWSER_PROFILE_DIR`)
-- Binds CDP to **127.0.0.1 only** on port 9222 (override with `RD_SYNC_BANK_BROWSER_DEBUG_PORT`) — never exposes CDP to the network
+- Creates a persistent profile at `~/.local/share/rd-sync/bank-browser` — bank-scoped to `…/bank-browser/<bank_code>` when a bank code is passed so each bank stays isolated. A **global** `RD_SYNC_BANK_BROWSER_PROFILE_DIR` is also bank-scoped (it gets `/<bank_code>` appended); only a per-bank `RD_SYNC_BANK_<BANK>_PROFILE_DIR` is used verbatim
+- Binds CDP to **127.0.0.1 only**; the debug port ALWAYS comes from the resolved CDP URL (`RD_SYNC_BANK_<BANK>_CDP_URL` / `RD_SYNC_CDP_URL`) so it always matches the worker. There is no `DEBUG_PORT` knob. When no CDP URL is configured, the launcher and worker share one default (`http://127.0.0.1:9222`) — never exposes CDP to the network
 - Opens the bank portal at `https://ib.bpd.com.do` (override with `RD_SYNC_BANK_BROWSER_START_URL`)
 - If CDP is already alive on the port, prints a message and exits without relaunching
 - Writes browser logs to `~/.local/share/rd-sync/bank-browser/browser.log` (override with `RD_SYNC_BANK_BROWSER_LOG_FILE`)
@@ -80,7 +82,7 @@ Si el auto-lanzamiento causa problemas (procesos duplicados, navegador en mal es
    curl -fsS http://127.0.0.1:9222/json/version >/dev/null && echo "CDP activo" || echo "CDP caído"
    ```
    Y consulte `GET /api/bank-sessions/status` (requiere principal admin). Debe reportar `active` tras un relanzamiento manual limpio, o `browser_unavailable` si decide dejarlo caído hasta que un admin inicie sesión de nuevo.
-5. **Relance manualmente** solo cuando esté listo: `./scripts/launch-bank-browser.sh` y complete el login/MFA.
+5. **Relance manualmente** solo cuando esté listo: `./scripts/launch-bank-browser.sh <banco>` (p. ej. `popular`) y complete el login/MFA. Use el mismo código de banco configurado en `RD_SYNC_BANK_<BANCO>_CDP_URL`.
 
 ## Logging in
 
@@ -147,7 +149,7 @@ Response shape:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RD_SYNC_SCRAPER` | — | Set to `popular-cdp` to enable the CDP-backed scraper and session checker |
-| `RD_SYNC_CDP_URL` | `http://127.0.0.1:9222` | CDP endpoint for the running Brave session (bind to 127.0.0.1 only) |
+| `RD_SYNC_CDP_URL` | `http://127.0.0.1:9222` | Global CDP endpoint for the running Brave session (bind to 127.0.0.1 only). Single-bank-only fallback — with 2+ registered banks each must set a distinct `RD_SYNC_BANK_<BANK>_CDP_URL` |
 | `RD_SYNC_SESSION_MONITOR` | — | Set to `enabled` to start the background session monitor |
 | `RD_SYNC_SESSION_CHECK_INTERVAL_MS` | `300000` (5 min) | Poll interval in milliseconds; minimum 60000 (1 min) |
 | `RD_SYNC_ALERT_SMTP_URL` | — | SMTP URL for alert emails; falls back to console.warn if absent |
@@ -156,12 +158,12 @@ Response shape:
 | `RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND` | — | Trusted local command that starts the bank browser (server config only) |
 | `RD_SYNC_BANK_BROWSER_READY_TIMEOUT_MS` | `30000` | Max wait for CDP after launching the browser |
 | `RD_SYNC_BANK_BROWSER_POLL_INTERVAL_MS` | `500` | Poll interval while waiting for CDP |
-| `RD_SYNC_BANK_BROWSER_PROFILE_DIR` | `~/.local/share/rd-sync/bank-browser` | Persistent browser profile dir (used by the launch script) |
-| `RD_SYNC_BANK_BROWSER_DEBUG_PORT` | `9222` | CDP debug port (used by the launch script) |
+| `RD_SYNC_BANK_BROWSER_PROFILE_DIR` | `~/.local/share/rd-sync/bank-browser[/<bank_code>]` | GLOBAL persistent browser profile dir (used by the launch script). Bank-scoped by appending `/<bank_code>` when a bank code is given. A per-bank `RD_SYNC_BANK_<BANK>_PROFILE_DIR` is used verbatim |
 
 ## Security warnings
 
 - **CDP bound to 127.0.0.1 only.** El script de lanzamiento siempre usa `--remote-debugging-address=127.0.0.1`. Nunca exponga CDP a Internet o a la red local — cualquiera con acceso al endpoint CDP podría controlar la sesión bancaria autenticada.
+- **Distinct CDP URL/port per registered bank.** Cada banco registrado debe usar un puerto CDP loopback distinto vía `RD_SYNC_BANK_<BANK>_CDP_URL`. Si dos bancos comparten el mismo puerto, el worker podría adjuntarse a la sesión del banco equivocado; por eso el registro de adaptadores falla de forma cerrada al arrancar si detecta una colisión de puerto. El fallback global `RD_SYNC_CDP_URL` es solo para un único banco.
 - **No automated credential entry.** RD-Sync no introduce credenciales ni completa MFA. El administrador inicia sesión manualmente en el navegador del servidor.
 - **No Imperva/anti-bot bypass.** RD-Sync no evade las defensas anti-bot del banco. El scraper es de solo lectura: navega y extrae transacciones sobre una sesión abierta por un humano.
 - **Launch command is trusted server config.** `RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND` solo se establece en la configuración del servidor gestionada por el operador. Nunca desde entrada de usuario ni desde la interfaz de empleado.

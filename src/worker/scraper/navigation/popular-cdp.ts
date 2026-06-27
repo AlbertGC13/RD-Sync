@@ -2,6 +2,11 @@ import {
   parsePopularTransactionRows,
   popularScraperProfile,
 } from "../../../modules/bank-adapters/popular";
+import {
+  assertCdpLoopback,
+  DEFAULT_CDP_URL,
+  getSafeCdpErrorSummary,
+} from "../browser-runtime";
 import type { IngestionScraper } from "../../queues";
 import type { ScrapeCollectionResult } from "../../scraper";
 import {
@@ -236,8 +241,9 @@ export interface PopularCdpScraperOptions {
   ) => Promise<CollectPopularPortalRowsResult>;
 }
 
-const DEFAULT_CDP_URL = "http://127.0.0.1:9222";
-// NOTE: This constant is Banco Popular–specific. Do not share it across bank adapters.
+// NOTE: DEFAULT_BASE_URL is Banco Popular–specific. Do not share it across bank
+// adapters. The CDP default (DEFAULT_CDP_URL) is bank-agnostic and shared from
+// browser-runtime so the scraper, session monitor, and launcher never drift.
 const DEFAULT_BASE_URL = "https://ib.bpd.com.do";
 
 /**
@@ -273,6 +279,16 @@ export function createPopularCdpScraper(options: PopularCdpScraperOptions = {}):
       let cdpPage: CdpPageLike | null = null;
 
       try {
+        try {
+          assertCdpLoopback(cdpUrl);
+        } catch (error) {
+          return {
+            status: "needs_admin_action",
+            movements: [],
+            safeErrorSummary: getSafeCdpErrorSummary(error),
+          };
+        }
+
         // Ensure the CDP-enabled bank browser is running before connecting.
         // A failed check short-circuits to needs_admin_action — connect is
         // never attempted, so no transient CDP error leaks to the employee.
@@ -365,6 +381,7 @@ export function createPopularCdpScraper(options: PopularCdpScraperOptions = {}):
 // ---------------------------------------------------------------------------
 
 async function lazyPlaywrightConnect(cdpUrl: string): Promise<CdpBrowserLike> {
+  assertCdpLoopback(cdpUrl);
   const { chromium } = await import("playwright-core");
   // connectOverCDP returns a Browser — it is structurally compatible with CdpBrowserLike.
   return chromium.connectOverCDP(cdpUrl) as Promise<CdpBrowserLike>;

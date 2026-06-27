@@ -12,6 +12,7 @@ describe("resolveDefaultScraper — branch selection", () => {
   beforeEach(() => {
     delete process.env.RD_SYNC_SCRAPER;
     delete process.env.RD_SYNC_CDP_URL;
+    delete process.env.RD_SYNC_BANK_POPULAR_CDP_URL;
     delete process.env.RD_SYNC_DEV_PREVIEW;
     delete process.env.RD_SYNC_BANK_BROWSER_AUTO_LAUNCH;
     delete process.env.RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND;
@@ -22,6 +23,7 @@ describe("resolveDefaultScraper — branch selection", () => {
   afterEach(() => {
     delete process.env.RD_SYNC_SCRAPER;
     delete process.env.RD_SYNC_CDP_URL;
+    delete process.env.RD_SYNC_BANK_POPULAR_CDP_URL;
     delete process.env.RD_SYNC_DEV_PREVIEW;
     delete process.env.RD_SYNC_BANK_BROWSER_AUTO_LAUNCH;
     delete process.env.RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND;
@@ -101,13 +103,14 @@ describe("buildPopularCdpScraperOptionsFromEnv — ensureBrowser wiring (Fix C)"
   it("wires an ensureBrowser seam when auto-launch is enabled (Fix C happy path)", () => {
     const options = buildPopularCdpScraperOptionsFromEnv({
       RD_SYNC_SCRAPER: "popular-cdp",
+      RD_SYNC_BANK_POPULAR_CDP_URL: "http://127.0.0.1:9333",
       RD_SYNC_CDP_URL: CDP_URL,
       RD_SYNC_BANK_BROWSER_AUTO_LAUNCH: "enabled",
       RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND: "./scripts/launch-bank-browser.sh",
     });
 
     expect(options).toBeDefined();
-    expect(options!.cdpUrl).toBe(CDP_URL);
+    expect(options!.cdpUrl).toBe("http://127.0.0.1:9333");
     // The contract: ensureBrowser is a function the scraper will await before
     // connecting — NOT undefined. This is the behaviour the env wiring test
     // must actually prove (construction alone is not enough).
@@ -130,14 +133,14 @@ describe("buildPopularCdpScraperOptionsFromEnv — ensureBrowser wiring (Fix C)"
   it("leaves ensureBrowser undefined when auto-launch is enabled but CDP_URL is missing", () => {
     const options = buildPopularCdpScraperOptionsFromEnv({
       RD_SYNC_SCRAPER: "popular-cdp",
-      // RD_SYNC_CDP_URL intentionally unset
+      // No per-bank or global CDP URL set
       RD_SYNC_BANK_BROWSER_AUTO_LAUNCH: "enabled",
       RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND: "./scripts/launch-bank-browser.sh",
     });
 
     // Options are still returned (the scraper handles a missing cdpUrl via its
-    // own default), but the ensureBrowser seam is absent because
-    // createEnsureBrowserFromEnv requires a cdpUrl.
+    // own default), but the ensureBrowser seam is absent because the bank-aware
+    // launcher seam requires a resolved cdpUrl.
     expect(options).toBeDefined();
     expect(options!.ensureBrowser).toBeUndefined();
   });
@@ -190,6 +193,7 @@ describe("resolveDefaultScraper — bankCode registry routing", () => {
   beforeEach(() => {
     delete process.env.RD_SYNC_SCRAPER;
     delete process.env.RD_SYNC_CDP_URL;
+    delete process.env.RD_SYNC_BANK_POPULAR_CDP_URL;
     delete process.env.RD_SYNC_DEV_PREVIEW;
     delete process.env.RD_SYNC_BANK_BROWSER_AUTO_LAUNCH;
   });
@@ -197,6 +201,7 @@ describe("resolveDefaultScraper — bankCode registry routing", () => {
   afterEach(() => {
     delete process.env.RD_SYNC_SCRAPER;
     delete process.env.RD_SYNC_CDP_URL;
+    delete process.env.RD_SYNC_BANK_POPULAR_CDP_URL;
     delete process.env.RD_SYNC_DEV_PREVIEW;
     delete process.env.RD_SYNC_BANK_BROWSER_AUTO_LAUNCH;
   });
