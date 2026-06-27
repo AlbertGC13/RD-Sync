@@ -6,6 +6,8 @@ import {
   assertCdpLoopback,
   DEFAULT_CDP_URL,
   getSafeCdpErrorSummary,
+  SAFE_SUMMARY_BROWSER_CAPACITY_THROTTLED,
+  type AcquireBrowserSlot,
 } from "../browser-runtime";
 import type { IngestionScraper } from "../../queues";
 import type { ScrapeCollectionResult } from "../../scraper";
@@ -214,6 +216,8 @@ export interface PopularCdpScraperOptions {
    * When omitted (default), the scraper connects directly as before.
    */
   ensureBrowser?: () => Promise<EnsureBrowserResult>;
+  /** Optional production backpressure seam. */
+  acquireBrowserSlot?: AcquireBrowserSlot;
   /**
    * Injectable CDP connect function.
    * Defaults to a LAZY DYNAMIC IMPORT of playwright-core chromium.connectOverCDP
@@ -271,12 +275,14 @@ export function createPopularCdpScraper(options: PopularCdpScraperOptions = {}):
     connect = lazyPlaywrightConnect,
     collectRows = collectPopularPortalRows,
     ensureBrowser,
+    acquireBrowserSlot,
   } = options;
 
   return {
     async collect(): Promise<ScrapeCollectionResult> {
       let browser: CdpBrowserLike | null = null;
       let cdpPage: CdpPageLike | null = null;
+      let browserSlot: { release(): Promise<void> } | null = null;
 
       try {
         try {
@@ -287,6 +293,18 @@ export function createPopularCdpScraper(options: PopularCdpScraperOptions = {}):
             movements: [],
             safeErrorSummary: getSafeCdpErrorSummary(error),
           };
+        }
+
+        if (acquireBrowserSlot) {
+          const acquireResult = await acquireBrowserSlot();
+          if (acquireResult.kind === "throttled") {
+            return {
+              status: "needs_admin_action",
+              movements: [],
+              safeErrorSummary: SAFE_SUMMARY_BROWSER_CAPACITY_THROTTLED,
+            };
+          }
+          browserSlot = acquireResult;
         }
 
         // Ensure the CDP-enabled bank browser is running before connecting.
@@ -367,6 +385,9 @@ export function createPopularCdpScraper(options: PopularCdpScraperOptions = {}):
           } catch {
             // Ignore browser handle close errors
           }
+        }
+        if (browserSlot !== null) {
+          await browserSlot.release();
         }
       }
     },

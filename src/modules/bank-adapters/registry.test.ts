@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { IngestionScraper } from "../../worker/queues";
 import {
+  buildPopularCdpScraperOptionsFromEnv,
   bankAdapterRegistry,
   createBankAdapterRegistry,
   type BankAdapter,
@@ -114,5 +115,15 @@ describe("bankAdapterRegistry — default instance (Popular registered in PR1)",
 
     const scraper = adapter!.createScraper();
     expect(typeof scraper.collect).toBe("function");
+  });
+});
+
+describe("buildPopularCdpScraperOptionsFromEnv — production backpressure wiring", () => {
+  it("wires the browser semaphore into the Popular CDP scraper options", () => {
+    const options = buildPopularCdpScraperOptionsFromEnv({
+      RD_SYNC_SCRAPER: "popular-cdp",
+    });
+
+    expect(typeof options?.acquireBrowserSlot).toBe("function");
   });
 });

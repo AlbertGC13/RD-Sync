@@ -21,6 +21,7 @@ import {
 } from "../../worker/scraper/navigation/popular-cdp";
 import {
   createEnsureBrowserForBank,
+  createAcquireBrowserSlotFromEnv,
   resolveBankBrowserEnv,
   type EnsureBrowserSeam,
 } from "../../worker/scraper/browser-runtime";
@@ -177,6 +178,7 @@ export function buildPopularCdpScraperOptionsFromEnv(
   return {
     cdpUrl: bankEnv.cdpUrl || undefined,
     ensureBrowser,
+    acquireBrowserSlot: createAcquireBrowserSlotFromEnv(env),
   };
 }
 

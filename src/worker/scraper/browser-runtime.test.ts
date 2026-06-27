@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   isCdpAvailable,
@@ -7,6 +7,7 @@ import {
   createEnsureBrowserForBank,
   assertCdpLoopback,
   resolveBankBrowserEnv,
+  BrowserSemaphore,
   SAFE_SUMMARY_MALFORMED_CDP_URL,
   SAFE_SUMMARY_NON_LOOPBACK_CDP,
   SAFE_SUMMARY_UNSUPPORTED_PROTOCOL,
@@ -54,6 +55,10 @@ function makeSpawnTracker(): {
 
 /** No-op sleep — resolves immediately so tests never wait in real time. */
 const noopSleep = async (): Promise<void> => {};
+
+async function flushPendingMicrotasks(): Promise<void> {
+  await Promise.resolve();
+}
 
 /** Fake clock that advances by `step` on each call. */
 function makeFakeClock(start: number, step: number): () => number {
@@ -470,5 +475,132 @@ describe("createEnsureBrowserForBank", () => {
         RD_SYNC_BANK_BROWSER_AUTO_LAUNCH: "enabled",
       }),
     ).toThrow("Invalid bank code for browser launcher");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BrowserSemaphore — bounded concurrency backpressure
+// ---------------------------------------------------------------------------
+
+describe("BrowserSemaphore", () => {
+  it("acquires, queues, exposes capacity, and releases the next waiter", async () => {
+    const sem = new BrowserSemaphore(1, 2);
+    const r1 = await sem.acquire();
+    expect(r1.kind).toBe("acquired");
+    expect(sem.capacity()).toEqual({ active: 1, queueDepth: 0, max: 1 });
+
+    let secondResolved = false;
+    const r2Promise = sem.acquire().then((r) => {
+      secondResolved = true;
+      return r;
+    });
+
+    await flushPendingMicrotasks();
+    expect(secondResolved).toBe(false);
+    expect(sem.capacity()).toEqual({ active: 1, queueDepth: 1, max: 1 });
+
+    if (r1.kind === "acquired") await r1.release();
+
+    const r2 = await r2Promise;
+    expect(secondResolved).toBe(true);
+    expect(r2.kind).toBe("acquired");
+    if (r2.kind === "acquired") await r2.release();
+    expect(sem.capacity()).toEqual({ active: 0, queueDepth: 0, max: 1 });
+  });
+
+  it("throttles when the bounded queue is full and increments throttleCount", async () => {
+    const sem = new BrowserSemaphore(1, 1);
+    expect(sem.throttleCount).toBe(0);
+
+    const r1 = await sem.acquire();
+    const r2Promise = sem.acquire();
+    await flushPendingMicrotasks();
+
+    const throttled = await sem.acquire();
+    expect(throttled.kind).toBe("throttled");
+    expect(sem.throttleCount).toBe(1);
+
+    const throttled2 = await sem.acquire();
+    expect(throttled2.kind).toBe("throttled");
+    expect(sem.throttleCount).toBe(2);
+
+    if (r1.kind === "acquired") await r1.release();
+    const r2 = await r2Promise;
+    if (r2.kind === "acquired") await r2.release();
+  });
+
+  it("release is idempotent and max=0 immediately throttles", async () => {
+    const sem = new BrowserSemaphore(1);
+    const r1 = await sem.acquire();
+    expect(r1.kind).toBe("acquired");
+
+    if (r1.kind === "acquired") {
+      await r1.release();
+      // Second release should not throw or double-decrement
+      await r1.release();
+    }
+
+    expect(sem.capacity()).toEqual({ active: 0, queueDepth: 0, max: 1 });
+
+    const disabled = new BrowserSemaphore(0);
+    const result = await disabled.acquire();
+    expect(result.kind).toBe("throttled");
+    expect(disabled.throttleCount).toBe(1);
+  });
+
+  it("reads max concurrency from env and falls back for missing or invalid values", () => {
+    expect(BrowserSemaphore.fromEnv({
+      RD_SYNC_BANK_BROWSER_MAX_CONCURRENCY: "3",
+    }).capacity().max).toBe(3);
+    expect(BrowserSemaphore.fromEnv({}).capacity().max).toBe(2);
+    expect(BrowserSemaphore.fromEnv({
+      RD_SYNC_BANK_BROWSER_MAX_CONCURRENCY: "not-a-number",
+    }).capacity().max).toBe(2);
+  });
+
+  it("wakes the first queued waiter on release (FIFO ordering)", async () => {
+    const sem = new BrowserSemaphore(1, 5);
+    const r1 = await sem.acquire();
+
+    const r2Promise = sem.acquire();
+    const r3Promise = sem.acquire();
+    await flushPendingMicrotasks();
+
+    if (r1.kind === "acquired") await r1.release();
+    const r2 = await r2Promise;
+    expect(r2.kind).toBe("acquired");
+
+    let r3Resolved = false;
+    r3Promise.then(() => { r3Resolved = true; });
+    await flushPendingMicrotasks();
+    expect(r3Resolved).toBe(false);
+
+    // Release r2 — r3 wakes.
+    if (r2.kind === "acquired") await r2.release();
+    const r3 = await r3Promise;
+    expect(r3.kind).toBe("acquired");
+    if (r3.kind === "acquired") await r3.release();
+  });
+
+  it("times out queued acquire attempts without waiting forever", async () => {
+    vi.useFakeTimers();
+    try {
+      const sem = new BrowserSemaphore(1, 1);
+      const r1 = await sem.acquire();
+      expect(r1.kind).toBe("acquired");
+
+      const queued = sem.acquire({ timeoutMs: 25 });
+      expect(sem.capacity()).toEqual({ active: 1, queueDepth: 1, max: 1 });
+
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(queued).resolves.toEqual({ kind: "throttled" });
+      expect(sem.capacity()).toEqual({ active: 1, queueDepth: 0, max: 1 });
+      expect(sem.throttleCount).toBe(1);
+
+      if (r1.kind === "acquired") await r1.release();
+      expect(sem.capacity()).toEqual({ active: 0, queueDepth: 0, max: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
