@@ -25,7 +25,7 @@ Tracker branch `feature/multi-bank-auto-login` (base = current/main per repo con
 | Unit | Goal | PR | Base boundary |
 |------|------|----|------|
 | 1 | BankAdapter + registry + Popular migration (no behavior change) | PR1 | tracker branch |
-| 2 | Per-bank browser/CDP isolation + loopback + backpressure + portal configs only | PR2 | PR1 branch |
+| 2 | Per-bank browser/CDP isolation + loopback + backpressure + Popular portal config only | PR2 | PR1 branch |
 | 3 | Credential model + AES-GCM envelope + admin API + audit (no auto-login) | PR3 | PR2 branch |
 | 4 | Auto-login orchestration + Redis lock/fencing + breaker + Popular auto-login | PR4 | PR3 branch |
 | 5 | Banreservas/BHD read-only adapters + portal drift fixtures (no auto-login) | PR5 | PR4 branch |
@@ -41,14 +41,22 @@ Tracker branch `feature/multi-bank-auto-login` (base = current/main per repo con
 - [x] 1.6 Tests: route by bankCode; unknown fails closed (400+audit); absent->Popular; Popular path unchanged.
 - Gate: full gates; maintainer-approved `size:exception` for PR1 foundation slice; no behavior change.
 
-## PR2: Per-bank browser/CDP isolation + loopback + backpressure + portal configs
+## PR2A: CDP loopback + Popular bank-aware launcher slice
 
-- [ ] 2.1 Modify `src/worker/scraper/browser-runtime.ts`: per-port mutex (not global), per-bank env factory (`RD_SYNC_BANK_<BANK>_CDP_URL`/profile/start-url), `assertCdpLoopback` (reject non-loopback/bad-protocol/malformed before ANY CDP use), semaphore `RD_SYNC_BANK_BROWSER_MAX_CONCURRENCY=2`, safe `throttled` outcome, redacted error summaries.
-- [ ] 2.2 Create `src/modules/observability/bank-metrics.ts`: capacity metrics (active/queueDepth/throttleEvents) per bank.
-- [ ] 2.3 Add Banreservas/BHD `BankPortalConfig` config objects (env+selector placeholders from recon) — configs only, NO scraping logic.
-- [ ] 2.4 Modify `scripts/launch-bank-browser.sh`: per-bank profile/port/start-url parameterization (loopback binding; runtime still validates).
-- [ ] 2.5 Tests: `assertCdpLoopback` rejections; isolated concurrent banks use distinct profile+port; over-capacity->throttled (503/Retry-After where sync); error redacts command.
-- Gate: full gates; <=400 lines; no scraping/auto-login logic.
+- [x] 2A.1 Modify `src/worker/scraper/browser-runtime.ts`: `assertCdpLoopback` rejects non-loopback/bad-protocol/malformed before CDP fetch/ensure paths; keep redacted safe summaries.
+- [x] 2A.2 Wire Popular to bank-aware CDP env resolution: `RD_SYNC_BANK_POPULAR_CDP_URL` takes precedence over legacy `RD_SYNC_CDP_URL` in scraper/session checker construction.
+- [x] 2A.3 Fix production auto-launch: `createEnsureBrowserForBank("popular", env)` injects `BANK_CODE=popular` without shell command concatenation, so the launcher resolves the same per-bank env as the worker polls/connects.
+- [x] 2A.4 Modify `scripts/launch-bank-browser.sh`: optional bank code resolves per-bank profile/CDP/start-url with global fallback; CDP URL is the GENUINE single source of truth for the debug port (no `DEBUG_PORT` knob — removed). When no CDP URL is configured, the launcher and worker share ONE default (`DEFAULT_CDP_URL` = `http://127.0.0.1:9222`, port enforced equal by a parity test). A GLOBAL `RD_SYNC_BANK_BROWSER_PROFILE_DIR` is bank-scoped (`/<bank>` appended) so two banks never collide; a per-bank `*_PROFILE_DIR` is verbatim (MEDIUM-1). Per-bank/global CDP URLs must be origin-only HTTP loopback URLs.
+- [x] 2A.5 Tests: loopback/origin-only rejection before fetch/connect/launch; Popular per-bank CDP precedence; auto-launch injects `BANK_CODE=popular` and polls the same `RD_SYNC_BANK_POPULAR_CDP_URL`; launcher/worker default-port parity + DEBUG_PORT removed; global profile dir bank-scoped vs per-bank verbatim; registry fails closed when two banks share a CDP port (MEDIUM-2); unknown bank routing still fails closed.
+- Gate: targeted tests + full gate if feasible; <=400 changed-line target; no backpressure, metrics, credentials, or auto-login logic.
+
+## PR2B: Browser capacity/backpressure + metrics (deferred)
+
+- [ ] 2B.1 Add browser semaphore/backpressure runtime behavior (`RD_SYNC_BANK_BROWSER_MAX_CONCURRENCY`, bounded queue, safe throttled result).
+- [ ] 2B.2 Add `src/modules/observability/bank-metrics.ts` capacity metrics and production wiring.
+- [ ] 2B.3 Add throttle/capacity tests and any 503/Retry-After sync-facing behavior.
+- [ ] 2B.4 Keep Banreservas/BHD placeholder portal configs deferred to PR5; no production-looking placeholder selectors in PR2B unless real read-only adapters land.
+- Gate: full gates; <=400 changed-line target; no credential vault or auto-login logic.
 
 ## PR3: Credential model + AES-GCM envelope + admin API + audit (NO auto-login) [HIGH RISK]
 

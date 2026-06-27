@@ -9,6 +9,9 @@ import {
   type DocumentLike,
   type ElementLike,
 } from "./popular-cdp";
+import {
+  SAFE_SUMMARY_NON_LOOPBACK_CDP,
+} from "../browser-runtime";
 import type { PopularTransactionRow } from "../../../modules/bank-adapters/popular";
 
 // ---------------------------------------------------------------------------
@@ -240,6 +243,31 @@ describe("createPopularCdpScraper — connect failure", () => {
     expect(result.status).toBe("needs_admin_action");
     expect(result.movements).toEqual([]);
     expect(result.safeErrorSummary).toBe("Bank browser session is not available");
+  });
+
+  it("rejects non-loopback CDP URLs before ensureBrowser or connect can run", async () => {
+    let ensureBrowserCalled = false;
+    let connectCalled = false;
+    const scraper = createPopularCdpScraper({
+      cdpUrl: "http://10.0.0.5:9222",
+      ensureBrowser: async () => {
+        ensureBrowserCalled = true;
+        return { ok: true };
+      },
+      connect: async () => {
+        connectCalled = true;
+        throw new Error("should not connect");
+      },
+      collectRows: async () => ({ kind: "rows" as const, rows: FIXTURE_ROWS }),
+    });
+
+    const result = await scraper.collect();
+
+    expect(result.status).toBe("needs_admin_action");
+    expect(result.movements).toEqual([]);
+    expect(result.safeErrorSummary).toBe(SAFE_SUMMARY_NON_LOOPBACK_CDP);
+    expect(ensureBrowserCalled).toBe(false);
+    expect(connectCalled).toBe(false);
   });
 });
 

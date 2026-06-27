@@ -7,7 +7,7 @@
  *
  * Relevant env vars:
  *   RD_SYNC_SCRAPER            — "popular-cdp" enables the CDP-backed checker
- *   RD_SYNC_CDP_URL            — CDP endpoint (default http://127.0.0.1:9222)
+ *   RD_SYNC_BANK_POPULAR_CDP_URL — Popular CDP endpoint (fallback RD_SYNC_CDP_URL)
  *   RD_SYNC_SESSION_MONITOR    — "enabled" activates the background monitor
  *   RD_SYNC_SESSION_CHECK_INTERVAL_MS — poll interval in ms (default 300000, min 60000)
  */
@@ -19,6 +19,8 @@ import {
   type BankSessionCheckResult,
   type BankSessionMonitor,
 } from "../../../modules/bank-sessions";
+import { popularBankCode } from "../../../modules/bank-adapters/popular";
+import { resolveBankBrowserEnv } from "../../../worker/scraper/browser-runtime";
 import { resolveDefaultAlertSink } from "../../../worker/alerts/email-alert-sink";
 import { defaultAuditSink } from "../audit/defaults";
 
@@ -40,8 +42,9 @@ import { defaultAuditSink } from "../audit/defaults";
  */
 export function resolveDefaultSessionChecker(): CdpSessionChecker {
   if (process.env.RD_SYNC_SCRAPER === "popular-cdp") {
+    const bankEnv = resolveBankBrowserEnv(popularBankCode);
     return createCdpSessionChecker({
-      cdpUrl: process.env.RD_SYNC_CDP_URL,
+      cdpUrl: bankEnv.cdpUrl || undefined,
     });
   }
 

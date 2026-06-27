@@ -36,12 +36,57 @@ describe("createBankAdapterRegistry — factory keyed by bankCode", () => {
   });
 
   it("derives supportedBankCodes from the registered adapters (no separate whitelist to drift)", () => {
-    const registry = createBankAdapterRegistry([
-      fakeAdapter("popular"),
-      fakeAdapter("banreservas"),
-    ]);
+    const registry = createBankAdapterRegistry(
+      [fakeAdapter("popular"), fakeAdapter("banreservas")],
+      {},
+    );
 
     expect(registry.supportedBankCodes()).toEqual(["popular", "banreservas"]);
+  });
+});
+
+describe("createBankAdapterRegistry — CDP endpoint uniqueness guard (MEDIUM-2)", () => {
+  it("throws when two banks share the same explicit per-bank CDP port", () => {
+    expect(() =>
+      createBankAdapterRegistry([fakeAdapter("popular"), fakeAdapter("banreservas")], {
+        RD_SYNC_BANK_POPULAR_CDP_URL: "http://127.0.0.1:9222",
+        RD_SYNC_BANK_BANRESERVAS_CDP_URL: "http://127.0.0.1:9222",
+      }),
+    ).toThrow(/CDP endpoint collision/);
+  });
+
+  it("throws when two banks both inherit the single global RD_SYNC_CDP_URL fallback", () => {
+    expect(() =>
+      createBankAdapterRegistry([fakeAdapter("popular"), fakeAdapter("banreservas")], {
+        RD_SYNC_CDP_URL: "http://127.0.0.1:9222",
+      }),
+    ).toThrow(/CDP endpoint collision/);
+  });
+
+  it("treats loopback host aliases on the same port as a collision", () => {
+    expect(() =>
+      createBankAdapterRegistry([fakeAdapter("popular"), fakeAdapter("banreservas")], {
+        RD_SYNC_BANK_POPULAR_CDP_URL: "http://127.0.0.1:9222",
+        RD_SYNC_BANK_BANRESERVAS_CDP_URL: "http://localhost:9222",
+      }),
+    ).toThrow(/CDP endpoint collision/);
+  });
+
+  it("allows banks with distinct loopback CDP ports", () => {
+    expect(() =>
+      createBankAdapterRegistry([fakeAdapter("popular"), fakeAdapter("banreservas")], {
+        RD_SYNC_BANK_POPULAR_CDP_URL: "http://127.0.0.1:9222",
+        RD_SYNC_BANK_BANRESERVAS_CDP_URL: "http://127.0.0.1:9333",
+      }),
+    ).not.toThrow();
+  });
+
+  it("does not flag unconfigured banks (empty resolution falls back to the shared default later)", () => {
+    // No CDP env at all — both resolve to "" here and only adopt DEFAULT_CDP_URL
+    // at scraper construction. The guard must not block registration.
+    expect(() =>
+      createBankAdapterRegistry([fakeAdapter("popular"), fakeAdapter("banreservas")], {}),
+    ).not.toThrow();
   });
 });
 

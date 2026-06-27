@@ -4,6 +4,12 @@ import {
   isCdpAvailable,
   ensureCdpBrowser,
   createEnsureBrowserFromEnv,
+  createEnsureBrowserForBank,
+  assertCdpLoopback,
+  resolveBankBrowserEnv,
+  SAFE_SUMMARY_MALFORMED_CDP_URL,
+  SAFE_SUMMARY_NON_LOOPBACK_CDP,
+  SAFE_SUMMARY_UNSUPPORTED_PROTOCOL,
   type FetchLike,
   type SpawnLike,
 } from "./browser-runtime";
@@ -32,12 +38,18 @@ function makeFetchSequence(
   return { fetch, urls };
 }
 
-function makeSpawnTracker(): { spawn: SpawnLike; calls: string[] } {
+function makeSpawnTracker(): {
+  spawn: SpawnLike;
+  calls: string[];
+  envs: Array<Record<string, string> | undefined>;
+} {
   const calls: string[] = [];
-  const spawn: SpawnLike = (command) => {
+  const envs: Array<Record<string, string> | undefined> = [];
+  const spawn: SpawnLike = (command, options) => {
     calls.push(command);
+    envs.push(options?.env);
   };
-  return { spawn, calls };
+  return { spawn, calls, envs };
 }
 
 /** No-op sleep — resolves immediately so tests never wait in real time. */
@@ -83,6 +95,15 @@ describe("isCdpAvailable", () => {
     const result = await isCdpAvailable(CDP_URL, { fetch });
 
     expect(result).toBe(false);
+  });
+
+  it("rejects non-loopback URLs before any fetch is attempted", async () => {
+    const { fetch, urls } = makeFetchSequence([true]);
+
+    await expect(
+      isCdpAvailable("http://10.0.0.5:9222", { fetch }),
+    ).rejects.toThrow(SAFE_SUMMARY_NON_LOOPBACK_CDP);
+    expect(urls).toEqual([]);
   });
 
   it("returns false on timeout when fetch never resolves but respects signal.abort (Fix D)", async () => {
@@ -147,6 +168,25 @@ describe("ensureCdpBrowser — CDP unavailable, no launch command", () => {
     expect(result.ok).toBe(false);
     expect(result).toHaveProperty("safeErrorSummary", "Bank browser is not running");
     expect(calls).toEqual([]); // spawn never called
+  });
+
+  it("rejects non-loopback URLs without fetching or spawning", async () => {
+    const { fetch, urls } = makeFetchSequence([true]);
+    const { spawn, calls } = makeSpawnTracker();
+
+    const result = await ensureCdpBrowser({
+      cdpUrl: "http://10.0.0.5:9222",
+      launchCommand: "./scripts/launch-bank-browser.sh",
+      deps: { fetch, spawn, sleep: noopSleep, now: () => 0 },
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      launched: false,
+      safeErrorSummary: SAFE_SUMMARY_NON_LOOPBACK_CDP,
+    });
+    expect(urls).toEqual([]);
+    expect(calls).toEqual([]);
   });
 });
 
@@ -341,5 +381,94 @@ describe("createEnsureBrowserFromEnv", () => {
       RD_SYNC_BANK_BROWSER_AUTO_LAUNCH: "true",
     });
     expect(seam).toBeUndefined();
+  });
+});
+
+describe("assertCdpLoopback", () => {
+  it("accepts origin-only loopback http endpoints", () => {
+    for (const cdpUrl of [
+      "http://127.0.0.1:9222",
+      "http://localhost:9222",
+      "http://[::1]:9222",
+    ]) {
+      expect(() => assertCdpLoopback(cdpUrl)).not.toThrow();
+    }
+  });
+
+  it("rejects unsafe CDP URLs with fixed safe summaries", () => {
+    expect(() => assertCdpLoopback("http://10.0.0.5:9222")).toThrow(
+      SAFE_SUMMARY_NON_LOOPBACK_CDP,
+    );
+    for (const unsupportedUrl of ["ftp://127.0.0.1:9222", "ws://127.0.0.1:9222"]) {
+      expect(() => assertCdpLoopback(unsupportedUrl)).toThrow(
+        SAFE_SUMMARY_UNSUPPORTED_PROTOCOL,
+      );
+    }
+    expect(() => assertCdpLoopback("not-a-url")).toThrow(
+      SAFE_SUMMARY_MALFORMED_CDP_URL,
+    );
+    for (const invalidUrl of [
+      "http://127.0.0.1:9222/json/version",
+      "http://user@127.0.0.1:9222",
+      "http://127.0.0.1:9222?probe=1",
+      "http://127.0.0.1:9222#devtools",
+    ]) {
+      expect(() => assertCdpLoopback(invalidUrl)).toThrow(
+        SAFE_SUMMARY_MALFORMED_CDP_URL,
+      );
+    }
+  });
+});
+
+describe("resolveBankBrowserEnv", () => {
+  it("uses per-bank CDP, then falls back to non-blank global CDP", () => {
+    expect(resolveBankBrowserEnv("popular", {
+      RD_SYNC_CDP_URL: "http://127.0.0.1:9333",
+    }).cdpUrl).toBe("http://127.0.0.1:9333");
+    expect(resolveBankBrowserEnv("popular", {
+      RD_SYNC_BANK_POPULAR_CDP_URL: "http://127.0.0.1:9222",
+      RD_SYNC_CDP_URL: "http://127.0.0.1:9333",
+    }).cdpUrl).toBe("http://127.0.0.1:9222");
+    expect(resolveBankBrowserEnv("popular", {
+      RD_SYNC_BANK_POPULAR_CDP_URL: "",
+      RD_SYNC_CDP_URL: "http://127.0.0.1:9333",
+    }).cdpUrl).toBe("http://127.0.0.1:9333");
+  });
+});
+
+describe("createEnsureBrowserForBank", () => {
+  it("passes bank identity through env and polls the same per-bank CDP URL", async () => {
+    const bankCdpUrl = "http://127.0.0.1:9333";
+    const { fetch, urls } = makeFetchSequence([false, true]);
+    const { spawn, calls, envs } = makeSpawnTracker();
+    const seam = createEnsureBrowserForBank(
+      "popular",
+      {
+        RD_SYNC_BANK_POPULAR_CDP_URL: bankCdpUrl,
+        RD_SYNC_CDP_URL: CDP_URL,
+        RD_SYNC_BANK_BROWSER_AUTO_LAUNCH: "enabled",
+        RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND: "./scripts/launch-bank-browser.sh",
+      },
+      { fetch, spawn, sleep: noopSleep, now: () => 0 },
+    );
+
+    const result = await seam?.();
+
+    expect(result).toEqual({ ok: true, launched: true });
+    expect(calls).toEqual(["./scripts/launch-bank-browser.sh"]);
+    expect(envs).toEqual([{ BANK_CODE: "popular" }]);
+    expect(urls).toEqual([
+      `${bankCdpUrl}/json/version`,
+      `${bankCdpUrl}/json/version`,
+    ]);
+  });
+
+  it("fails explicitly for invalid bank codes", () => {
+    expect(() =>
+      createEnsureBrowserForBank("popular;echo", {
+        RD_SYNC_BANK_POPULAR_CDP_URL: CDP_URL,
+        RD_SYNC_BANK_BROWSER_AUTO_LAUNCH: "enabled",
+      }),
+    ).toThrow("Invalid bank code for browser launcher");
   });
 });

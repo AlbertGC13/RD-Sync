@@ -15,6 +15,69 @@ import { spawn as nodeSpawn } from "node:child_process";
 // those details stay in server-side logs only.
 // ---------------------------------------------------------------------------
 
+// Runtime guard: configured CDP endpoints must be origin-only http loopback
+// URLs before any fetch, connect, or launch path uses them. URL.hostname
+// returns the BRACKETED form "[::1]" for http://[::1]:port, so the bare "::1"
+// is unreachable here — only the bracketed IPv6 loopback belongs in this set.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+export const SAFE_SUMMARY_MALFORMED_CDP_URL = "CDP endpoint URL is malformed";
+export const SAFE_SUMMARY_NON_LOOPBACK_CDP = "CDP endpoint must be on loopback (127.0.0.1 / localhost / ::1)";
+export const SAFE_SUMMARY_UNSUPPORTED_PROTOCOL = "CDP endpoint uses an unsupported protocol (only http allowed)";
+
+const SAFE_CDP_ERROR_SUMMARIES = new Set([
+  SAFE_SUMMARY_MALFORMED_CDP_URL,
+  SAFE_SUMMARY_NON_LOOPBACK_CDP,
+  SAFE_SUMMARY_UNSUPPORTED_PROTOCOL,
+]);
+
+/**
+ * Shared default CDP endpoint — the SINGLE source of truth for the loopback
+ * debug port used when no CDP URL is configured. The scraper (popular-cdp), the
+ * session monitor (bank-sessions), and the shell launcher
+ * (scripts/launch-bank-browser.sh) MUST all agree on this value so the launcher
+ * and worker can never bind/attach mismatched ports. The shell launcher cannot
+ * import TypeScript, so its fallback literal is comment-anchored to this
+ * constant and a parity test enforces the port stays equal.
+ */
+export const DEFAULT_CDP_URL = "http://127.0.0.1:9222";
+
+export function assertCdpLoopback(rawUrl: string): void {
+  let parsed: URL;
+  const trimmedUrl = rawUrl.trim();
+  try {
+    parsed = new URL(trimmedUrl);
+  } catch {
+    throw new Error(SAFE_SUMMARY_MALFORMED_CDP_URL);
+  }
+
+  if (parsed.protocol !== "http:") {
+    throw new Error(SAFE_SUMMARY_UNSUPPORTED_PROTOCOL);
+  }
+
+  if (!LOOPBACK_HOSTS.has(parsed.hostname)) {
+    throw new Error(SAFE_SUMMARY_NON_LOOPBACK_CDP);
+  }
+
+  if (
+    !parsed.port ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    trimmedUrl.slice(parsed.origin.length) !== ""
+  ) {
+    throw new Error(SAFE_SUMMARY_MALFORMED_CDP_URL);
+  }
+}
+
+export function getSafeCdpErrorSummary(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  return SAFE_CDP_ERROR_SUMMARIES.has(message)
+    ? message
+    : SAFE_SUMMARY_MALFORMED_CDP_URL;
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -30,11 +93,13 @@ export type FetchLike = (
 ) => Promise<{ ok: boolean }>;
 
 /**
- * Spawns a detached process for the given command string. The default
- * implementation runs the command through a shell, detaches it, and unrefs
- * it so the parent (worker) is not held alive by the child browser.
+ * Spawns a detached process for the given trusted command string. Optional env
+ * vars are injected without altering the shell command text.
  */
-export type SpawnLike = (command: string) => void;
+export type SpawnLike = (
+  command: string,
+  options?: { env?: Record<string, string> },
+) => void;
 
 export interface BrowserRuntimeDeps {
   fetch?: FetchLike;
@@ -51,6 +116,8 @@ export interface EnsureCdpBrowserOptions {
   cdpUrl: string;
   /** Command to launch the browser when CDP is not already available. */
   launchCommand?: string;
+  /** Extra environment passed to the launcher without shell interpolation. */
+  launchEnv?: Record<string, string>;
   /** Max time to wait for CDP after launching. Default 30000 ms. */
   readyTimeoutMs?: number;
   /** Poll interval while waiting for CDP. Default 500 ms. */
@@ -85,11 +152,15 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function defaultSpawn(command: string): void {
+function defaultSpawn(
+  command: string,
+  options?: { env?: Record<string, string> },
+): void {
   const child = nodeSpawn(command, {
     shell: true,
     detached: true,
     stdio: "ignore",
+    ...(options?.env ? { env: { ...process.env, ...options.env } } : {}),
   });
   child.unref();
 }
@@ -106,19 +177,23 @@ export interface IsCdpAvailableDeps {
 
 /**
  * Checks whether a CDP endpoint is alive by requesting /json/version.
- * Returns false on any network error, timeout, or non-2xx response.
+ * Throws fixed validation errors for malformed/non-loopback/non-http
+ * configured URLs; returns false only for network errors, timeouts, or non-2xx
+ * responses after the URL passes validation.
  */
 export async function isCdpAvailable(
   cdpUrl: string,
   deps?: IsCdpAvailableDeps,
 ): Promise<boolean> {
+  assertCdpLoopback(cdpUrl);
+
   const doFetch = deps?.fetch ?? globalThis.fetch;
   const timeoutMs = deps?.timeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await doFetch(`${cdpUrl}/json/version`, {
+    const response = await doFetch(new URL("/json/version", cdpUrl).toString(), {
       signal: controller.signal,
     });
     return response.ok;
@@ -163,6 +238,16 @@ export async function ensureCdpBrowser(
 ): Promise<EnsureCdpBrowserResult> {
   const { cdpUrl } = options;
 
+  try {
+    assertCdpLoopback(cdpUrl);
+  } catch (error) {
+    return {
+      ok: false,
+      launched: false,
+      safeErrorSummary: getSafeCdpErrorSummary(error),
+    };
+  }
+
   // Coalesce concurrent launches for the same CDP endpoint. If a launch is
   // already in flight, await and return its result instead of spawning again.
   const existing = inflightLaunches.get(cdpUrl);
@@ -183,6 +268,7 @@ async function runEnsureCdpBrowser(
   const {
     cdpUrl,
     launchCommand,
+    launchEnv,
     readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS,
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
     deps = {},
@@ -206,7 +292,7 @@ async function runEnsureCdpBrowser(
   // Launch the browser. Spawn failures are caught and reported as a safe
   // summary — never leak the command or its output.
   try {
-    doSpawn(launchCommand);
+    doSpawn(launchCommand, launchEnv ? { env: launchEnv } : undefined);
   } catch {
     return { ok: false, launched: true, safeErrorSummary: SAFE_SUMMARY_NOT_RUNNING };
   }
@@ -221,6 +307,38 @@ async function runEnsureCdpBrowser(
   }
 
   return { ok: false, launched: true, safeErrorSummary: SAFE_SUMMARY_NOT_READY };
+}
+
+export interface BankBrowserEnv {
+  cdpUrl: string;
+}
+
+function readNonBlankEnv(
+  env: Record<string, string | undefined>,
+  key: string,
+): string | undefined {
+  const value = env[key];
+  return value === undefined || value === "" ? undefined : value;
+}
+
+const SAFE_BANK_CODE_PATTERN = /^[a-z0-9_]+$/;
+
+function normalizeBankCode(bankCode: string): string {
+  const normalized = bankCode.trim().toLowerCase();
+  if (!SAFE_BANK_CODE_PATTERN.test(normalized)) {
+    throw new Error("Invalid bank code for browser launcher");
+  }
+  return normalized;
+}
+
+export function resolveBankBrowserEnv(
+  bankCode: string,
+  env: Record<string, string | undefined> = process.env,
+): BankBrowserEnv {
+  const prefix = `RD_SYNC_BANK_${normalizeBankCode(bankCode).toUpperCase()}_`;
+  return {
+    cdpUrl: readNonBlankEnv(env, `${prefix}CDP_URL`) ?? readNonBlankEnv(env, "RD_SYNC_CDP_URL") ?? "",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -277,5 +395,38 @@ export function createEnsureBrowserFromEnv(
       launchCommand,
       readyTimeoutMs,
       pollIntervalMs,
+    });
+}
+
+/** Builds an `ensureBrowser` seam for one bank using bank-aware CDP env vars. */
+export function createEnsureBrowserForBank(
+  bankCode: string,
+  env: Record<string, string | undefined> = process.env,
+  deps?: BrowserRuntimeDeps,
+): EnsureBrowserSeam | undefined {
+  const normalizedBankCode = normalizeBankCode(bankCode);
+  const bankEnv = resolveBankBrowserEnv(normalizedBankCode, env);
+  if (env.RD_SYNC_BANK_BROWSER_AUTO_LAUNCH !== "enabled" || !bankEnv.cdpUrl) {
+    return undefined;
+  }
+
+  const launchCommand = env.RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND;
+  const readyTimeoutMs = parseOptionalMs(
+    env.RD_SYNC_BANK_BROWSER_READY_TIMEOUT_MS,
+    DEFAULT_READY_TIMEOUT_MS,
+  );
+  const pollIntervalMs = parseOptionalMs(
+    env.RD_SYNC_BANK_BROWSER_POLL_INTERVAL_MS,
+    DEFAULT_POLL_INTERVAL_MS,
+  );
+
+  return () =>
+    ensureCdpBrowser({
+      cdpUrl: bankEnv.cdpUrl,
+      launchCommand,
+      launchEnv: launchCommand ? { BANK_CODE: normalizedBankCode } : undefined,
+      readyTimeoutMs,
+      pollIntervalMs,
+      deps,
     });
 }

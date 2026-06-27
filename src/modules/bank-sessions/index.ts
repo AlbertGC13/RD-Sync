@@ -6,6 +6,7 @@ import {
   type CdpBrowserLike,
   type CdpPageLike,
 } from "../../worker/scraper/navigation/popular-cdp";
+import { assertCdpLoopback, DEFAULT_CDP_URL } from "../../worker/scraper/browser-runtime";
 
 // ---------------------------------------------------------------------------
 // Re-export the structural types the CDP adapter already declares so callers
@@ -122,6 +123,7 @@ export interface CdpSessionChecker {
 }
 
 async function lazyPlaywrightConnect(cdpUrl: string): Promise<CdpBrowserLike> {
+  assertCdpLoopback(cdpUrl);
   const { chromium } = await import("playwright-core");
   return chromium.connectOverCDP(cdpUrl) as Promise<CdpBrowserLike>;
 }
@@ -137,7 +139,7 @@ export function createCdpSessionChecker(
   options: CdpSessionCheckerOptions = {},
 ): CdpSessionChecker {
   const {
-    cdpUrl = "http://127.0.0.1:9222",
+    cdpUrl = DEFAULT_CDP_URL,
     baseUrl = "https://ib.bpd.com.do",
     waitTimeoutMs = 15_000,
     connect = lazyPlaywrightConnect,
@@ -150,6 +152,16 @@ export function createCdpSessionChecker(
       let cdpPage: CdpPageLike | null = null;
 
       try {
+        try {
+          assertCdpLoopback(cdpUrl);
+        } catch {
+          return {
+            status: "browser_unavailable",
+            checkedAt: clock().toISOString(),
+            safeSummary: SUMMARY_UNAVAILABLE,
+          };
+        }
+
         try {
           browser = await connect(cdpUrl);
         } catch {

@@ -20,7 +20,8 @@ import {
   type PopularCdpScraperOptions,
 } from "../../worker/scraper/navigation/popular-cdp";
 import {
-  createEnsureBrowserFromEnv,
+  createEnsureBrowserForBank,
+  resolveBankBrowserEnv,
   type EnsureBrowserSeam,
 } from "../../worker/scraper/browser-runtime";
 import {
@@ -67,11 +68,65 @@ export interface BankAdapterRegistry {
 }
 
 /**
+ * Fail-closed guard against two registered banks resolving to the SAME loopback
+ * CDP port (MEDIUM-2). A shared CDP endpoint would let the worker attach to the
+ * wrong bank's authenticated session once a second bank is registered. Only
+ * EXPLICITLY configured endpoints are compared — a bank with no per-bank URL and
+ * no global `RD_SYNC_CDP_URL` resolves to "" here and falls back to the shared
+ * `DEFAULT_CDP_URL` at scraper construction; comparing those would wrongly flag
+ * unconfigured banks. The global `RD_SYNC_CDP_URL` fallback IS compared, because
+ * two banks both inheriting one global URL is exactly the collision to catch.
+ *
+ * Throws a server-side-only error (registry build runs at import/startup, never
+ * inside a request) so the message never reaches a browser response.
+ */
+function assertDistinctBankCdpEndpoints(
+  adapters: readonly BankAdapter[],
+  env: Record<string, string | undefined>,
+): void {
+  const portToBankCode = new Map<string, string>();
+  for (const adapter of adapters) {
+    const cdpUrl = resolveBankBrowserEnv(adapter.bankCode, env).cdpUrl;
+    if (!cdpUrl) {
+      continue;
+    }
+
+    let port: string;
+    try {
+      port = new URL(cdpUrl).port;
+    } catch {
+      // Malformed CDP URLs are rejected later by assertCdpLoopback on the
+      // connect/launch path; the uniqueness guard stays focused on collisions.
+      continue;
+    }
+
+    const owner = portToBankCode.get(port);
+    if (owner) {
+      throw new Error(
+        `Bank adapter CDP endpoint collision: "${adapter.bankCode}" and "${owner}" ` +
+          `both resolve to loopback CDP port ${port}. Each registered bank must use a ` +
+          `distinct loopback CDP URL/port (RD_SYNC_BANK_<BANK>_CDP_URL); the global ` +
+          `RD_SYNC_CDP_URL fallback is single-bank-only.`,
+      );
+    }
+    portToBankCode.set(port, adapter.bankCode);
+  }
+}
+
+/**
  * Builds a `BankAdapterRegistry` from an explicit adapter list. The supported
  * codes are derived from the registered adapters' `bankCode` values — there is
  * no separate whitelist to drift out of sync.
+ *
+ * At build time it fails closed if two registered banks resolve to the same
+ * loopback CDP port (MEDIUM-2 cross-bank session attach guard).
  */
-export function createBankAdapterRegistry(adapters: readonly BankAdapter[]): BankAdapterRegistry {
+export function createBankAdapterRegistry(
+  adapters: readonly BankAdapter[],
+  env: Record<string, string | undefined> = process.env,
+): BankAdapterRegistry {
+  assertDistinctBankCdpEndpoints(adapters, env);
+
   const byCode = new Map<string, BankAdapter>();
   for (const adapter of adapters) {
     byCode.set(adapter.bankCode, adapter);
@@ -103,9 +158,9 @@ export function createBankAdapterRegistry(adapters: readonly BankAdapter[]): Ban
  *
  * Returns `undefined` when the popular-cdp scraper is not selected, so callers
  * can fall through to the other branches. The `ensureBrowser` seam is included
- * only when `RD_SYNC_BANK_BROWSER_AUTO_LAUNCH=enabled` (and `RD_SYNC_CDP_URL`
- * is set); otherwise it is `undefined` and the scraper connects directly as
- * before (backward compatible).
+ * only when `RD_SYNC_BANK_BROWSER_AUTO_LAUNCH=enabled` and the bank-aware CDP
+ * URL resolves; otherwise it is `undefined` and the scraper connects directly
+ * as before (backward compatible).
  */
 export function buildPopularCdpScraperOptionsFromEnv(
   env: Record<string, string | undefined> = process.env,
@@ -114,9 +169,13 @@ export function buildPopularCdpScraperOptionsFromEnv(
     return undefined;
   }
 
-  const ensureBrowser: EnsureBrowserSeam | undefined = createEnsureBrowserFromEnv(env);
+  const bankEnv = resolveBankBrowserEnv(popularBankCode, env);
+  const ensureBrowser: EnsureBrowserSeam | undefined = createEnsureBrowserForBank(
+    popularBankCode,
+    env,
+  );
   return {
-    cdpUrl: env.RD_SYNC_CDP_URL,
+    cdpUrl: bankEnv.cdpUrl || undefined,
     ensureBrowser,
   };
 }
