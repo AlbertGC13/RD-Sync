@@ -16,13 +16,17 @@ export interface AuditEvent extends Required<Omit<AuditEventInput, "metadata" | 
 
 const sensitiveKeys = new Set([
   "cookie",
+  "credential",
+  "envelope",
   "password",
+  "plaintext",
   "rawhtml",
   "screenshot",
   "secret",
   "sessioncookie",
   "sessiontoken",
   "token",
+  "username",
 ]);
 
 export function createAuditEvent(input: AuditEventInput): AuditEvent {
