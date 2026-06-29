@@ -92,9 +92,10 @@ model Bank {
   code         String        @unique
   name         String
   isActive     Boolean       @default(true)
-  accounts     BankAccount[]
-  scrapeRuns   ScrapeRun[]
-  transactions Transaction[]
+  accounts          BankAccount[]
+  scrapeRuns        ScrapeRun[]
+  transactions      Transaction[]
+  bankCredential    BankCredential?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 }
@@ -179,4 +180,21 @@ model AuditEvent {
   @@index([actorId, createdAt])
   @@index([action, createdAt])
   @@index([target, targetId])
+}
+
+// PR3: Encrypted reversible credential store for bank auto-login.
+// Each bankCode has exactly one credential set (two AES-256-GCM envelopes).
+// The master key lives in RD_SYNC_BANK_CREDENTIAL_KEY (env/KMS), NEVER in DB.
+// plaintext is decrypted ONLY in worker memory at scrape time.
+model BankCredential {
+  id                        String   @id @default(cuid())
+  bankCode                  String   @unique
+  bank                      Bank     @relation(fields: [bankCode], references: [code], onDelete: Cascade)
+  encryptedUsernameEnvelope String
+  encryptedPasswordEnvelope String
+  keyVersion                Int      @default(1)
+  isActive                  Boolean  @default(true)
+  lastRotatedAt             DateTime?
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
 }
