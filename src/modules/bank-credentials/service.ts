@@ -1,12 +1,9 @@
 import { decryptCredentialField, encryptCredentialField, type AesGcmEnvelope, type KeyResolver } from "./crypto";
 import { BankCredentialRepository, type BankCredentialMetadata } from "./repository";
 import { createAuditEvent, type AuditSink } from "../audit";
+import { BANK_CREDENTIAL_ACTIONS } from "../audit/bank-actions";
 
-export const CREDENTIAL_AUDIT_ACTIONS = {
-  SET: "bank_credential.set",
-  ROTATE: "bank_credential.rotate",
-  TEST: "bank_credential.test",
-} as const;
+export { BANK_CREDENTIAL_ACTIONS as CREDENTIAL_AUDIT_ACTIONS } from "../audit/bank-actions";
 
 export const CURRENT_CREDENTIAL_WRITE_KEY_VERSION = 1;
 export const NO_STORED_CREDENTIAL_KEY_VERSION = 0;
@@ -41,7 +38,7 @@ export class BankCredentialService {
     const usernameEnvelope = encryptCredentialField(input.username, this.deps.keyResolver, keyVersion);
     const passwordEnvelope = encryptCredentialField(input.password, this.deps.keyResolver, keyVersion);
     await this.emitAudit({
-      action: existing ? CREDENTIAL_AUDIT_ACTIONS.ROTATE : CREDENTIAL_AUDIT_ACTIONS.SET,
+      action: existing ? BANK_CREDENTIAL_ACTIONS.ROTATE : BANK_CREDENTIAL_ACTIONS.SET,
       bankCode: input.bankCode,
       keyVersion,
       actorId,
@@ -89,7 +86,7 @@ export class BankCredentialService {
   }
 
   private async emitTestAudit(bankCode: string, keyVersion: number, actorId: string, outcome: CredentialTestResult["outcome"]): Promise<void> {
-    await this.emitAudit({ action: CREDENTIAL_AUDIT_ACTIONS.TEST, bankCode, keyVersion, actorId, outcome });
+    await this.emitAudit({ action: BANK_CREDENTIAL_ACTIONS.TEST, bankCode, keyVersion, actorId, outcome });
   }
 
   private async emitAudit(input: { action: string; bankCode: string; keyVersion: number; actorId: string; outcome?: CredentialTestResult["outcome"] }): Promise<void> {
