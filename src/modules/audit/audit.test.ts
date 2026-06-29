@@ -6,16 +6,26 @@ describe("audit events", () => {
   it("redacts credentials, session tokens, and raw banking evidence", () => {
     const metadata = redactAuditMetadata({
       filter: { amount: "1000.00" },
+      credential: "secret",
+      envelope: "ciphertext",
       password: "secret",
+      plaintext: "clear",
       sessionToken: "token",
+      username: "operator",
       rawHtml: "<table>bank</table>",
+      nested: { metadata: { username: "nested-user", credentialEnvelope: "nested-secret" } },
     });
 
     expect(metadata).toEqual({
       filter: { amount: "1000.00" },
+      credential: "[REDACTED]",
+      envelope: "[REDACTED]",
       password: "[REDACTED]",
+      plaintext: "[REDACTED]",
       sessionToken: "[REDACTED]",
+      username: "[REDACTED]",
       rawHtml: "[REDACTED]",
+      nested: { metadata: { username: "[REDACTED]", credentialEnvelope: "[REDACTED]" } },
     });
   });
 

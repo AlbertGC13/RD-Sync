@@ -66,12 +66,21 @@ Tracker branch `feature/multi-bank-auto-login` (base = current/main per repo con
 - [x] 3.2 Create `src/modules/bank-credentials/crypto.ts`: AES-256-GCM `encryptCredentialField`/`decryptCredentialField`, full envelope per field, fresh 12-byte IV each, `keyResolver` injectable (not env-coupled); `AesGcmEnvelope` type exported.
 - [x] 3.5a Crypto tests (TDD): compact suite preserving round-trip (normal/empty/unicode/long), IV uniqueness, wrong-key, tampered-tag/ciphertext, unknown keyVersion, malformed envelope including strict canonical base64 rejection, explicit `ciphertext` envelope field, ciphertext no-plaintext-leak, default/explicit keyVersion, and envelope shape/iv/tag lengths.
 
-### PR3B: Admin API + audit + repo (deferred to next slice)
+### PR3B: Admin API + audit + repo
 
-- [ ] 3.3 Create `src/app/api/bank-credentials/route.ts`: POST set/rotate (overwrite+audit), POST test (dry decrypt+probe, never echoes), GET `{bankCode,isActive,keyVersion,lastRotatedAt}`; `requireCapability('bankCredentials.manage')`; rate-limit 10/min; UI "Credenciales actualizadas".
-- [ ] 3.4 Modify `src/modules/audit/index.ts`: add `username/credential/plaintext/envelope` to `sensitiveKeys`; `bank_credential.set|rotate|test` canonical action constants; structural redaction (no value).
-- [ ] 3.5b Admin API + repo tests (TDD): 403/400/429/503; GET no ciphertext; set/rotate audit (bankCode+keyVersion, never value).
-- Gate: full gates + FRESH 4R review + Judgment Day before merge; <=400 lines; NO auto-login, NO decrypt_use outside test.
+**PR3B1 (foundation, complete):**
+- [x] 3.4 Modify `src/modules/audit/index.ts`: add `username/credential/plaintext/envelope` to `sensitiveKeys`.
+- [x] Create `src/modules/bank-credentials/key-resolver.ts`: AES-256 key resolver from `RD_SYNC_BANK_CREDENTIAL_KEY` env (base64/hex, 32 bytes, safe errors, no key material logging).
+- [x] Create `src/modules/bank-credentials/repository.ts`: Prisma access for `BankCredential` (find/upsert/metadata-only; no ciphertext in metadata reads).
+- [x] Create `src/modules/bank-credentials/service.ts`: Business logic for set/rotate/test with canonical audit actions (`bank_credential.set|rotate|test`); plaintext never logged or echoed.
+- [x] Tests: compact key-resolver + service coverage for base64/hex/safe errors, set/rotate/test outcomes, audit safety, and metadata delegation — 394 total changed lines in slice.
+
+**PR3B2 (admin routes, deferred):**
+- [ ] 3.3 Create `src/app/api/bank-credentials/route.ts`: POST set/rotate, POST test (dry decrypt, never echoes), GET metadata; `requireCapability('bankCredentials.manage')`; rate-limit 10/min; UI "Credenciales actualizadas".
+- [ ] 3.5b Admin API tests (TDD): 403/400/429/503; GET no ciphertext; set/rotate audit.
+- [ ] 3.6 Create `src/modules/audit/bank-actions.ts`: canonical audit action constants for bank credential/auto-login/breaker/killswitch/adapter/session domains.
+
+Gate: full gates + FRESH 4R review + Judgment Day before merge; PR3B1 <=400 lines; PR3B2 <=400 lines; NO auto-login, NO decrypt_use outside test.
 
 ## PR4: Auto-login orchestration + Redis lock/fencing + breaker + Popular auto-login [HIGH RISK]
 
