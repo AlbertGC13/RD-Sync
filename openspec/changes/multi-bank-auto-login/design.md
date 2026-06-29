@@ -92,7 +92,7 @@ export interface BankAdapterRegistry {
 }
 
 // AES-256-GCM envelope - ONE per field, fresh 12-byte IV per encrypt
-export interface AesGcmEnvelope { keyVersion: number; iv: string; ct: string; tag: string; } // all base64
+export interface AesGcmEnvelope { keyVersion: number; iv: string; ciphertext: string; tag: string; } // all base64
 export function encryptCredentialField(plain: string, keyResolver: (v:number)=>Buffer): AesGcmEnvelope;
 export function decryptCredentialField(env: AesGcmEnvelope, keyResolver: (v:number)=>Buffer): string;
 

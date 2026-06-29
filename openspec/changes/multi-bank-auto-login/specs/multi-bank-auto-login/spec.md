@@ -102,7 +102,7 @@ Single concatenated delta artifact (Engram-only store). Encodes NEW and MODIFIED
 
 | Requirement | Strength | Behavior |
 |---|---|---|
-| Full Envelope Per Field | MUST | `BankCredential` stores `encryptedUsernameEnvelope` and `encryptedPasswordEnvelope` — each a self-contained AES-256-GCM envelope `{ keyVersion, iv, ct, tag }` with its OWN fresh 12-byte random IV. NO shared `iv`/`authTag` columns. |
+| Full Envelope Per Field | MUST | `BankCredential` stores `encryptedUsernameEnvelope` and `encryptedPasswordEnvelope` — each a self-contained AES-256-GCM envelope `{ keyVersion, iv, ciphertext, tag }` with its OWN fresh 12-byte random IV. NO shared `iv`/`authTag` columns. |
 | Reversible Encryption at Rest | MUST | AES-256-GCM; master key from `RD_SYNC_BANK_CREDENTIAL_KEY` env (32 bytes), NEVER in DB |
 | No scrypt Reuse | MUST | Existing scrypt (one-way) is NOT used; reversible symmetric encryption only |
 | Bind by bankCode | MUST | `BankCredential.bankCode` is unique and FK to `Bank.code`; one credential set per bank code; no per-user attribution |
