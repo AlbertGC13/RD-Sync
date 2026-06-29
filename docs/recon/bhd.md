@@ -210,7 +210,7 @@ form.ng-invalid > div.grid > div.p-card-content > div.p-fluid.formgrid.grid.just
 | Invalid credentials | Wrong user/pass | No | Retry; expect error message |
 | CAPTCHA shown | Failed login attempt (Personal) | Inferred from DOM | `needs_admin_action` |
 | CAPTCHA always present | Any load (Empresarial) | Yes | `needs_admin_action` |
-| MFA / device challenge | Unknown — not observed | No | `needs_admin_action` |
+| Security questions | After credentials — bank prompts memorized Q&A | Yes (observed) | `needs_admin_action` — user must answer; risk of lockout on failure |
 | Session expired | Timeout | No | Re-login |
 | reCAPTCHA v3 block | Bot behavior score too low | No | `needs_admin_action` |
 | Account locked | Excessive failed attempts | No | `needs_admin_action` |
@@ -315,4 +315,5 @@ export const bhdEmpresarialScraperProfile = {
 - [ ] Does reCAPTCHA v3 block CDP/Playwright automation even on first load?
 - [ ] Empresarial: can the CAPTCHA image be read from the DOM as base64 + decoded, or does it require human visual reading?
 - [ ] Personal CAPTCHA: confirmed trigger condition (failed login vs after N seconds)?
-- [ ] Are there other authentication factors (OTP, device token) that appear post-username?
+- [ ] Security questions: confirm exact selector and DOM structure of the Q&A challenge screen
+- [x] ~~Are there other authentication factors?~~ CONFIRMED: security questions appear post-credentials; wrong answer risks account lockout → needs_admin_action; recon deferred until admin has answers ready

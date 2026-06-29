@@ -18,8 +18,8 @@ Each `.md` file maps a bank's online banking portal: login flow, post-login navi
 
 | File | Bank | Status |
 |------|------|--------|
-| [bhd.md](./bhd.md) | BHD León | complete (pre-login); post-login needs admin session |
-| [banreservas.md](./banreservas.md) | Banreservas | complete (pre-login); post-login needs admin session |
+| [bhd.md](./bhd.md) | BHD León | pre-login complete; post-login BLOCKED on security questions (`needs_admin_action`) |
+| [banreservas.md](./banreservas.md) | Banreservas | Personas complete (login + post-login); Empresas portal pending (separate URL) |
 
 ## Mapping Checklist (per bank)
 
