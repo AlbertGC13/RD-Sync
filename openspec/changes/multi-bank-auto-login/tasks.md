@@ -80,10 +80,10 @@ Tracker branch `feature/multi-bank-auto-login` (base = current/main per repo con
 - [x] 3.5b-a Admin API tests (TDD): focused GET tests covering authz (401/403), metadata success, no secret fields, missing metadata (404), and safe error masking (503).
 - [x] 3.6 Create `src/modules/audit/bank-actions.ts`: canonical audit action constants for bank credential/auto-login/breaker/killswitch/adapter/session domains.
 
-**PR3B2B (admin route mutation/test slice, deferred):**
-- [ ] 3.3b Add POST set/rotate route with `InMemoryRateLimiter` 10/min, `requireRole(principal, ["admin"])`, safe errors, credential mutation through `BankCredentialService.setOrRotate`, and Spanish success message: "Credenciales actualizadas".
-- [ ] 3.3c Add POST test route with `InMemoryRateLimiter` 10/min, `requireRole(principal, ["admin"])`, dry decrypt via `validateStoredCredentialDecryption`, and no credential echo.
-- [ ] 3.5b-b Add POST tests for authz, validation, rate limit (429), set/rotate/test success paths, service error masking (503), no plaintext/ciphertext/envelope echo, and credential service call contracts.
+**PR3B2B (admin route mutation/test slice):**
+- [x] 3.3b Add POST set/rotate route with `InMemoryRateLimiter` 10/min, `requireRole(principal, ["admin"])`, safe errors, credential mutation through `BankCredentialService.setOrRotate`, and Spanish success message: "Credenciales actualizadas".
+- [x] 3.3c Add action-based POST test path (`POST /api/bank-credentials` with `action: "test"`) with `InMemoryRateLimiter` 10/min, `requireRole(principal, ["admin"])`, dry decrypt via `validateStoredCredentialDecryption`, and no credential echo.
+- [x] 3.5b-b Add POST tests for authz, validation, rate limit (429), set/rotate/test success paths, service error masking (503), no plaintext/ciphertext/envelope echo, and credential service call contracts.
 
 Gate: full gates + FRESH 4R review + Judgment Day before merge; PR3B1 <=400 lines (merged); PR3B2A <=400 total changed lines; PR3B2B <=400 total changed lines; NO auto-login, NO decrypt_use outside test.
 

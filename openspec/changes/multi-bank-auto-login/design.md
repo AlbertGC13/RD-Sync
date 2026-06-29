@@ -171,7 +171,7 @@ State machine: `expired(scrape-time, expiredEventId) -> adapterEnabled? scraping
 
 ## Admin API/UI Surfaces
 
-`POST /api/bank-credentials` (set/rotate, `requireCapability('bankCredentials.manage')`, rate-limited), `POST .../test` (dry decrypt + ensureBrowser probe, never echoes value), `GET ...` (returns `{ bankCode, isActive, keyVersion, lastRotatedAt }` — NO ciphertext/plaintext). Kill-switch/breaker endpoints: `PATCH /api/bank-credentials/:bankCode/auto-login` (`autoLoginEnabled`), `POST .../reset-breaker`. Adapter toggle: `PATCH /api/bank-credentials/:bankCode/adapter` (`scrapingEnabled`). UI confirms "Credenciales actualizadas" / "Auto-login desactivado" / "Adaptador desactivado" (professional Spanish) without echoing values. 401/403/400/429/503 safe categorization matches `run-now/route.ts`.
+`POST /api/bank-credentials` accepts `action: "set" | "rotate" | "test"` (set/rotate mutate credentials; test dry-decrypts via `validateStoredCredentialDecryption`; never echoes values; rate-limited and admin-gated via `requireRole`). `GET ...` returns `{ bankCode, isActive, keyVersion, lastRotatedAt }` — NO ciphertext/plaintext. Kill-switch/breaker endpoints: `PATCH /api/bank-credentials/:bankCode/auto-login` (`autoLoginEnabled`), `POST .../reset-breaker`. Adapter toggle: `PATCH /api/bank-credentials/:bankCode/adapter` (`scrapingEnabled`). UI confirms "Credenciales actualizadas" / "Auto-login desactivado" / "Adaptador desactivado" (professional Spanish) without echoing values. 401/403/400/429/503 safe categorization matches `run-now/route.ts`.
 
 ## Audit Integration
 
