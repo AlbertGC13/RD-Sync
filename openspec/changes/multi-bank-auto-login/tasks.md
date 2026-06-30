@@ -118,7 +118,7 @@ Gate: full gates + FRESH 4R review + Judgment Day before merge; PR3B1 <=400 line
 - [x] 5.1a-tests Tests: `bhd.test.ts` — identity (bankCode=bhd, portalVariant=personal), auto-login throws, stub scraper returns `needs_admin_action` with exact `safeErrorSummary`, stub session checker returns `expired` with exact `safeSummary`, full profile field assertions (selectors, column mapping, formats, pagination), portal config assertions (baseUrl, CDP env, login allowlist).
 - Gate: full gates; <=400 changed lines; NO auto-login enablement; NO registration in registry.
 
-### PR5B2: Banreservas Personas/Empresas read-only adapter skeletons (DEFERRED — slice 2)
+### PR5B2: Banreservas Personas/Empresas read-only adapter skeletons (COMPLETE — slice 2)
 
 **IDENTITY NOTE — Banreservas Personas vs Empresas:** Both variants share
 `bankCode: "banreservas"` but are TWO completely different tech stacks (Angular
@@ -129,8 +129,8 @@ without either: (a) a single Banreservas entry with portalVariant routing, or
 registration happens in PR5B2 — skeletons only. Registration is deferred to
 PR5.2 or later when the registry routing strategy is decided.
 
-- [ ] 5.1b Create `src/modules/bank-adapters/banreservas.ts`: Banreservas Personas + Empresas skeletons with scraper profiles/selectors, portal configs from recon, `createScraper`/`createSessionChecker` stubs, `createAutoLoginStrategy` stubs (not enabled). Profile fields preserve core recon handoff facts for PR5C/D/E.
-- [ ] 5.1b-tests Tests: `banreservas.test.ts` — shared bankCode, portalVariant differentiation, date format/pagination/inputStrategy divergence, stub scrapers return `needs_admin_action` with exact `safeErrorSummary`, stub session checkers return `expired` with exact `safeSummary`, full profile field assertions, portal config assertions.
+- [x] 5.1b Create `src/modules/bank-adapters/banreservas.ts`: Banreservas Personas + Empresas skeletons with scraper profiles/selectors, portal configs from recon, `createScraper`/`createSessionChecker` stubs, `createAutoLoginStrategy` stubs (not enabled). Profile fields preserve core recon handoff facts for PR5C/D/E.
+- [x] 5.1b-tests Tests: `banreservas.test.ts` — shared bankCode, portalVariant differentiation, date format/pagination/inputStrategy divergence, stub scrapers return `needs_admin_action` with exact `safeErrorSummary`, stub session checkers return `expired` with exact `safeSummary`, full profile field assertions, portal config assertions.
 - Gate: full gates; <=400 changed lines; NO auto-login enablement.
 
 ### PR5B shared deferred tasks (after PR5B2)
