@@ -20,7 +20,7 @@
 | LogRocket + LexisNexis SDK on both portals | Device/session fingerprinting active |
 | Personal: password field is `type=text` masked by CSS | Can be typed into directly |
 | Empresarial: CAPTCHA image is inline base64 JPEG | Cannot be fetched from a stable URL; must read `img` src each login |
-| **Personal login gated by security questions** | After credentials, BHD asks memorized Q&A → `needs_admin_action` (cannot automate; risk of lockout) |
+| **Personal security questions = FIRST login per browser only** | 2 memorized Q&A on first sign-in from a new browser. Checking **"guardar navegador"** (remember device) suppresses them on all later logins → `needs_admin_action` ONCE per browser, then clean |
 | **Personal post-login mapped** | Dashboard → account card → product-detail → "Ver estados y movimientos" → PrimeNG datatable |
 | Transactions are a clean PrimeNG `p-datatable` | Positional `<td>` columns; far easier to scrape than Banreservas' nested divs |
 | Date range = typed PrimeNG datepicker inputs | `placeholder="Fecha inicio"/"Fecha final"`, `DD/MM/YYYY` — no day-cell clicking needed |
@@ -289,7 +289,8 @@ PrimeNG datatable (`table.p-datatable-table.p-datatable-scrollable-table`). Rows
 | Invalid credentials | Wrong user/pass | No | Retry; expect error message |
 | CAPTCHA shown | Failed login attempt (Personal) | Inferred from DOM | `needs_admin_action` |
 | CAPTCHA always present | Any load (Empresarial) | Yes | `needs_admin_action` |
-| Security questions | After credentials — bank prompts memorized Q&A | Yes (observed) | `needs_admin_action` — user must answer; risk of lockout on failure |
+| Security questions (first login per browser) | 2 memorized Q&A — ONLY on first sign-in from a new browser/device | Yes (observed) | `needs_admin_action` ONCE; admin answers + checks "guardar navegador" → never prompted again on that browser |
+| Remembered browser | "guardar navegador" was checked on first login | Yes | No Q&A; credentials alone reach dashboard → adapter CDP-attach works cleanly |
 | Session expired | Timeout | No | Re-login |
 | reCAPTCHA v3 block | Bot behavior score too low | No | `needs_admin_action` |
 | Account locked | Excessive failed attempts | No | `needs_admin_action` |
@@ -307,7 +308,7 @@ PrimeNG datatable (`table.p-datatable-table.p-datatable-scrollable-table`). Rows
 | Two portals (Personal vs Empresarial) | BankAdapter config must specify which portal to use |
 | select2 dropdown (Empresarial) | Must interact with select2 wrapper, not raw `<select>` |
 | WebSphere URL contains `!ut/p/z1/...` | Dynamic state token in path — do NOT hardcode; use `ib.bhd.com.do/wps/portal/ibe/login` directly |
-| **Security questions gate Personal login** | After credentials, BHD prompts memorized Q&A. Cannot automate; wrong answers risk lockout → `needs_admin_action`. Admin must complete login; adapter attaches to the already-authenticated session (CDP-attach model) |
+| **Security questions = first-login-per-browser gate** | 2 memorized Q&A appear ONLY on the first sign-in from a new browser. Admin answers them and checks **"guardar navegador"** (remember device) → subsequent logins on that browser skip the Q&A entirely. Implication: provision the RD-Sync browser profile ONCE with admin help; thereafter credentials-only login works and the adapter's CDP-attach model runs unattended. Never automate the Q&A (lockout risk) |
 | Movements panel is inline on product-detail | "Ver estados y movimientos" expands the table on `#/bhd/product-detail`; it is NOT a separate route |
 | PrimeNG dynamic classes `ng-tns-c…-NN` | These scope ids change between builds/components — NEVER match on them; use `placeholder`, role, stable `bhd-*`/`p-*` classes, or column index |
 | Multiple accounts | Observed: 2 accounts (Ahorro Personal, Supercuenta Nómina) + Tarjetas + Centro Financiero sections. Switch via `div.p-select-dropdown` on product-detail or revisit cards |
@@ -361,7 +362,10 @@ export const bhdPersonalScraperProfile = {
   accountFingerprint: "bhd-XXXXXXXXXX", // per-account, assigned at onboarding
   // Login gated by security questions → admin completes login; adapter attaches
   // to the already-authenticated session (CDP-attach model). Do NOT automate the Q&A.
-  loginStrategy: "admin-assisted+cdp-attach",
+  // Security Q&A appears ONLY on first login per browser. Admin answers once and
+  // checks "guardar navegador" → all later logins skip it. Provision the browser
+  // profile once with admin help, then credentials-only login runs unattended.
+  loginStrategy: "admin-assisted-first-login+remember-browser+cdp-attach",
   routes: {
     dashboard:     "#/bhd/dashboard",
     productDetail: "#/bhd/product-detail",
@@ -434,7 +438,7 @@ export const bhdEmpresarialScraperProfile = {
 
 **Still open:**
 - [ ] Which portal does the target BHD account use — Personal or Empresarial? (Personal now fully mapped)
-- [ ] **Empresarial post-login** — not mapped (always-CAPTCHA blocks even reaching login without admin; deferred)
+- [ ] **Empresarial post-login** — NOT mappable for now: no BHD business account available to the team (confirmed 2026-06-29). Also gated by always-visible CAPTCHA. Revisit only if a business account is provisioned
 - [ ] Does reCAPTCHA v3 block CDP/Playwright automation even on first load?
 - [ ] Empresarial: can the CAPTCHA image be read from the DOM as base64 + decoded, or does it require human visual reading?
 - [ ] Personal CAPTCHA: confirmed trigger condition (failed login vs after N seconds)?

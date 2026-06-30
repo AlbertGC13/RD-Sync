@@ -1,9 +1,10 @@
 # Banreservas — Portal Reconnaissance
 
-**Status:** complete — Personas (login + post-login mapped). Empresas portal pending (different URL).
+**Status:** complete — Personas (Angular SPA) AND Empresas (ASP.NET WebForms) both mapped (login + post-login).
 **Recon date:** 2026-06-29
 **Recon branch:** feature/multi-bank-auto-login-pr5-bank-mapping
 **Security level:** public + pre-login + authorized post-login observation (no credentials/PII recorded)
+**Key architecture note:** Personas and Empresas are TWO completely different stacks — Personas is a modern Angular SPA (`tubanco.banreservas.com`), Empresas is a legacy ASP.NET WebForms frameset (`www.banreservas.com.do/TuBancoEmpresas`). They need **separate adapters**.
 
 ---
 
@@ -26,6 +27,10 @@
 | Date range uses a custom `memphis` calendar | No typed date input — adapter must click day cells, not fill a field |
 | Navigation needs **trusted** clicks | Angular ignores synthetic `dispatchEvent` clicks; use real CDP/extension click |
 | **No MFA on the tested Personas account** | Login → home directly; no security questions (unlike BHD) |
+| **Empresas = separate ASP.NET WebForms stack** | `www.banreservas.com.do/TuBancoEmpresas`, `<frameset>` + DevExpress grid — needs its own adapter (see §9) |
+| Empresas: also no MFA | Username + password → dashboard directly |
+| Empresas date format differs | `DD/MM/YY` (2-digit year) vs Personas `DD/MM/YYYY` |
+| Empresas export | PDF / CSV / Excel (CSV cleanest); stable ASP.NET control ids |
 
 ---
 
@@ -441,7 +446,147 @@ export const banreservasScraperProfile = {
 
 ---
 
-## 9. Open Questions / Blockers
+## 9. Empresas Portal — TuBanco Empresas (ASP.NET WebForms — mapped via authorized session)
+
+> Mapped 2026-06-29 on an authorized Empresas account. **No MFA / no security questions** — username + password reached the dashboard directly (per admin). No credentials/PII recorded.
+
+### 9.1 Architecture — CRITICAL DIFFERENCE FROM PERSONAS
+
+Empresas is a **legacy ASP.NET WebForms application using a `<frameset>`** — nothing like the Personas Angular SPA. This demands a separate adapter with frame-aware navigation.
+
+| Field | Value |
+|-------|-------|
+| Login URL | `https://www.banreservas.com.do/TuBancoEmpresas/Login.aspx` |
+| Landing URL | `https://www.banreservas.com.do/TuBancoEmpresas/Default.aspx` |
+| Framework | ASP.NET WebForms (`__VIEWSTATE` present) + **DevExpress ASPxGridView** |
+| Layout | Classic `<frameset>` with 3 frames (see below) |
+| Branding | "TuBanco Empresas" |
+
+**Frames** (all same-origin → accessible via `window.frames['name'].document`):
+
+| Frame name | Source | Purpose |
+|------------|--------|---------|
+| `topFrame` | `Header.aspx` | User header (name, mensajes, alertas, Salir) |
+| `leftFrame` | `Menu.aspx` | Left navigation menu |
+| `mainFrame` | `Home.aspx` → content pages | Main content area — all data lives here |
+
+> **Adapter must target `mainFrame.document`**, not the top-level document. Selectors below are inside `mainFrame` unless noted.
+
+### 9.2 Navigation Menu (in `leftFrame`)
+
+Menu items are `<a href>` to real `.aspx` pages (load into `mainFrame`):
+
+| Menu path | URL |
+|-----------|-----|
+| Consultas → **Cuentas** | `/TuBancoEmpresas/Pages/Accounts/Accounts.aspx` |
+| Consultas → Estado de cuenta | `/TuBancoEmpresas/Pages/Accounts/AccountStatusPDF.aspx` |
+| Consultas → Comprobantes fiscales | `/TuBancoEmpresas/Pages/TaxReceipts/TaxReceiptsGenerator.aspx` |
+| Consultas → Cheques en tránsito | `/TuBancoEmpresas/Pages/Accounts/TransitChecks.aspx` |
+| Transferencias → Propias | `/TuBancoEmpresas/Pages/Transfers/TransfersAndPayments.aspx` |
+
+### 9.3 Path to Transactions
+
+```
+Default.aspx (frameset)
+  └── leftFrame menu: Consultas → Cuentas  →  mainFrame = Accounts.aspx
+       └── Account grid (DevExpress ASPxGridView) — click the account row
+            → fires aspxGVTableClick → "Detalle y movimientos" page
+              └── Account detail panel + "Opciones de Consulta" query panel
+                   └── set Período Desde/Hasta → click "Consultar"
+                        → ASPxGridView of movements populates
+```
+
+- Accounts grid id: `ctl00_MainHolder_AccountGrid_AccountASPxGridView` (DevExpress; row click handler `aspxGVTableClick(...)`).
+- Account detail fields: Alias, Moneda, Número, Saldo total, Balance total ayer, Balance efectivo, Balance, Balance en tránsito, A 1 día, Depósitos Cheques Hoy, Interés acumulado, Fecha apertura, Fecha última actividad, Interés período anterior, Oficial, Embargos, Cuenta Estándar (IBAN `DO71 BRRD ...`).
+
+### 9.4 Query / Date Filter ("Opciones de Consulta")
+
+| Control | Selector (stable ASP.NET id) | Format / Notes |
+|---------|------------------------------|----------------|
+| Fecha Desde | `input#ctl00_MainHolder_period_dateTextBoxDateFrom` (class `.date_inp`) | `DD/MM/YYYY` typed input + calendar icon |
+| Fecha Hasta | `input#ctl00_MainHolder_period_dateTextBoxDateTo` | `DD/MM/YYYY` |
+| Tipo (Débito/Crédito) | hidden field `ctl00_MainHolder_AccountTransactionGrid_hdnMovementDirection` + visible combo | Filter by movement direction |
+| Monto Desde / Hasta | amount range inputs (`$`) | Optional amount filter |
+| **Consultar** | `a#ctl00_MainHolder_period_linkButtonConsultar` | Runs the query → populates grid (table empty / "Sin datos" until clicked) |
+| Volver | `a#ctl00_MainHolder_linkButtonBackToFrom1` | Back to account list |
+
+> Default range on open is roughly the last 7 days. ASP.NET ids are **highly stable** (server-control naming) — prefer them over CSS classes.
+
+### 9.5 Transaction Grid (DevExpress ASPxGridView)
+
+| Field | Value |
+|-------|-------|
+| Grid id | `ctl00_MainHolder_AccountTransactionGrid_ASPxGridViewTransactions` |
+| Row selector | `tr[id*='_DXDataRow'].dxgvDataRow` (e.g. `..._DXDataRow0`, `1`, …) |
+| Header cells | `td.dxgvHeader` |
+
+**Columns** (positional `<td>`):
+
+| # | Column | Format / Example | Notes |
+|---|--------|------------------|-------|
+| 1 | Fecha | `29/06/26` (**`DD/MM/YY`** — 2-digit year!) | ⚠ Different from Personas (`DD/MM/YYYY`) |
+| 2 | Nro. Transacción | `942632990263` | |
+| 3 | Concepto | `COBRO IMP DGII 0.15%_TRANS TUB` | |
+| 4 | Débitos | `193.15` | **No currency prefix** (unlike Personas); `0.00` when not a debit |
+| 5 | Créditos | `0.00` | No prefix |
+| 6 | Balance | `DOP 4,472.55` | `DOP` prefix on balance only |
+
+- ~40 rows returned for the default period. DevExpress grid supports column-sort by clicking headers and built-in paging.
+
+### 9.6 Export Options
+
+Export menu (toggle `button#toggle`) exposes three formats, each a stable server-control link:
+
+| Format | Selector |
+|--------|----------|
+| **PDF** | `a#ctl00_MainHolder_AccountTransactionGrid_linkButtonGeneratePDF` |
+| **CSV** | `a#ctl00_MainHolder_AccountTransactionGrid_linkButtonCSV` |
+| **Excel** | `a#ctl00_MainHolder_AccountTransactionGrid_linkButton2` |
+
+> **CSV** is the cleanest extraction target. Each fires an ASP.NET `__doPostBack` → file download (out of scope for read-only recon; NOT exercised). Also "Estado de cuenta" menu → `AccountStatusPDF.aspx` for full statements.
+
+### 9.7 Empresas Scraper Profile (draft)
+
+```typescript
+// Banreservas TuBanco EMPRESAS — ASP.NET WebForms frameset. SEPARATE adapter from Personas.
+export const banreservasEmpresasScraperProfile = {
+  bankId: "banreservas",
+  portalVariant: "empresas",
+  loginUrl: "https://www.banreservas.com.do/TuBancoEmpresas/Login.aspx",
+  landingUrl: "https://www.banreservas.com.do/TuBancoEmpresas/Default.aspx",
+  framework: "aspnet-webforms+devexpress",
+  frames: { top: "topFrame", left: "leftFrame", main: "mainFrame" }, // operate on mainFrame.document
+  routes: {
+    accounts: "/TuBancoEmpresas/Pages/Accounts/Accounts.aspx",
+    statementPdf: "/TuBancoEmpresas/Pages/Accounts/AccountStatusPDF.aspx",
+  },
+  selectors: {
+    accountsGrid:   "table#ctl00_MainHolder_AccountGrid_AccountASPxGridView_DXMainTable",
+    dateFrom:       "input#ctl00_MainHolder_period_dateTextBoxDateFrom",   // DD/MM/YYYY
+    dateTo:         "input#ctl00_MainHolder_period_dateTextBoxDateTo",
+    movementDirection: "#ctl00_MainHolder_AccountTransactionGrid_hdnMovementDirection",
+    consultarButton:"a#ctl00_MainHolder_period_linkButtonConsultar",
+    backButton:     "a#ctl00_MainHolder_linkButtonBackToFrom1",
+    transactionGrid:"table#ctl00_MainHolder_AccountTransactionGrid_ASPxGridViewTransactions",
+    transactionRow: "tr[id*='_DXDataRow'].dxgvDataRow",
+    // columns: 0=Fecha 1=Nro.Transacción 2=Concepto 3=Débitos 4=Créditos 5=Balance
+    exportPdf:      "a#ctl00_MainHolder_AccountTransactionGrid_linkButtonGeneratePDF",
+    exportCsv:      "a#ctl00_MainHolder_AccountTransactionGrid_linkButtonCSV",
+    exportExcel:    "a#ctl00_MainHolder_AccountTransactionGrid_linkButton2",
+    exportToggle:   "button#toggle",
+  },
+  formats: {
+    date: "DD/MM/YY",            // ⚠ 2-digit year, unlike Personas DD/MM/YYYY
+    amount: "1,234.56",          // no currency prefix in débito/crédito columns
+    balancePrefix: "DOP",        // only the balance column carries DOP
+  },
+  inputStrategy: "type+postback", // WebForms: set value then trigger Consultar (server postback)
+} as const;
+```
+
+---
+
+## 10. Open Questions / Blockers
 
 **Resolved this session (Personas):**
 - [x] ~~Post-login navigation~~ — mapped: home → product card → Movimientos
@@ -452,10 +597,14 @@ export const banreservasScraperProfile = {
 - [x] ~~Transaction history endpoint~~ — `POST Accounts/Movements`
 - [x] ~~Any OTP / second factor post-login?~~ — NONE on the tested Personas account
 
+**Resolved this session (Empresas):**
+- [x] ~~Empresas portal mapped~~ — ASP.NET WebForms frameset; full nav + movements grid + export (see §9)
+- [x] ~~Empresas stack~~ — confirmed legacy ASP.NET + DevExpress ASPxGridView (separate adapter from Personas)
+- [x] ~~Empresas MFA~~ — NONE; username + password reach the dashboard directly
+
 **Still open:**
-- [ ] **Empresas portal** (`https://www.banreservas.com.do/TuBancoEmpresas/Login.aspx`) — separate URL, NOT yet mapped. Likely a different (older ASP.NET) stack than the Personas Angular SPA. Needs its own recon pass.
-- [ ] `Accounts/Movements` raw JSON contract — deferred (token extraction blocked; not needed for DOM-scraping adapter)
-- [ ] Does OneSpan LWSA score a CDP-attached real Chrome as a bot, or pass? (Login not automated yet)
-- [ ] Username format difference Personas (cédula) vs Empresas (RNC) — confirm on Empresas pass
-- [ ] Empty / zero-movement period indicator (§3.10) — not observed
-- [ ] Multi-currency (USD) account movement format — only DOP account observed
+- [ ] `Accounts/Movements` raw JSON contract (Personas) — deferred (token extraction blocked; not needed for DOM-scraping adapter)
+- [ ] Does OneSpan LWSA score a CDP-attached real Chrome as a bot, or pass? (Personas login not automated yet)
+- [ ] Empty / zero-movement period indicator — not observed (both portals)
+- [ ] Multi-currency (USD) account movement format — only DOP accounts observed (both portals)
+- [ ] Empresas: confirm DevExpress grid paging behavior beyond the first ~40 rows (export is the safer full-extraction path)

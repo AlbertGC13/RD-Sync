@@ -18,8 +18,8 @@ Each `.md` file maps a bank's online banking portal: login flow, post-login navi
 
 | File | Bank | Status |
 |------|------|--------|
-| [bhd.md](./bhd.md) | BHD León | Personal complete (login + post-login); Empresarial pre-login only (always-CAPTCHA) |
-| [banreservas.md](./banreservas.md) | Banreservas | Personas complete (login + post-login); Empresas portal pending (separate URL) |
+| [bhd.md](./bhd.md) | BHD León | Personal complete (login + post-login); Empresarial pre-login only (always-CAPTCHA; no business account available) |
+| [banreservas.md](./banreservas.md) | Banreservas | Personas (Angular SPA) AND Empresas (ASP.NET WebForms) both complete — separate adapters |
 
 ## Mapping Checklist (per bank)
 
