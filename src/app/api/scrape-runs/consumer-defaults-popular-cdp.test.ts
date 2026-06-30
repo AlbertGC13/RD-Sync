@@ -5,6 +5,7 @@ import {
   buildPopularCdpScraperOptionsFromEnv,
 } from "./consumer-defaults";
 import { createPopularCdpScraper } from "../../../worker/scraper/navigation/popular-cdp";
+import { createIngestionProcessor, type ScrapeRunStatus } from "../../../worker/queues";
 
 const CDP_URL = "http://127.0.0.1:9222";
 
@@ -304,5 +305,159 @@ describe("resolveDefaultScraper — bankCode registry routing", () => {
     expect(result.status).toBe("needs_admin_action");
     expect(result.safeErrorSummary).toBe("Banreservas Empresas adapter is a skeleton");
     expect(result.movements).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Processor + resolveDefaultScraper integration — skeleton bank vertical slice
+//
+// These tests prove the FULL pipeline: processor → resolveDefaultScraper →
+// real bankAdapterRegistry → skeleton adapter → needs_admin_action transition
+// with exact safeErrorSummary. The resolver-only tests above prove routing;
+// these prove the processor correctly transitions scrape runs through the
+// real resolver without falling back to Popular.
+// ---------------------------------------------------------------------------
+
+class FakeScrapeRunRepository {
+  readonly transitions: Array<{
+    runId: string;
+    status: ScrapeRunStatus;
+    safeErrorSummary?: string;
+    counts?: { insertedCount: number; skippedCount: number };
+  }> = [];
+
+  async markRunning(runId: string): Promise<void> {
+    this.transitions.push({ runId, status: "running" });
+  }
+
+  async markSucceeded(
+    runId: string,
+    counts: { insertedCount: number; skippedCount: number },
+  ): Promise<void> {
+    this.transitions.push({ runId, status: "succeeded", counts });
+  }
+
+  async markNeedsAdminAction(runId: string, safeErrorSummary: string): Promise<void> {
+    this.transitions.push({ runId, status: "needs_admin_action", safeErrorSummary });
+  }
+
+  async markFailed(runId: string, safeErrorSummary: string): Promise<void> {
+    this.transitions.push({ runId, status: "failed", safeErrorSummary });
+  }
+}
+
+describe("processor + resolveDefaultScraper — skeleton bank end-to-end transitions", () => {
+  it("bhd: processor marks run needs_admin_action with exact skeleton summary (no Popular fallback)", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions: { upsertMany: async () => ({ inserted: 0, skipped: 0 }) },
+      resolveScraper: resolveDefaultScraper,
+    });
+
+    const result = await processor({
+      data: { runId: "run-bhd-e2e", bankId: "bhd", accountFingerprint: "bhd-test" },
+    });
+
+    expect(result).toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-bhd-e2e", status: "running" },
+      {
+        runId: "run-bhd-e2e",
+        status: "needs_admin_action",
+        safeErrorSummary: "BHD Personal adapter is a skeleton",
+      },
+    ]);
+  });
+
+  it("banreservas_personas: processor marks run needs_admin_action with exact skeleton summary", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions: { upsertMany: async () => ({ inserted: 0, skipped: 0 }) },
+      resolveScraper: resolveDefaultScraper,
+    });
+
+    const result = await processor({
+      data: { runId: "run-br-personas-e2e", bankId: "banreservas_personas", accountFingerprint: "br-p-test" },
+    });
+
+    expect(result).toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-br-personas-e2e", status: "running" },
+      {
+        runId: "run-br-personas-e2e",
+        status: "needs_admin_action",
+        safeErrorSummary: "Banreservas Personas adapter is a skeleton",
+      },
+    ]);
+  });
+
+  it("banreservas_empresas: processor marks run needs_admin_action with exact skeleton summary", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions: { upsertMany: async () => ({ inserted: 0, skipped: 0 }) },
+      resolveScraper: resolveDefaultScraper,
+    });
+
+    const result = await processor({
+      data: { runId: "run-br-empresas-e2e", bankId: "banreservas_empresas", accountFingerprint: "br-e-test" },
+    });
+
+    expect(result).toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-br-empresas-e2e", status: "running" },
+      {
+        runId: "run-br-empresas-e2e",
+        status: "needs_admin_action",
+        safeErrorSummary: "Banreservas Empresas adapter is a skeleton",
+      },
+    ]);
+  });
+
+  it("unknown explicit bankCode: processor marks run needs_admin_action (fail-closed, no Popular fallback)", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions: { upsertMany: async () => ({ inserted: 0, skipped: 0 }) },
+      resolveScraper: resolveDefaultScraper,
+    });
+
+    const result = await processor({
+      data: { runId: "run-unknown-e2e", bankId: "some-future-bank", accountFingerprint: "x" },
+    });
+
+    expect(result).toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-unknown-e2e", status: "running" },
+      {
+        runId: "run-unknown-e2e",
+        status: "needs_admin_action",
+        safeErrorSummary: "Bank not configured for automated scraping",
+      },
+    ]);
+  });
+
+  it("absent bankCode: processor defaults to Popular (backward-compatible legacy path)", async () => {
+    process.env.RD_SYNC_DEV_PREVIEW = "enabled";
+
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const transactions = { upsertMany: async () => ({ inserted: 2, skipped: 0 }) };
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions,
+      resolveScraper: resolveDefaultScraper,
+    });
+
+    const result = await processor({
+      data: { runId: "run-legacy-e2e", bankId: "", accountFingerprint: "popular-0000000000" },
+    });
+
+    expect(result.status).toBe("succeeded");
+    expect(result.inserted).toBe(2);
+    // Legacy path transitions: running → succeeded
+    expect(scrapeRuns.transitions[0]?.status).toBe("running");
+    expect(scrapeRuns.transitions[1]?.status).toBe("succeeded");
   });
 });

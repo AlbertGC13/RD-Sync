@@ -169,7 +169,9 @@ group metadata. Do this in a small identity PR before parser/registry wiring.
   - [x] 5.2c `src/lib/banks.ts`: Add `bankDisplayName()` Spanish labels; UI never shows raw underscored codes
   - [x] 5.2d Tests: registry (8 new), banks (6 new), trigger-scrape-button (4 updated), run-action-affordances (6 updated), scrape-runs/page (1 fixture fix), run-now scheduler/API/consumer route-by-bankCode tests for `bhd`, `banreservas_personas`, and `banreservas_empresas`. All pass. Total changed lines: 381 (352 ins, 29 del) across 12 files.
 - [ ] 5.3 Expand `src/worker/scraper/auto-login.portal-drift.test.ts`: Banreservas+BHD pre-submit incompatible-flow fixtures (assert NO fill/submit) + post-submit unknown-flow fixtures. **BLOCKED**: file belongs to PR4 (auto-login infrastructure); deferred.
-- [ ] 5.4 Tests: read-only scrape parity; unknown fails closed ("Este banco aún no está disponible para actualización automática"); portal-drift incompatible pre-submit blocks fill; per-bank adapter kill switch.
+- [x] 5.4a Tests: read-only scrape parity — processor + resolveDefaultScraper integration tests prove the full vertical slice for `bhd`, `banreservas_personas`, `banreservas_empresas` (exact safeErrorSummary, empty movements, `needs_admin_action` transitions, no Popular fallback). Unknown explicit bankCode fails closed with "Bank not configured for automated scraping". Absent bankCode defaults to Popular (backward-compatible legacy path). Added to `consumer-defaults-popular-cdp.test.ts`.
+- [ ] 5.4b Portal-drift incompatible pre-submit blocks fill — **BLOCKED**: requires PR4 auto-login infrastructure (LoginMutationGuard, portal-drift fixtures). Deferred to PR4 branch.
+- [ ] 5.4c Per-bank adapter kill switch — **BLOCKED**: requires PR4 `BankAdapterConfig` model and admin toggle wiring. Deferred to PR4 branch.
 - Gate: full gates; <=400 lines; NO auto-login enablement.
 
 ## PR6: Banreservas/BHD auto-login enablement
