@@ -121,23 +121,51 @@ Gate: full gates + FRESH 4R review + Judgment Day before merge; PR3B1 <=400 line
 ### PR5B2: Banreservas Personas/Empresas read-only adapter skeletons (COMPLETE — slice 2)
 
 **IDENTITY NOTE — Banreservas Personas vs Empresas:** Both variants share
-`bankCode: "banreservas"` but are TWO completely different tech stacks (Angular
-SPA vs ASP.NET WebForms frameset). The current bankCode-keyed registry maps one
-bankCode → one adapter. Personas and Empresas cannot both be registered directly
-without either: (a) a single Banreservas entry with portalVariant routing, or
-(b) evolving the registry to support portalVariant-keyed resolution. Neither
-registration happens in PR5B2 — skeletons only. Registration is deferred to
-PR5.2 or later when the registry routing strategy is decided.
+the Banreservas brand but are TWO completely different tech stacks (Angular
+SPA vs ASP.NET WebForms frameset). The bankCode-keyed registry maps one
+bankCode → one adapter, so shared `bankCode: "banreservas"` would cause
+`Map.set` collisions. PR5B3 resolves this by adopting distinct portal-specific
+bank codes (`banreservas_personas`, `banreservas_empresas`).
 
 - [x] 5.1b Create `src/modules/bank-adapters/banreservas.ts`: Banreservas Personas + Empresas skeletons with scraper profiles/selectors, portal configs from recon, `createScraper`/`createSessionChecker` stubs, `createAutoLoginStrategy` stubs (not enabled). Profile fields preserve core recon handoff facts for PR5C/D/E.
-- [x] 5.1b-tests Tests: `banreservas.test.ts` — shared bankCode, portalVariant differentiation, date format/pagination/inputStrategy divergence, stub scrapers return `needs_admin_action` with exact `safeErrorSummary`, stub session checkers return `expired` with exact `safeSummary`, full profile field assertions, portal config assertions.
+- [x] 5.1b-tests Tests: `banreservas.test.ts` — portal-specific bankCodes, portalVariant differentiation, date format/pagination/inputStrategy divergence, stub scrapers return `needs_admin_action` with exact `safeErrorSummary`, stub session checkers return `expired` with exact `safeSummary`, full profile field assertions, portal config assertions.
 - Gate: full gates; <=400 changed lines; NO auto-login enablement.
 
-### PR5B shared deferred tasks (after PR5B2)
+### PR5B3: Banreservas identity strategy — portal-specific bank codes (COMPLETE — slice 3)
 
-- [ ] 5.2 Register banreservas/bhd in registry; add to `SUPPORTED_RUN_NOW_BANK_CODES` for read-only run-now (deferred to keep PR5B slices skeleton-only).
+**DECISION:** Adopt distinct portal-specific bank codes for the two Banreservas
+portals. The codebase keys `BankAdapterRegistry` (`Map.set`), `BankCredentialRepository`
+(unique `bankCode`), and scrape-run routing by `bankCode`. A shared
+`bankCode: "banreservas"` would cause Map collisions and prevent both adapters
+from being registered simultaneously. Therefore:
+- Personas: `bankCode: "banreservas_personas"`
+- Empresas: `bankCode: "banreservas_empresas"`
+- Display grouping: `banreservasBankGroupCode: "banreservas"` (metadata only, not
+  used for registry/credential routing). UI can render both under Banreservas
+  branding via this group code in a future PR.
+
+**SCOPE:** Identity strategy only in skeletons — no registration, no credential
+wiring, no run-now changes, no UI changes.
+
+**FUTURE PORTAL IDENTITY RULE:** Apply the same pattern to any bank brand that
+gets more than one operational portal. The adapter/credential/scrape-run
+`bankCode` identifies the portal, not only the brand; brand grouping belongs in
+metadata/display fields. When BHD Empresarial becomes available, split BHD into
+portal-specific codes before implementation (for example `bhd_personal` and
+`bhd_empresarial`) instead of registering two adapters as `bhd`. If Popular later
+adds another distinct portal/stack, use the same migration pattern (for example
+`popular_personal` plus the new portal code) while keeping Popular branding as
+group metadata. Do this in a small identity PR before parser/registry wiring.
+
+- [x] 5.1c Update `src/modules/bank-adapters/banreservas.ts`: Replace single `banreservasBankCode` with `banreservasPersonasBankCode` ("banreservas_personas"), `banreservasEmpresasBankCode` ("banreservas_empresas"), and `banreservasBankGroupCode` ("banreservas"). Update scraper profiles, portal configs, and adapter factories to use portal-specific bankCodes.
+- [x] 5.1c-tests Tests: `banreservas.test.ts` — assert distinct bankCodes, no collision, group code independent of adapter bankCodes, registry-safe registration possible, portalVariant preserved.
+- Gate: full gates; <=400 changed lines; NO auto-login enablement; NO registration in registry.
+
+### PR5B shared deferred tasks (after PR5B3)
+
+- [ ] 5.2 Register `bhd`, `banreservas_personas`, and `banreservas_empresas` in the registry; add matching run-now support codes while UI groups Banreservas variants by brand metadata (deferred to keep PR5B slices skeleton-only).
 - [ ] 5.3 Expand `src/worker/scraper/auto-login.portal-drift.test.ts`: Banreservas+BHD pre-submit incompatible-flow fixtures (assert NO fill/submit) + post-submit unknown-flow fixtures. **BLOCKED**: file belongs to PR4 (auto-login infrastructure); deferred.
-- [ ] 5.4 Tests: route by banreservas/bhd bankCode; read-only scrape parity; unknown fails closed ("Este banco aún no está disponible para actualización automática"); portal-drift incompatible pre-submit blocks fill; per-bank adapter kill switch.
+- [ ] 5.4 Tests: route by `bhd`, `banreservas_personas`, and `banreservas_empresas` bankCode; read-only scrape parity; unknown fails closed ("Este banco aún no está disponible para actualización automática"); portal-drift incompatible pre-submit blocks fill; per-bank adapter kill switch.
 - Gate: full gates; <=400 lines; NO auto-login enablement.
 
 ## PR6: Banreservas/BHD auto-login enablement

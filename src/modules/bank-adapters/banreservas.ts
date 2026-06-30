@@ -1,20 +1,31 @@
-/** Banreservas Personas + Empresas — read-only adapter skeletons (PR5B2). */
-/* PR5B2 NOTE: Both variants share `bankCode: "banreservas"` but are TWO
-   completely different tech stacks (Angular SPA vs ASP.NET WebForms frameset).
-   Registration/routing is deferred to PR5.2+ when a routing strategy exists. */
+/** Banreservas Personas + Empresas — read-only adapter skeletons (PR5B2/PR5B3). */
 
 import type { IngestionScraper } from "../../worker/queues";
 import type { CdpSessionChecker } from "../../modules/bank-sessions";
 import type { BankAdapter, BankAutoLoginStrategy } from "./registry";
 
-export const banreservasBankCode = "banreservas" as const;
+/**
+ * Portal-specific bank codes for Banreservas Personas and Empresas.
+ *
+ * Both variants share the same brand but are completely different tech stacks
+ * (Angular SPA vs ASP.NET WebForms frameset). The codebase keys adapters,
+ * credentials, and scrape-run routing by `bankCode`, so each portal MUST have
+ * a unique bankCode to avoid `Map.set` collisions in `BankAdapterRegistry` and
+ * unique-constraint violations in `BankCredentialRepository`.
+ *
+ * `banreservasBankGroupCode` is a display/metadata grouping concept only — it
+ * is NOT used for registry routing or credential storage.
+ */
+export const banreservasBankGroupCode = "banreservas" as const;
+export const banreservasPersonasBankCode = "banreservas_personas" as const;
+export const banreservasEmpresasBankCode = "banreservas_empresas" as const;
 export const banreservasPersonasPortalVariant = "personas" as const;
 export const banreservasEmpresasPortalVariant = "empresas" as const;
 
 // ── Personas (Angular SPA — tubanco.banreservas.com) ─────────────────────
 
 export const banreservasPersonasScraperProfile = {
-  bankId: banreservasBankCode,
+  bankId: banreservasPersonasBankCode,
   portalVariant: banreservasPersonasPortalVariant,
   loginUrl: "https://tubanco.banreservas.com/TuBancoBanreservas/#/administrationGeneral/login",
   rootElement: "icb-app",
@@ -48,7 +59,7 @@ export const banreservasPersonasScraperProfile = {
 } as const;
 
 export const banreservasPersonasPortalConfig = {
-  bankCode: banreservasBankCode,
+  bankCode: banreservasPersonasBankCode,
   baseUrl: "https://tubanco.banreservas.com",
   loginPathAllowlist: ["/#/administrationGeneral/login"] as readonly string[],
   cdpUrlEnv: "RD_SYNC_BANK_BANRESERVAS_PERSONAS_CDP_URL",
@@ -63,7 +74,7 @@ export const banreservasPersonasPortalConfig = {
 // ── Empresas (ASP.NET WebForms frameset — www.banreservas.com.do) ────────
 
 export const banreservasEmpresasScraperProfile = {
-  bankId: banreservasBankCode,
+  bankId: banreservasEmpresasBankCode,
   portalVariant: banreservasEmpresasPortalVariant,
   loginUrl: "https://www.banreservas.com.do/TuBancoEmpresas/Login.aspx",
   landingUrl: "https://www.banreservas.com.do/TuBancoEmpresas/Default.aspx",
@@ -93,7 +104,7 @@ export const banreservasEmpresasScraperProfile = {
 } as const;
 
 export const banreservasEmpresasPortalConfig = {
-  bankCode: banreservasBankCode,
+  bankCode: banreservasEmpresasBankCode,
   baseUrl: "https://www.banreservas.com.do",
   loginPathAllowlist: ["/TuBancoEmpresas/Login.aspx"] as readonly string[],
   cdpUrlEnv: "RD_SYNC_BANK_BANRESERVAS_EMPRESAS_CDP_URL",
@@ -114,11 +125,11 @@ export function createBanreservasAutoLoginStrategy(): BankAutoLoginStrategy {
 // ── Adapter factories + stubs ────────────────────────────────────────────
 
 function createPersonasAdapter(opts: { createScraper: () => IngestionScraper; createSessionChecker: () => CdpSessionChecker }): BankAdapter & { readonly portalVariant: string; createSessionChecker(): CdpSessionChecker } {
-  return { bankCode: banreservasBankCode, portalVariant: banreservasPersonasPortalVariant, createScraper: opts.createScraper, createSessionChecker: opts.createSessionChecker, createAutoLoginStrategy: createBanreservasAutoLoginStrategy };
+  return { bankCode: banreservasPersonasBankCode, portalVariant: banreservasPersonasPortalVariant, createScraper: opts.createScraper, createSessionChecker: opts.createSessionChecker, createAutoLoginStrategy: createBanreservasAutoLoginStrategy };
 }
 
 function createEmpresasAdapter(opts: { createScraper: () => IngestionScraper; createSessionChecker: () => CdpSessionChecker }): BankAdapter & { readonly portalVariant: string; createSessionChecker(): CdpSessionChecker } {
-  return { bankCode: banreservasBankCode, portalVariant: banreservasEmpresasPortalVariant, createScraper: opts.createScraper, createSessionChecker: opts.createSessionChecker, createAutoLoginStrategy: createBanreservasAutoLoginStrategy };
+  return { bankCode: banreservasEmpresasBankCode, portalVariant: banreservasEmpresasPortalVariant, createScraper: opts.createScraper, createSessionChecker: opts.createSessionChecker, createAutoLoginStrategy: createBanreservasAutoLoginStrategy };
 }
 
 const personasStubScraper: IngestionScraper = { collect: async () => ({ status: "needs_admin_action" as const, movements: [], safeErrorSummary: "Banreservas Personas adapter is a skeleton" }) };
