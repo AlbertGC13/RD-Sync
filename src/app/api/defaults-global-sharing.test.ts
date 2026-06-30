@@ -21,6 +21,7 @@ const GLOBAL_KEYS = [
   "__rdSyncAuditSink",
   "__rdSyncIngestionConsumer",
   "__rdSyncSessionMonitor",
+  "__rdSyncBrowserCapacityMonitor",
 ] as const;
 
 function clearGlobalSingletons() {
@@ -300,6 +301,64 @@ describe("defaultSessionMonitor — globalThis sharing and single-start guard", 
     expect(monitorB).toBe(monitorA);
 
     // Clean up the timer started above
+    monitorA?.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Browser capacity monitor — globalThis sharing + single-start guard
+// ---------------------------------------------------------------------------
+
+describe("defaultBrowserCapacityMonitor — globalThis sharing and single-start guard", () => {
+  beforeEach(() => {
+    clearGlobalSingletons();
+    vi.resetModules();
+    delete process.env.RD_SYNC_BROWSER_CAPACITY_MONITOR;
+  });
+
+  afterEach(() => {
+    clearGlobalSingletons();
+    vi.resetModules();
+    delete process.env.RD_SYNC_BROWSER_CAPACITY_MONITOR;
+  });
+
+  it("null monitor is shared across module graphs when disabled", async () => {
+    const { defaultBrowserCapacityMonitor: monitorA } = await import(
+      "./scrape-runs/consumer-defaults"
+    );
+
+    vi.resetModules();
+
+    const { defaultBrowserCapacityMonitor: monitorB } = await import(
+      "./scrape-runs/consumer-defaults"
+    );
+
+    expect(monitorA).toBeNull();
+    expect(monitorB).toBeNull();
+  });
+
+  it("is idempotent across two module graphs (no double timer)", async () => {
+    process.env.RD_SYNC_BROWSER_CAPACITY_MONITOR = "enabled";
+
+    // Same rationale as the session monitor test above: the module-level
+    // singleton is constructed and started at import time, so idempotency is
+    // observed via the globalThis anchor reusing the SAME (already-started)
+    // instance across a simulated second module graph.
+    const { defaultBrowserCapacityMonitor: monitorA } = await import(
+      "./scrape-runs/consumer-defaults"
+    );
+
+    expect(monitorA).not.toBeNull();
+    monitorA?.start(); // second call must be a no-op (handle guard)
+
+    vi.resetModules();
+
+    const { defaultBrowserCapacityMonitor: monitorB } = await import(
+      "./scrape-runs/consumer-defaults"
+    );
+
+    expect(monitorB).toBe(monitorA);
+
     monitorA?.stop();
   });
 });
