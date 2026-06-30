@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  banreservasBankCode,
+  banreservasBankGroupCode,
+  banreservasPersonasBankCode,
+  banreservasEmpresasBankCode,
   banreservasPersonasPortalVariant,
   banreservasEmpresasPortalVariant,
   banreservasPersonasScraperProfile,
@@ -11,20 +13,23 @@ import {
   banreservasEmpresasPortalConfig,
   createBanreservasAutoLoginStrategy,
 } from "./banreservas";
+import { createBankAdapterRegistry } from "./registry";
 
 describe("Banreservas adapter identity + portal variant disambiguation", () => {
-  it("shared bankCode = banreservas; variants differ", () => {
-    expect(banreservasBankCode).toBe("banreservas");
-    expect(banreservasPersonasAdapter.bankCode).toBe("banreservas");
-    expect(banreservasEmpresasAdapter.bankCode).toBe("banreservas");
+  it("distinct portal-specific bank codes; group code for display", () => {
+    expect(banreservasBankGroupCode).toBe("banreservas");
+    expect(banreservasPersonasBankCode).toBe("banreservas_personas");
+    expect(banreservasEmpresasBankCode).toBe("banreservas_empresas");
+    expect(banreservasPersonasAdapter.bankCode).toBe("banreservas_personas");
+    expect(banreservasEmpresasAdapter.bankCode).toBe("banreservas_empresas");
     expect(banreservasPersonasAdapter.portalVariant).toBe("personas");
     expect(banreservasEmpresasAdapter.portalVariant).toBe("empresas");
     expect(banreservasPersonasPortalVariant).toBe("personas");
     expect(banreservasEmpresasPortalVariant).toBe("empresas");
   });
 
-  it("both share bankCode but have distinct portalVariant", () => {
-    expect(banreservasPersonasAdapter.bankCode).toBe(banreservasEmpresasAdapter.bankCode);
+  it("adapters have distinct bankCodes — registry-safe (no Map collision)", () => {
+    expect(banreservasPersonasAdapter.bankCode).not.toBe(banreservasEmpresasAdapter.bankCode);
     expect(banreservasPersonasAdapter.portalVariant).not.toBe(banreservasEmpresasAdapter.portalVariant);
   });
 });
@@ -72,7 +77,7 @@ describe("Banreservas auto-login stub — not implemented", () => {
 
 describe("Banreservas Personas profile — recon-derived selectors/facts", () => {
   it("identity, login, rootElement, fingerprint, searchMode, inputStrategy", () => {
-    expect(banreservasPersonasScraperProfile.bankId).toBe("banreservas");
+    expect(banreservasPersonasScraperProfile.bankId).toBe("banreservas_personas");
     expect(banreservasPersonasScraperProfile.portalVariant).toBe("personas");
     expect(banreservasPersonasScraperProfile.loginUrl).toBe(
       "https://tubanco.banreservas.com/TuBancoBanreservas/#/administrationGeneral/login",
@@ -120,7 +125,7 @@ describe("Banreservas Personas profile — recon-derived selectors/facts", () =>
 
 describe("Banreservas Empresas profile — recon-derived selectors/facts", () => {
   it("identity, login, landing, framework, inputStrategy", () => {
-    expect(banreservasEmpresasScraperProfile.bankId).toBe("banreservas");
+    expect(banreservasEmpresasScraperProfile.bankId).toBe("banreservas_empresas");
     expect(banreservasEmpresasScraperProfile.portalVariant).toBe("empresas");
     expect(banreservasEmpresasScraperProfile.loginUrl).toBe("https://www.banreservas.com.do/TuBancoEmpresas/Login.aspx");
     expect(banreservasEmpresasScraperProfile.landingUrl).toBe("https://www.banreservas.com.do/TuBancoEmpresas/Default.aspx");
@@ -162,7 +167,7 @@ describe("Banreservas Empresas profile — recon-derived selectors/facts", () =>
 
 describe("Banreservas portal configs", () => {
   it("Personas: baseUrl, CDP env, profile dir, start URL, selectors, login allowlist", () => {
-    expect(banreservasPersonasPortalConfig.bankCode).toBe("banreservas");
+    expect(banreservasPersonasPortalConfig.bankCode).toBe("banreservas_personas");
     expect(banreservasPersonasPortalConfig.baseUrl).toBe("https://tubanco.banreservas.com");
     expect(banreservasPersonasPortalConfig.loginPathAllowlist).toContain("/#/administrationGeneral/login");
     expect(banreservasPersonasPortalConfig.cdpUrlEnv).toBe("RD_SYNC_BANK_BANRESERVAS_PERSONAS_CDP_URL");
@@ -175,7 +180,7 @@ describe("Banreservas portal configs", () => {
   });
 
   it("Empresas: baseUrl, CDP env, profile dir, start URL, selectors, login allowlist", () => {
-    expect(banreservasEmpresasPortalConfig.bankCode).toBe("banreservas");
+    expect(banreservasEmpresasPortalConfig.bankCode).toBe("banreservas_empresas");
     expect(banreservasEmpresasPortalConfig.baseUrl).toBe("https://www.banreservas.com.do");
     expect(banreservasEmpresasPortalConfig.loginPathAllowlist).toContain("/TuBancoEmpresas/Login.aspx");
     expect(banreservasEmpresasPortalConfig.cdpUrlEnv).toBe("RD_SYNC_BANK_BANRESERVAS_EMPRESAS_CDP_URL");
@@ -189,8 +194,18 @@ describe("Banreservas portal configs", () => {
 });
 
 describe("Banreservas skeletons — no registration assumptions", () => {
-  it("shared bankCode documents registry limitation; portalVariant is disambiguation key", () => {
-    expect(banreservasPersonasAdapter.bankCode).toBe(banreservasEmpresasAdapter.bankCode);
-    expect(banreservasPersonasAdapter.portalVariant).not.toBe(banreservasEmpresasAdapter.portalVariant);
+  it("distinct bankCodes enable future registry registration without Map overwrite", () => {
+    const registry = createBankAdapterRegistry([banreservasPersonasAdapter, banreservasEmpresasAdapter], {});
+
+    expect(registry.get("banreservas_personas")).toBe(banreservasPersonasAdapter);
+    expect(registry.get("banreservas_empresas")).toBe(banreservasEmpresasAdapter);
+    expect(registry.get("banreservas")).toBeUndefined();
+    expect(registry.supportedBankCodes()).toEqual(["banreservas_personas", "banreservas_empresas"]);
+  });
+
+  it("group code is independent of adapter bankCodes (display/metadata only)", () => {
+    expect(banreservasBankGroupCode).toBe("banreservas");
+    expect(banreservasBankGroupCode).not.toBe(banreservasPersonasAdapter.bankCode);
+    expect(banreservasBankGroupCode).not.toBe(banreservasEmpresasAdapter.bankCode);
   });
 });
