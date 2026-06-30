@@ -174,6 +174,16 @@ group metadata. Do this in a small identity PR before parser/registry wiring.
 - [ ] 5.4c Per-bank adapter kill switch — **BLOCKED**: requires PR4 `BankAdapterConfig` model and admin toggle wiring. Deferred to PR4 branch.
 - Gate: full gates; <=400 lines; NO auto-login enablement.
 
+### PR5C: BHD Personal read-only DOM extraction (parser + integration)
+
+**SCOPE:** Replace the BHD skeleton stub scraper/parser with real transaction
+parsing from sanitized DOM/table-like fixtures. This is NOT auto-login.
+Session checker remains fail-safe (returns `expired`).
+
+- [x] 5.5a Add `parseBhdDate`, `parseBhdAmount`, `parseBhdTransactionRows` to `src/modules/bank-adapters/bhd.ts`: pure helpers that parse BHD Personal DD/MM/YYYY dates, RD$ amounts, and fixture rows into normalized `BankMovement` objects matching the Popular/adapter contract.
+- [x] 5.5a-tests TDD: `bhd.test.ts` — 30 new tests (36 total) covering date parsing (happy + impossible calendar/error), amount parsing (RD$ prefix, empty/malformed), transaction row parsing (fixture round-trip, confirmation→reference, no balance leakage, custom overrides, malformed rejection, debit/credit exclusivity, optional field normalization).
+- Gate: targeted BHD tests + fixture tests; <=400 changed lines; session checker remains fail-safe; no auto-login enablement.
+
 ## PR6: Banreservas/BHD auto-login enablement
 
 - [ ] 6.1 Implement banreservas/bhd `createAutoLoginStrategy` (username/password-only; safe fallback->`needs_admin_action` on corporate/token/incompatible flow).
