@@ -1,9 +1,9 @@
 # BHD León — Portal Reconnaissance
 
-**Status:** complete (pre-login only)
+**Status:** Personal — login + post-login mapped. Empresarial — pre-login only (always-CAPTCHA, deferred).
 **Recon date:** 2026-06-29
 **Recon branch:** feature/multi-bank-auto-login-pr5-bank-mapping
-**Security level:** public + pre-login observations; post-login requires admin session
+**Security level:** public + pre-login + authorized post-login observation (no credentials/PII recorded)
 
 ---
 
@@ -20,6 +20,11 @@
 | LogRocket + LexisNexis SDK on both portals | Device/session fingerprinting active |
 | Personal: password field is `type=text` masked by CSS | Can be typed into directly |
 | Empresarial: CAPTCHA image is inline base64 JPEG | Cannot be fetched from a stable URL; must read `img` src each login |
+| **Personal login gated by security questions** | After credentials, BHD asks memorized Q&A → `needs_admin_action` (cannot automate; risk of lockout) |
+| **Personal post-login mapped** | Dashboard → account card → product-detail → "Ver estados y movimientos" → PrimeNG datatable |
+| Transactions are a clean PrimeNG `p-datatable` | Positional `<td>` columns; far easier to scrape than Banreservas' nested divs |
+| Date range = typed PrimeNG datepicker inputs | `placeholder="Fecha inicio"/"Fecha final"`, `DD/MM/YYYY` — no day-cell clicking needed |
+| Export "Descargar movimientos" | PDF / EXCEL / TXT — EXCEL/TXT preferred for extraction |
 
 ---
 
@@ -175,30 +180,104 @@ form.ng-invalid > div.grid > div.p-card-content > div.p-fluid.formgrid.grid.just
 
 ---
 
-## 4. Post-Login Navigation
+## 4. Post-Login Navigation (BHD Personal — mapped via authorized admin session)
 
-> **`[needs_admin_action]`** — All sections below require a live authenticated session.
+> Mapped 2026-06-29 on an authorized account. No credentials, account numbers, or balances recorded — selectors and structure only. **Login required answering security questions** before reaching the dashboard (see §5).
 
 ### 4.1 Landing Page
-- TBD — admin session required.
+
+| Field | Value |
+|-------|-------|
+| Landing URL | `#/bhd/dashboard` |
+| Top nav (PrimeNG menubar) | `menubar` with links: `#/bhd/dashboard` (Mis Productos), `#/bhd/payments-transfers` (Pagos y Transferencias), `#/bhd/requests-claims` (Solicitudes y Reclamaciones), `#/bhd/offers` (Ofertas) |
+| Products summary | "360 - Resumen de Productos", grouped collapsible sections: **Cuentas**, **Tarjetas**, **Centro Financiero BHD** |
+| Account card | Shows product name + number (e.g. `02301820014`), type (Ahorros), state (Activa), `Balance disponible`, `Balance en tránsito`; each card has a `⋮` (3-dot) menu |
 
 ### 4.2 Account / Product List
-- TBD
+
+| Field | Value |
+|-------|-------|
+| Cuentas section | Lists each account as a clickable card |
+| Card click target | Clicking the card name navigates to `#/bhd/product-detail` |
+| Product selector (on detail) | `div.p-select-dropdown` (PrimeNG) — switch between products without going back |
+| Detail fields | Número de producto, Cuenta estándar (IBAN `DO24BCBH...`), Tipo de cuenta, Estado, Balance disponible / en tránsito / actual / promedio del mes |
 
 ### 4.3 Path to Transactions
-- TBD
 
-### 4.4 Date Filter Selectors
-- TBD
+```
+Dashboard (#/bhd/dashboard)
+  └── Click account card (Cuentas section)
+       → #/bhd/product-detail  (account summary)
+         └── Green button "Ver estados y movimientos"
+              → expands the movements panel inline (filters + p-datatable) on the same route
+```
 
-### 4.5 Pagination
-- TBD
+- **"Ver estados y movimientos"** button: `button.bhd-btn-primary.p-button` (PrimeNG). This is the gate to the transaction table.
+- Navigation is Angular SPA (PrimeNG); routes are real hash routes (`#/bhd/...`) and the nav links DO carry `href`, unlike Banreservas.
 
-### 4.6 Export Options
-- TBD
+### 4.4 Filters
 
-### 4.7 Transaction Table Selectors
-- TBD
+**Type filter** (button group): `Todos` / `Débitos` / `Créditos`
+
+| Tab | Selector (stable part) | Default |
+|-----|------------------------|---------|
+| Todos | `button.bhd-btn-tab-select` (selected state) | ✅ |
+| Débitos | `button.bhd-btn-tab-default` (+ `border-tab`) | |
+| Créditos | `button.bhd-btn-tab-default` (+ `bhd-btn-tab-border-radius.right`) | |
+
+**Period dropdown** (`div.p-select-dropdown`, label shows current period). Options:
+
+| Option | Notes |
+|--------|-------|
+| `Último mes` | Default |
+| `2 últimos meses` | |
+| `3 últimos meses` | |
+| `Rango de fecha` | Custom range → reveals two date inputs (see §4.5) |
+
+**Text search**: `input[placeholder="Buscar"]` (client-side filter of loaded rows).
+
+### 4.5 Date Range Filter
+
+Selecting `Rango de fecha` replaces the period dropdown with two **PrimeNG datepicker inputs** + a back arrow (`←`) to return to the preset dropdown:
+
+| Field | Selector | Format | Notes |
+|-------|----------|--------|-------|
+| Fecha inicio | `input.p-datepicker-input[placeholder="Fecha inicio"]` | `DD/MM/YYYY` | Accepts **typed** input OR calendar picker |
+| Fecha final | `input.p-datepicker-input[placeholder="Fecha final"]` | `DD/MM/YYYY` | Same |
+| Back to presets | the `←` button (`button.bhd-btn-tab-select.left`) | — | Returns to the preset period dropdown |
+
+> **Easier than Banreservas**: these are real `<input>` PrimeNG datepickers that accept typed dates — the adapter can set the value + dispatch `input`/`blur`, no day-cell clicking required. (Avoid the dynamic `ng-tns-c...-NN` class fragment — match on `placeholder` instead.)
+
+### 4.6 Pagination
+
+The table is a **PrimeNG scrollable datatable** (`p-datatable-scrollable`). Movements load into a single scrollable body (`p-datatable-scrollable-table`); ~40 rows were present for "Último mes". Scrolling the table body reveals more rows (virtual/lazy scroll) rather than discrete pages. Adapter strategy: scroll the table body to the bottom and collect rows until no new rows appear, OR use the export (more reliable — see §4.7).
+
+### 4.7 Export Options
+
+| Control | Selector | Formats |
+|---------|----------|---------|
+| **Descargar movimientos** | `button.p-button-outlined.bhd-btn-default` (split/dropdown) → menu `a.p-menu-item-link` | **PDF**, **EXCEL**, **TXT** |
+| Descargar estados de cuenta | `button.bhd-btn-primary` (split/dropdown) | Account statements (PDF) |
+| Print | printer icon button | Browser print |
+
+> **EXCEL** or **TXT** of "Descargar movimientos" is the preferred extraction path (structured, complete — avoids scroll-pagination). Selecting a format triggers a **download** → out of scope for read-only recon; NOT exercised. Menu items are `a.p-menu-item-link` matched by text (PDF / EXCEL / TXT); the `li.p-menu-item` `ng-tns-c...` class is dynamic — match on link text.
+
+### 4.8 Transaction Table Selectors
+
+PrimeNG datatable (`table.p-datatable-table.p-datatable-scrollable-table`). Rows: `tr.body-responsive`. Columns (in order):
+
+| # | Column | Format / Example | Notes |
+|---|--------|------------------|-------|
+| 1 | Fecha | `30/06/2026` (`DD/MM/YYYY`) | Sortable (`↑↓`) |
+| 2 | Nº confirmación | `2638027` | Transaction confirmation id |
+| 3 | Descripción | `Fondo reservado Visa Db: 20260629` / `TRANSFERENCIA RECIBIDA DE ...` | |
+| 4 | Comprobante | `0000000000` | Voucher/receipt number (often zero-filled) |
+| 5 | Débitos | `RD$ 679.51` | Empty for credits; `RD$ ` prefix, thousands `,`, 2 decimals |
+| 6 | Créditos | `RD$ 1,450.00` | Empty for debits |
+| 7 | Balance | `RD$ 7,167.94` | Running balance after the movement |
+
+- Each `<td>` is positional — extract by column index (no per-cell semantic class needed). All columns sortable via the header `↑↓` toggle.
+- Debit and credit are **separate columns** (one empty per row) — same pattern as Banreservas.
 
 ---
 
@@ -228,9 +307,12 @@ form.ng-invalid > div.grid > div.p-card-content > div.p-fluid.formgrid.grid.just
 | Two portals (Personal vs Empresarial) | BankAdapter config must specify which portal to use |
 | select2 dropdown (Empresarial) | Must interact with select2 wrapper, not raw `<select>` |
 | WebSphere URL contains `!ut/p/z1/...` | Dynamic state token in path — do NOT hardcode; use `ib.bhd.com.do/wps/portal/ibe/login` directly |
-| Multiple accounts | TBD |
-| DOP vs USD accounts | TBD |
-| Zero-movement period | TBD |
+| **Security questions gate Personal login** | After credentials, BHD prompts memorized Q&A. Cannot automate; wrong answers risk lockout → `needs_admin_action`. Admin must complete login; adapter attaches to the already-authenticated session (CDP-attach model) |
+| Movements panel is inline on product-detail | "Ver estados y movimientos" expands the table on `#/bhd/product-detail`; it is NOT a separate route |
+| PrimeNG dynamic classes `ng-tns-c…-NN` | These scope ids change between builds/components — NEVER match on them; use `placeholder`, role, stable `bhd-*`/`p-*` classes, or column index |
+| Multiple accounts | Observed: 2 accounts (Ahorro Personal, Supercuenta Nómina) + Tarjetas + Centro Financiero sections. Switch via `div.p-select-dropdown` on product-detail or revisit cards |
+| DOP vs USD accounts | Only DOP (`RD$`) observed; amounts carry `RD$ ` prefix. USD format `TBD` |
+| Zero-movement period | `TBD` — not observed |
 
 ---
 
@@ -258,7 +340,13 @@ form.ng-invalid > div.grid > div.p-card-content > div.p-fluid.formgrid.grid.just
 | `input[name=Captcha]` | Empresarial | **Stable** | Same |
 | `li.captchaBlock > p` (bg-image) | Empresarial | Fragile | CSS background approach may change |
 | WebSphere `!ut/p/z1/...` path | Empresarial | **Fragile** | Dynamic state token; use `/ibe/login` base only |
-| Angular route `#/login` | Personal | Stable | Angular router path |
+| Angular route `#/login` / `#/bhd/dashboard` / `#/bhd/product-detail` | Personal | Stable | Angular router paths |
+| `button.bhd-btn-primary` ("Ver estados y movimientos") | Personal | Stable | `bhd-*` branded class |
+| `table.p-datatable-table` / `tr.body-responsive` | Personal | **Stable** | PrimeNG datatable + custom row class; extract `<td>` by index |
+| `input.p-datepicker-input[placeholder="Fecha inicio"/"Fecha final"]` | Personal | **Stable** | Match on `placeholder`, NOT the `ng-tns-c…` fragment |
+| `div.p-select-dropdown` (period + product selector) | Personal | Stable | PrimeNG select; read label / open for options |
+| `a.p-menu-item-link` (export PDF/EXCEL/TXT) | Personal | Stable (by text) | `li.p-menu-item` `ng-tns-c…` is dynamic — match link text |
+| `ng-tns-c…-NN` class fragments | Personal | **Fragile** | Angular-generated scope ids; never select on these |
 
 ---
 
@@ -270,19 +358,46 @@ export const bhdPersonalScraperProfile = {
   bankId: "bhd",
   portalVariant: "personal",
   loginUrl: "https://ibp.bhd.com.do/#/login",
-  accountFingerprint: "bhd-XXXXXXXXXX", // fill after admin session
+  accountFingerprint: "bhd-XXXXXXXXXX", // per-account, assigned at onboarding
+  // Login gated by security questions → admin completes login; adapter attaches
+  // to the already-authenticated session (CDP-attach model). Do NOT automate the Q&A.
+  loginStrategy: "admin-assisted+cdp-attach",
+  routes: {
+    dashboard:     "#/bhd/dashboard",
+    productDetail: "#/bhd/product-detail",
+  },
   selectors: {
+    // --- Login (admin-assisted) ---
     usernameInput: "input#userName",
     passwordInput: "input#password",
     captchaInput:  "input[name='captcha']",
     captchaArea:   "div.field.col-10.mb-2",  // hidden until triggered
     captchaCanvas: ".bhd-captcha canvas",
     submitButton:  "button[type='submit'].bhd-btn-primary",
-    // post-login — TBD
-    accountList:   "TBD",
-    transactionTable: "TBD",
-    fromDateInput: "TBD",
-    toDateInput:   "TBD",
+
+    // --- Navigation ---
+    accountCard:   "div.p-select-dropdown", // product selector on product-detail
+    viewMovementsButton: "button.bhd-btn-primary", // "Ver estados y movimientos"
+
+    // --- Filters ---
+    typeTabTodos:    "button.bhd-btn-tab-select",
+    periodDropdown:  "div.p-select-dropdown",      // Último mes / 2-3 últimos meses / Rango de fecha
+    fromDateInput:   "input.p-datepicker-input[placeholder='Fecha inicio']", // typed DD/MM/YYYY
+    toDateInput:     "input.p-datepicker-input[placeholder='Fecha final']",
+    searchInput:     "input[placeholder='Buscar']",
+
+    // --- Transaction table (PrimeNG datatable; extract <td> by column index) ---
+    transactionTable: "table.p-datatable-table",
+    transactionRow:   "tr.body-responsive",
+    // columns: 0=Fecha 1=Nº confirmación 2=Descripción 3=Comprobante 4=Débitos 5=Créditos 6=Balance
+
+    // --- Export (preferred extraction path) ---
+    exportMovementsButton: "button.p-button-outlined.bhd-btn-default", // "Descargar movimientos"
+    exportFormatItem:      "a.p-menu-item-link", // match text: PDF / EXCEL / TXT
+  },
+  formats: {
+    date: "DD/MM/YYYY",
+    amount: "RD$ 1,234.56", // RD$ prefix, thousands ',', 2 decimals; debit & credit in separate columns
   },
 } as const;
 
@@ -310,10 +425,19 @@ export const bhdEmpresarialScraperProfile = {
 
 ## 10. Open Questions / Blockers
 
-- [ ] Which portal does the target BHD account use — Personal or Empresarial?
-- [ ] Post-login: account list, transaction navigation, date filter, pagination, export — all need admin session `[needs_admin_action]`
+**Resolved this session (Personal):**
+- [x] ~~Post-login navigation~~ — dashboard → account card → product-detail → "Ver estados y movimientos" (§4.3)
+- [x] ~~Transaction table selectors~~ — PrimeNG `p-datatable`, positional `<td>` columns (§4.8)
+- [x] ~~Date filter~~ — preset dropdown + typed `Rango de fecha` PrimeNG datepickers (§4.5)
+- [x] ~~Export~~ — Descargar movimientos: PDF / EXCEL / TXT (§4.7)
+- [x] ~~Auth factors~~ — CONFIRMED: security questions appear post-credentials; wrong answer risks lockout → `needs_admin_action` (admin completes login; adapter uses CDP-attach)
+
+**Still open:**
+- [ ] Which portal does the target BHD account use — Personal or Empresarial? (Personal now fully mapped)
+- [ ] **Empresarial post-login** — not mapped (always-CAPTCHA blocks even reaching login without admin; deferred)
 - [ ] Does reCAPTCHA v3 block CDP/Playwright automation even on first load?
 - [ ] Empresarial: can the CAPTCHA image be read from the DOM as base64 + decoded, or does it require human visual reading?
 - [ ] Personal CAPTCHA: confirmed trigger condition (failed login vs after N seconds)?
-- [ ] Security questions: confirm exact selector and DOM structure of the Q&A challenge screen
-- [x] ~~Are there other authentication factors?~~ CONFIRMED: security questions appear post-credentials; wrong answer risks account lockout → needs_admin_action; recon deferred until admin has answers ready
+- [ ] Security questions: exact selector/DOM of the Q&A screen (not captured — admin had already passed it before observation)
+- [ ] Pagination: confirm whether the datatable lazy-loads ALL movements on scroll, or caps at a limit (export is the safer extraction path either way)
+- [ ] USD-account amount format (only DOP observed)
