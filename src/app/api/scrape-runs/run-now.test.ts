@@ -433,6 +433,105 @@ describe("scheduleIngestionRunNow — active-run lock", () => {
   });
 });
 
+describe("scheduleIngestionRunNow — route-by-bankCode (newly enabled run-now banks)", () => {
+  it("routes a bhd request through the scheduler with bankId 'bhd' (not fallback to Popular)", async () => {
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+
+    const result = await scheduleIngestionRunNow(
+      {
+        principal: { id: "admin-1", role: "admin" },
+        bankId: "bhd",
+      },
+      {
+        scrapeRuns,
+        queue,
+        now: () => new Date("2026-06-09T12:00:00.000Z"),
+        createRunId: () => "run-bhd-now",
+      },
+    );
+
+    expect(result).toEqual({
+      runId: "run-bhd-now",
+      bankId: "bhd",
+      accountFingerprint: "popular-0000000000",
+      status: "queued",
+    });
+    expect(await scrapeRuns.list({})).toMatchObject([
+      { id: "run-bhd-now", bankId: "bhd", status: "queued" },
+    ]);
+    expect(queue.addCalls[0]?.data.bankId).toBe("bhd");
+  });
+
+  it("routes a banreservas_personas request through the scheduler with bankId 'banreservas_personas'", async () => {
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+
+    const result = await scheduleIngestionRunNow(
+      {
+        principal: { id: "admin-1", role: "admin" },
+        bankId: "banreservas_personas",
+      },
+      {
+        scrapeRuns,
+        queue,
+        now: () => new Date("2026-06-09T12:00:00.000Z"),
+        createRunId: () => "run-br-personas",
+      },
+    );
+
+    expect(result).toMatchObject({
+      runId: "run-br-personas",
+      bankId: "banreservas_personas",
+      status: "queued",
+    });
+    expect(queue.addCalls[0]?.data.bankId).toBe("banreservas_personas");
+  });
+
+  it("routes a banreservas_empresas request through the scheduler with bankId 'banreservas_empresas'", async () => {
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+
+    const result = await scheduleIngestionRunNow(
+      {
+        principal: { id: "admin-1", role: "admin" },
+        bankId: "banreservas_empresas",
+      },
+      {
+        scrapeRuns,
+        queue,
+        now: () => new Date("2026-06-09T12:00:00.000Z"),
+        createRunId: () => "run-br-empresas",
+      },
+    );
+
+    expect(result).toMatchObject({
+      runId: "run-br-empresas",
+      bankId: "banreservas_empresas",
+      status: "queued",
+    });
+    expect(queue.addCalls[0]?.data.bankId).toBe("banreservas_empresas");
+  });
+
+  it("does NOT accept unsupported 'banreservas' (must use portal-specific codes)", async () => {
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+
+    await expect(
+      scheduleIngestionRunNow(
+        {
+          principal: { id: "admin-1", role: "admin" },
+          bankId: "banreservas",
+        },
+        { scrapeRuns, queue },
+      ),
+    ).rejects.toThrow(/Unsupported bank for manual run/);
+
+    expect(await scrapeRuns.list({})).toEqual([]);
+    expect(queue.addCalls).toEqual([]);
+  });
+});
+
 describe("scheduleIngestionRunNow — queue failure recovery", () => {
   it("marks the persisted run failed with a SAFE summary (no raw queue error) when the queue throws", async () => {
     const scrapeRuns = new InMemoryScrapeRunRepository();

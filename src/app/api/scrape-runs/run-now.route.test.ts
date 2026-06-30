@@ -160,6 +160,94 @@ describe("POST /api/scrape-runs/run-now", () => {
     expect(queue.addCalls).toEqual([]);
   });
 
+  it("schedules a BHD ingestion run when bankId='bhd' is requested", async () => {
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+    const handler = createPostScrapeRunNowHandler({
+      scrapeRuns,
+      queue,
+      now: () => new Date("2026-06-09T12:15:00.000Z"),
+      createRunId: () => "bhd-manual-run",
+    });
+
+    const response = await handler(
+      new Request("http://localhost/api/scrape-runs/run-now", {
+        method: "POST",
+        headers: {
+          "x-rd-sync-user-id": "admin-1",
+          "x-rd-sync-role": "admin",
+        },
+        body: JSON.stringify({ bankId: "bhd" }),
+      }),
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(202);
+    expect(body).toEqual({
+      run: {
+        runId: "bhd-manual-run",
+        bankId: "bhd",
+        accountFingerprint: "popular-0000000000",
+        status: "queued",
+      },
+    });
+    expect(queue.addCalls[0]?.data.bankId).toBe("bhd");
+  });
+
+  it("schedules a Banreservas Personas run when bankId='banreservas_personas' is requested", async () => {
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+    const handler = createPostScrapeRunNowHandler({
+      scrapeRuns,
+      queue,
+      now: () => new Date("2026-06-09T12:15:00.000Z"),
+      createRunId: () => "br-personas-run",
+    });
+
+    const response = await handler(
+      new Request("http://localhost/api/scrape-runs/run-now", {
+        method: "POST",
+        headers: {
+          "x-rd-sync-user-id": "admin-1",
+          "x-rd-sync-role": "admin",
+        },
+        body: JSON.stringify({ bankId: "banreservas_personas" }),
+      }),
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(202);
+    expect(body.run.bankId).toBe("banreservas_personas");
+    expect(queue.addCalls[0]?.data.bankId).toBe("banreservas_personas");
+  });
+
+  it("schedules a Banreservas Empresas run when bankId='banreservas_empresas' is requested", async () => {
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+    const handler = createPostScrapeRunNowHandler({
+      scrapeRuns,
+      queue,
+      now: () => new Date("2026-06-09T12:15:00.000Z"),
+      createRunId: () => "br-empresas-run",
+    });
+
+    const response = await handler(
+      new Request("http://localhost/api/scrape-runs/run-now", {
+        method: "POST",
+        headers: {
+          "x-rd-sync-user-id": "admin-1",
+          "x-rd-sync-role": "admin",
+        },
+        body: JSON.stringify({ bankId: "banreservas_empresas" }),
+      }),
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(202);
+    expect(body.run.bankId).toBe("banreservas_empresas");
+    expect(queue.addCalls[0]?.data.bankId).toBe("banreservas_empresas");
+  });
+
   it("returns 400 with a safe message when an unknown bankId is requested", async () => {
     const scrapeRuns = new InMemoryScrapeRunRepository();
     const queue = new FakeQueue();

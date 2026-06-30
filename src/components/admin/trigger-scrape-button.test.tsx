@@ -15,16 +15,23 @@ import {
 } from "./trigger-scrape-button";
 import { toast } from "sonner";
 
-describe("SUPPORTED_RUN_NOW_BANK_CODES — bankCode whitelist", () => {
-  it("exposes Popular as the only currently supported bank", () => {
-    expect(SUPPORTED_RUN_NOW_BANK_CODES).toEqual(["popular"]);
+describe("SUPPORTED_RUN_NOW_BANK_CODES — bankCode whitelist (PR5.2)", () => {
+  it("exposes all four supported bank codes", () => {
+    expect(SUPPORTED_RUN_NOW_BANK_CODES).toEqual([
+      "popular",
+      "bhd",
+      "banreservas_personas",
+      "banreservas_empresas",
+    ]);
     expect(DEFAULT_RUN_NOW_BANK_CODE).toBe("popular");
   });
 
-  it("recognises popular as supported and rejects every other bankCode", () => {
+  it("recognises all four bank codes as supported and rejects unknown codes", () => {
     expect(isSupportedRunNowBankCode("popular")).toBe(true);
+    expect(isSupportedRunNowBankCode("bhd")).toBe(true);
+    expect(isSupportedRunNowBankCode("banreservas_personas")).toBe(true);
+    expect(isSupportedRunNowBankCode("banreservas_empresas")).toBe(true);
     expect(isSupportedRunNowBankCode("banreservas")).toBe(false);
-    expect(isSupportedRunNowBankCode("bhd")).toBe(false);
     expect(isSupportedRunNowBankCode("")).toBe(false);
   });
 });

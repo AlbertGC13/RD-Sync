@@ -25,9 +25,9 @@ export {
 interface TriggerScrapeButtonProps {
   /**
    * Bank the new run should target. The page-level "Run now" trigger is not
-   * attached to a specific card, so it falls back to the Popular profile (the
-   * only scraper currently shipping). Per-row affordances should always pass
-   * the card's `bankId` explicitly.
+   * attached to a specific card, so it falls back to the Popular default.
+   * Multiple banks are now supported for manual runs; per-row affordances
+   * should always pass the card's `bankId` explicitly.
    */
   bankId?: string;
   /**

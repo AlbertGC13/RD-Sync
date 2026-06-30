@@ -91,7 +91,7 @@ describe("createBankAdapterRegistry — CDP endpoint uniqueness guard (MEDIUM-2)
   });
 });
 
-describe("bankAdapterRegistry — default instance (Popular registered in PR1)", () => {
+describe("bankAdapterRegistry — default instance (PR5.2: Popular + BHD + Banreservas registered)", () => {
   it("resolves the Popular adapter by its canonical bankCode", () => {
     const adapter = bankAdapterRegistry.get("popular");
 
@@ -99,14 +99,51 @@ describe("bankAdapterRegistry — default instance (Popular registered in PR1)",
     expect(adapter?.bankCode).toBe("popular");
   });
 
-  it("exposes only Popular as supported in PR1 (Banreservas/BHD land in PR5)", () => {
-    expect(bankAdapterRegistry.supportedBankCodes()).toEqual(["popular"]);
+  it("resolves BHD Personal adapter by bankCode 'bhd'", () => {
+    const adapter = bankAdapterRegistry.get("bhd");
+
+    expect(adapter).toBeDefined();
+    expect(adapter?.bankCode).toBe("bhd");
+  });
+
+  it("resolves Banreservas Personas adapter by bankCode 'banreservas_personas'", () => {
+    const adapter = bankAdapterRegistry.get("banreservas_personas");
+
+    expect(adapter).toBeDefined();
+    expect(adapter?.bankCode).toBe("banreservas_personas");
+  });
+
+  it("resolves Banreservas Empresas adapter by bankCode 'banreservas_empresas'", () => {
+    const adapter = bankAdapterRegistry.get("banreservas_empresas");
+
+    expect(adapter).toBeDefined();
+    expect(adapter?.bankCode).toBe("banreservas_empresas");
+  });
+
+  it("exposes all four supported bank codes (no Banreservas Map overwrite)", () => {
+    expect(bankAdapterRegistry.supportedBankCodes()).toEqual([
+      "popular",
+      "bhd",
+      "banreservas_personas",
+      "banreservas_empresas",
+    ]);
+  });
+
+  it("both Banreservas portal adapters are retrievable without collision", () => {
+    const personas = bankAdapterRegistry.get("banreservas_personas");
+    const empresas = bankAdapterRegistry.get("banreservas_empresas");
+
+    expect(personas).toBeDefined();
+    expect(empresas).toBeDefined();
+    expect(personas).not.toBe(empresas);
+    expect(personas?.bankCode).toBe("banreservas_personas");
+    expect(empresas?.bankCode).toBe("banreservas_empresas");
   });
 
   it("returns undefined for an explicit unknown bankCode (never falls back to Popular)", () => {
     expect(bankAdapterRegistry.get("banreservas")).toBeUndefined();
-    expect(bankAdapterRegistry.get("bhd")).toBeUndefined();
     expect(bankAdapterRegistry.get("unknown-bank")).toBeUndefined();
+    expect(bankAdapterRegistry.get("")).toBeUndefined();
   });
 
   it("the Popular adapter's createScraper yields a usable IngestionScraper (lazy, no env read at import)", () => {

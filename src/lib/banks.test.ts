@@ -4,20 +4,33 @@ import { bankAdapterRegistry } from "../modules/bank-adapters/registry";
 import {
   DEFAULT_RUN_NOW_BANK_CODE,
   SUPPORTED_RUN_NOW_BANK_CODES,
+  bankDisplayName,
   isSupportedRunNowBankCode,
 } from "./banks";
 
-describe("SUPPORTED_RUN_NOW_BANK_CODES — canonical bankCode whitelist", () => {
-  it("exposes Popular as the only currently supported bank code in PR1", () => {
-    expect(SUPPORTED_RUN_NOW_BANK_CODES).toEqual(["popular"]);
+describe("SUPPORTED_RUN_NOW_BANK_CODES — canonical bankCode whitelist (PR5.2)", () => {
+  it("exposes all four supported bank codes", () => {
+    expect(SUPPORTED_RUN_NOW_BANK_CODES).toEqual([
+      "popular",
+      "bhd",
+      "banreservas_personas",
+      "banreservas_empresas",
+    ]);
     expect(DEFAULT_RUN_NOW_BANK_CODE).toBe("popular");
   });
 
-  it("recognises popular as supported and rejects every other bankCode", () => {
+  it("recognises all four bank codes as supported", () => {
     expect(isSupportedRunNowBankCode("popular")).toBe(true);
+    expect(isSupportedRunNowBankCode("bhd")).toBe(true);
+    expect(isSupportedRunNowBankCode("banreservas_personas")).toBe(true);
+    expect(isSupportedRunNowBankCode("banreservas_empresas")).toBe(true);
+  });
+
+  it("rejects unknown and partial-match bank codes", () => {
     expect(isSupportedRunNowBankCode("banreservas")).toBe(false);
-    expect(isSupportedRunNowBankCode("bhd")).toBe(false);
+    expect(isSupportedRunNowBankCode("bhd_personal")).toBe(false);
     expect(isSupportedRunNowBankCode("")).toBe(false);
+    expect(isSupportedRunNowBankCode("unknown")).toBe(false);
   });
 });
 
@@ -31,5 +44,18 @@ describe("SUPPORTED_RUN_NOW_BANK_CODES — registry parity (derived from registr
     expect([...SUPPORTED_RUN_NOW_BANK_CODES]).toEqual([
       ...bankAdapterRegistry.supportedBankCodes(),
     ]);
+  });
+});
+
+describe("bankDisplayName — operator-facing labels (no raw underscored codes)", () => {
+  it("maps supported bank codes to professional Spanish display names", () => {
+    expect(bankDisplayName("popular")).toBe("Banco Popular");
+    expect(bankDisplayName("bhd")).toBe("BHD");
+    expect(bankDisplayName("banreservas_personas")).toBe("Banreservas Personas");
+    expect(bankDisplayName("banreservas_empresas")).toBe("Banreservas Empresas");
+  });
+
+  it("falls back to the raw bankId when no display name is registered", () => {
+    expect(bankDisplayName("unknown-bank")).toBe("unknown-bank");
   });
 });
