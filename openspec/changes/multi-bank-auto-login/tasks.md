@@ -102,6 +102,18 @@ Gate: full gates + FRESH 4R review + Judgment Day before merge; PR3B1 <=400 line
 
 ## PR5: Banreservas/BHD read-only adapters + portal drift fixtures (NO auto-login)
 
+### PR5A: Sanitized transaction fixtures (COMPLETE)
+
+- [x] 5A.1 Create `src/modules/bank-adapters/fixtures/types.ts`: raw transaction row types for BHD Personal, Banreservas Personas, Banreservas Empresas.
+- [x] 5A.2 Create `src/modules/bank-adapters/fixtures/bhd-personal.ts`: 2 sanitized BHD Personal transactions (credit + debit, RD$ amounts, DD/MM/YYYY, confirmation numbers).
+- [x] 5A.3 Create `src/modules/bank-adapters/fixtures/banreservas-personas.ts`: 2 sanitized Banreservas Personas transactions (credit + debit, pipe-separated reference, DD/MM/YYYY).
+- [x] 5A.4 Create `src/modules/bank-adapters/fixtures/banreservas-empresas.ts`: 2 sanitized Banreservas Empresas transactions (credit + debit, DD/MM/YY, DOP balance prefix).
+- [x] 5A.5 Create `src/modules/bank-adapters/fixtures/helpers.ts`: PII detection + text normalization helpers.
+- [x] 5A.6 Create `src/modules/bank-adapters/fixtures/__tests__/bank-transaction-fixtures.test.ts`: 36 tests — fixture loadability, field completeness, date formats, amount formats, credit/debit coverage, PII sanitization, RNC/IBAN/account number detection, no secrets.
+- Gate: pnpm test (36 pass) + pnpm typecheck + pnpm lint clean; 398 changed lines (under 400 budget).
+
+### PR5B: Read-only adapters + parsers (NEXT)
+
 - [ ] 5.1 Create `src/modules/bank-adapters/banreservas.ts` + `bhd.ts`: read-only `createScraper`+`createSessionChecker`+pure parsers; `createAutoLoginStrategy` stub (not enabled); portal configs from recon (open Q).
 - [ ] 5.2 Register banreservas/bhd in registry; add to `SUPPORTED_RUN_NOW_BANK_CODES` for read-only run-now (auto-login still gated off).
 - [ ] 5.3 Expand `src/worker/scraper/auto-login.portal-drift.test.ts`: Banreservas+BHD pre-submit incompatible-flow fixtures (assert NO fill/submit) + post-submit unknown-flow fixtures.
