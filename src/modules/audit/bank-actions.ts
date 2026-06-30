@@ -44,3 +44,8 @@ export const BANK_SESSION_ACTIONS = {
   RESTORED: "bank_session.restored",
   UNAVAILABLE: "bank_session.unavailable",
 } as const;
+
+export const BANK_BROWSER_CAPACITY_ACTIONS = {
+  WARNING: "bank_browser_capacity.warning",
+  RECOVERED: "bank_browser_capacity.recovered",
+} as const;

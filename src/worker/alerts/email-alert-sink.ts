@@ -66,6 +66,32 @@ export function createEmailAlertSink(options: {
         // Transport failures must never propagate.
       }
     },
+
+    async notifyCapacityAttention(event) {
+      const { status, active, queueDepth, max, throttleEventsInWindow, checkedAt } = event;
+
+      const subject =
+        status === "over_capacity"
+          ? "[RD-Sync] Bank browser capacity warning"
+          : "[RD-Sync] Bank browser capacity recovered";
+
+      const text = [
+        `Status            : ${status}`,
+        `Active sessions   : ${active}`,
+        `Queue depth       : ${queueDepth}`,
+        `Max concurrency   : ${max}`,
+        `Throttle events   : ${throttleEventsInWindow}`,
+        `Checked at        : ${checkedAt}`,
+        ``,
+        `Review at /admin/scrape-runs`,
+      ].join("\n");
+
+      try {
+        await options.transport.send({ to: options.recipient, subject, text });
+      } catch {
+        // Transport failures must never propagate.
+      }
+    },
   };
 }
 

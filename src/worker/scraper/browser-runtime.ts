@@ -289,6 +289,23 @@ export function createAcquireBrowserSlotFromEnv(
   return () => semaphore.acquire({ timeoutMs });
 }
 
+/** Capacity snapshot extended with the cumulative throttled-acquire count. */
+export interface BrowserCapacitySnapshot extends BrowserCapacity {
+  throttleCount: number;
+}
+
+/**
+ * Samples the REAL process-global shared BrowserSemaphore (same singleton
+ * resolution as createAcquireBrowserSlotFromEnv, keyed by `max:queueLimit`).
+ * The semaphore is host-wide, not per-bank — there is no bankId dimension.
+ */
+export function getBrowserCapacitySnapshotFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): BrowserCapacitySnapshot {
+  const semaphore = getSharedBrowserSemaphore(env);
+  return { ...semaphore.capacity(), throttleCount: semaphore.throttleCount };
+}
+
 function getSharedBrowserSemaphore(env: Record<string, string | undefined>): BrowserSemaphore {
   const max = parseOptionalPositiveInt(
     env.RD_SYNC_BANK_BROWSER_MAX_CONCURRENCY,
