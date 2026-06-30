@@ -1,8 +1,11 @@
-/** Banreservas Personas + Empresas — read-only adapter skeletons (PR5B2/PR5B3). */
+/** Banreservas Personas + Empresas — read-only adapter skeletons (PR5B2/PR5B3)
+ *  + Personas DOM extraction parser (PR5D/PR5F). */
 
+import type { BankMovement, TransactionDirection } from "../../modules/transactions";
 import type { IngestionScraper } from "../../worker/queues";
 import type { CdpSessionChecker } from "../../modules/bank-sessions";
 import type { BankAdapter, BankAutoLoginStrategy } from "./registry";
+import type { BanreservasPersonasTransaction } from "./fixtures/types";
 
 /**
  * Portal-specific bank codes for Banreservas Personas and Empresas.
@@ -120,6 +123,152 @@ export const banreservasEmpresasPortalConfig = {
 
 export function createBanreservasAutoLoginStrategy(): BankAutoLoginStrategy {
   throw new Error("Banreservas auto-login strategy is not implemented yet (PR6)");
+}
+
+// ---------------------------------------------------------------------------
+// Transaction parser — Banreservas Personas DD/MM/YYYY + comma amounts → BankMovement
+// ---------------------------------------------------------------------------
+
+const SANTO_DOMINGO_OFFSET = "-04:00";
+
+export interface BanreservasPersonasParseOptions {
+  accountFingerprint?: string;
+  bankId?: string;
+  currency?: string;
+}
+
+export function parseBanreservasPersonasDate(value: string): string {
+  const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(value.trim());
+  if (!match) throw new Error("Invalid Banreservas Personas date format");
+
+  const [, dayStr, monthStr, yearStr] = match;
+  const day = Number(dayStr);
+  const month = Number(monthStr);
+  const year = Number(yearStr);
+
+  // Validate month range.
+  if (month < 1 || month > 12) throw new Error("Invalid Banreservas Personas date format");
+
+  // Validate day range for the given month (including leap-year check for Feb).
+  const daysInMonth = new Date(year, month, 0).getDate();
+  if (day < 1 || day > daysInMonth) throw new Error("Invalid Banreservas Personas date format");
+
+  return `${yearStr}-${monthStr}-${dayStr}T00:00:00${SANTO_DOMINGO_OFFSET}`;
+}
+
+export function parseBanreservasPersonasAmount(value: string): { value: number; direction: TransactionDirection } {
+  const trimmed = value.trim();
+  if (trimmed === "") throw new Error("Invalid Banreservas Personas amount format");
+
+  // Validate comma grouping BEFORE stripping: commas must follow standard
+  // thousands grouping (exactly 3 digits after each comma).  This rejects
+  // malformed inputs like "44,00.00" or "4,4,000.00" that a blind strip-all-commas
+  // approach would silently accept.
+  const hasCommas = trimmed.includes(",");
+  if (hasCommas && !/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(trimmed)) {
+    throw new Error("Invalid Banreservas Personas amount format");
+  }
+
+  const normalized = trimmed.replace(/,/g, "");
+  // Reject malformed patterns: leading/trailing dots, double negatives, etc.
+  if (!/^-?\d+(\.\d+)?$/.test(normalized)) {
+    throw new Error("Invalid Banreservas Personas amount format");
+  }
+
+  const amount = Number(normalized);
+  if (!Number.isFinite(amount)) throw new Error("Invalid Banreservas Personas amount format");
+
+  return {
+    value: amount,
+    direction: amount < 0 ? "debit" : "credit",
+  };
+}
+
+function normalizeText(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * Parse the Banreservas Personas pipe-separated reference field into a
+ * human-readable string. The raw reference is in the form:
+ *   `# Nro. transacción : 408900123456 | Número de referencia : 408900123`
+ * We normalize to: `Nro. transacción: 408900123456 | Número de referencia: 408900123`
+ */
+function parseBanreservasPersonasReference(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+
+  // Split on pipe and normalize each part: strip leading `# ` and trim whitespace.
+  const parts = trimmed.split("|").map((part) => {
+    const cleaned = part.trim().replace(/^#\s*/, "");
+    // Collapse whitespace around colon: `Nro. transacción :` → `Nro. transacción:`
+    return cleaned.replace(/\s*:\s*/, ": ");
+  });
+
+  return parts.join(" | ");
+}
+
+export function parseBanreservasPersonasTransactionRows(
+  rows: readonly BanreservasPersonasTransaction[],
+  options: BanreservasPersonasParseOptions = {},
+): BankMovement[] {
+  return rows.map((row) => {
+    const postedAt = parseBanreservasPersonasDate(row.date);
+
+    // Debit and credit are separate columns — exactly one must be populated.
+    const debitText = row.debit.trim();
+    const creditText = row.credit.trim();
+
+    let amount: number;
+    let direction: TransactionDirection;
+
+    if (debitText && creditText) {
+      throw new Error(
+        `Banreservas Personas parser: ambiguous amount — both debit ("${debitText}") and credit ("${creditText}") are populated`,
+      );
+    }
+
+    if (!debitText && !creditText) {
+      throw new Error(
+        "Banreservas Personas parser: missing amount — both debit and credit columns are empty",
+      );
+    }
+
+    if (debitText) {
+      const parsed = parseBanreservasPersonasAmount(debitText);
+      // Sign/column mismatch: positive amount in debit column is invalid.
+      if (parsed.direction !== "debit") {
+        throw new Error(
+          `Banreservas Personas parser: sign/column mismatch — debit column contains positive amount "${debitText}"`,
+        );
+      }
+      amount = parsed.value;
+      direction = parsed.direction;
+    } else {
+      const parsed = parseBanreservasPersonasAmount(creditText);
+      // Sign/column mismatch: negative amount in credit column is invalid.
+      if (parsed.direction !== "credit") {
+        throw new Error(
+          `Banreservas Personas parser: sign/column mismatch — credit column contains negative amount "${creditText}"`,
+        );
+      }
+      amount = parsed.value;
+      direction = parsed.direction;
+    }
+
+    return {
+      bankId: options.bankId ?? banreservasPersonasBankCode,
+      accountFingerprint: options.accountFingerprint ?? banreservasPersonasScraperProfile.accountFingerprint,
+      postedAt,
+      amount: Math.abs(amount).toFixed(2),
+      currency: options.currency ?? "DOP",
+      direction,
+      reference: parseBanreservasPersonasReference(row.reference),
+      concept: normalizeText(row.description),
+      originator: null,
+      metadata: null,
+    };
+  });
 }
 
 // ── Adapter factories + stubs ────────────────────────────────────────────

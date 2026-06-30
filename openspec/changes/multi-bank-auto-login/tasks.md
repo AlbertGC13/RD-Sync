@@ -184,6 +184,16 @@ Session checker remains fail-safe (returns `expired`).
 - [x] 5.5a-tests TDD: `bhd.test.ts` — 30 new tests (36 total) covering date parsing (happy + impossible calendar/error), amount parsing (RD$ prefix, empty/malformed), transaction row parsing (fixture round-trip, confirmation→reference, no balance leakage, custom overrides, malformed rejection, debit/credit exclusivity, optional field normalization).
 - Gate: targeted BHD tests + fixture tests; <=400 changed lines; session checker remains fail-safe; no auto-login enablement.
 
+### PR5D: Banreservas Personas read-only DOM extraction (parser) [COMPLETE]
+
+**SCOPE:** Add pure transaction parsing functions for Banreservas Personas
+DOM/table-like fixtures. This is NOT auto-login. Session checker remains
+fail-safe (returns `expired`).
+
+- [x] 5.6a Add `parseBanreservasPersonasDate`, `parseBanreservasPersonasAmount`, `parseBanreservasPersonasTransactionRows` to `src/modules/bank-adapters/banreservas.ts`: pure helpers that parse Banreservas Personas DD/MM/YYYY dates, raw amounts (no RD$ prefix, negative for debits), and fixture rows into normalized `BankMovement` objects matching the adapter contract.
+- [x] 5.6a-tests TDD: `banreservas.test.ts` — 32 new tests (52 total) covering date parsing (happy + impossible calendar/error), amount parsing (raw format, empty/malformed, negative debits), transaction row parsing (fixture round-trip, pipe-separated reference normalization, no balance leakage, custom overrides, malformed rejection, debit/credit exclusivity, optional field normalization, absolute amount output).
+- Gate: targeted Banreservas tests + fixture tests; <=400 changed lines; session checker remains fail-safe; no auto-login enablement.
+
 ## PR6: Banreservas/BHD auto-login enablement
 
 - [ ] 6.1 Implement banreservas/bhd `createAutoLoginStrategy` (username/password-only; safe fallback->`needs_admin_action` on corporate/token/incompatible flow).
