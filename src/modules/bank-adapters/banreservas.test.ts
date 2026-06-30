@@ -12,8 +12,12 @@ import {
   banreservasPersonasPortalConfig,
   banreservasEmpresasPortalConfig,
   createBanreservasAutoLoginStrategy,
+  parseBanreservasPersonasDate,
+  parseBanreservasPersonasAmount,
+  parseBanreservasPersonasTransactionRows,
 } from "./banreservas";
 import { createBankAdapterRegistry } from "./registry";
+import { banreservasPersonasTransactions } from "./fixtures/banreservas-personas";
 
 describe("Banreservas adapter identity + portal variant disambiguation", () => {
   it("distinct portal-specific bank codes; group code for display", () => {
@@ -196,7 +200,6 @@ describe("Banreservas portal configs", () => {
 describe("Banreservas skeletons — no registration assumptions", () => {
   it("distinct bankCodes enable future registry registration without Map overwrite", () => {
     const registry = createBankAdapterRegistry([banreservasPersonasAdapter, banreservasEmpresasAdapter], {});
-
     expect(registry.get("banreservas_personas")).toBe(banreservasPersonasAdapter);
     expect(registry.get("banreservas_empresas")).toBe(banreservasEmpresasAdapter);
     expect(registry.get("banreservas")).toBeUndefined();
@@ -207,5 +210,211 @@ describe("Banreservas skeletons — no registration assumptions", () => {
     expect(banreservasBankGroupCode).toBe("banreservas");
     expect(banreservasBankGroupCode).not.toBe(banreservasPersonasAdapter.bankCode);
     expect(banreservasBankGroupCode).not.toBe(banreservasEmpresasAdapter.bankCode);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseBanreservasPersonasDate — DD/MM/YYYY → ISO 8601 with Santo Domingo offset
+// ---------------------------------------------------------------------------
+
+describe("parseBanreservasPersonasDate", () => {
+  it("parses DD/MM/YYYY to ISO 8601 with -04:00 offset", () => {
+    expect(parseBanreservasPersonasDate("29/06/2026")).toBe("2026-06-29T00:00:00-04:00");
+  });
+
+  it("parses zero-padded day and month", () => {
+    expect(parseBanreservasPersonasDate("01/01/2025")).toBe("2025-01-01T00:00:00-04:00");
+  });
+
+  it("parses 31/12/2024 year boundary", () => {
+    expect(parseBanreservasPersonasDate("31/12/2024")).toBe("2024-12-31T00:00:00-04:00");
+  });
+
+  it.each([
+    ["2026-06-29", "non-DD/MM/YYYY format (ISO)"],
+    ["29/06/26", "short year (DD/MM/YY)"],
+    ["", "empty string"],
+    ["29/13/2026", "impossible month 13"],
+    ["32/06/2026", "impossible day 32"],
+    ["31/04/2026", "day 31 for 30-day month (April)"],
+    ["30/02/2026", "Feb 30"],
+    ["29/02/2025", "Feb 29 in non-leap year"],
+  ])("throws on %s (%s)", (input) => {
+    expect(() => parseBanreservasPersonasDate(input)).toThrow("Invalid Banreservas Personas date format");
+  });
+
+  it("accepts Feb 29 in leap year 2024", () => {
+    expect(parseBanreservasPersonasDate("29/02/2024")).toBe("2024-02-29T00:00:00-04:00");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseBanreservasPersonasAmount — "44,000.00" or "-5,000.00" → { value, direction }
+// ---------------------------------------------------------------------------
+
+describe("parseBanreservasPersonasAmount", () => {
+  it("parses positive credit amount", () => {
+    const r = parseBanreservasPersonasAmount("44,000.00");
+    expect(r.value).toBe(44000);
+    expect(r.direction).toBe("credit");
+  });
+
+  it("parses negative debit amount", () => {
+    const r = parseBanreservasPersonasAmount("-5,000.00");
+    expect(r.value).toBe(-5000);
+    expect(r.direction).toBe("debit");
+  });
+
+  it("parses zero amount as credit", () => {
+    const r = parseBanreservasPersonasAmount("0.00");
+    expect(r.value).toBe(0);
+    expect(r.direction).toBe("credit");
+  });
+
+  it("parses amount without thousands separator", () => {
+    const r = parseBanreservasPersonasAmount("1234.56");
+    expect(r.value).toBeCloseTo(1234.56);
+    expect(r.direction).toBe("credit");
+  });
+
+  it("parses large grouped amount (1,234,567.89)", () => {
+    const r = parseBanreservasPersonasAmount("1,234,567.89");
+    expect(r.value).toBe(1234567.89);
+    expect(r.direction).toBe("credit");
+  });
+
+  it.each([
+    ["44,00.00", "malformed grouping (2-digit group)"],
+    ["4,4,000.00", "malformed grouping (extra comma)"],
+    [",100.00", "leading comma"],
+    ["100,.00", "trailing comma before decimal"],
+    ["1,23.456", "non-standard group size"],
+  ])("rejects malformed comma grouping: %s (%s)", (input) => {
+    expect(() => parseBanreservasPersonasAmount(input)).toThrow("Invalid Banreservas Personas amount format");
+  });
+
+  it.each([
+    ["abc", "non-numeric"],
+    ["", "empty string"],
+    ["--5000", "double negative"],
+  ])("throws on %s (%s)", (input) => {
+    expect(() => parseBanreservasPersonasAmount(input)).toThrow("Invalid Banreservas Personas amount format");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseBanreservasPersonasTransactionRows — fixture round-trip → BankMovement[]
+// ---------------------------------------------------------------------------
+
+describe("parseBanreservasPersonasTransactionRows", () => {
+  it("parses fixture transactions into BankMovement objects", () => {
+    const movements = parseBanreservasPersonasTransactionRows(banreservasPersonasTransactions);
+    expect(movements).toHaveLength(2);
+
+    expect(movements[0]).toMatchObject({
+      bankId: "banreservas_personas",
+      accountFingerprint: "banreservas-XXXXXXXXXX",
+      postedAt: "2026-06-29T00:00:00-04:00",
+      amount: "44000.00",
+      currency: "DOP",
+      direction: "credit",
+      concept: "TRANSFERENCIA RECIBIDA",
+    });
+    expect(movements[0].reference).toBe("Nro. transacción: 408900123456 | Número de referencia: 408900123");
+
+    expect(movements[1]).toMatchObject({
+      bankId: "banreservas_personas",
+      accountFingerprint: "banreservas-XXXXXXXXXX",
+      postedAt: "2026-06-28T00:00:00-04:00",
+      amount: "5000.00",
+      currency: "DOP",
+      direction: "debit",
+      concept: "TRANSFERENCIA A COMERCIO DEMO",
+    });
+    expect(movements[1].reference).toBe("Nro. transacción: 408900234567 | Número de referencia: 408900234");
+  });
+
+  it("returns empty array for empty input", () => {
+    expect(parseBanreservasPersonasTransactionRows([])).toEqual([]);
+  });
+
+  it("accepts custom bankId and accountFingerprint overrides", () => {
+    const movements = parseBanreservasPersonasTransactionRows(banreservasPersonasTransactions, {
+      bankId: "banreservas-custom",
+      accountFingerprint: "banreservas-custom-fp",
+    });
+    expect(movements[0].bankId).toBe("banreservas-custom");
+    expect(movements[0].accountFingerprint).toBe("banreservas-custom-fp");
+  });
+
+  it("rejects malformed dates in transaction rows", () => {
+    expect(() =>
+      parseBanreservasPersonasTransactionRows([{ ...banreservasPersonasTransactions[0], date: "2026-06-29" }]),
+    ).toThrow("Invalid Banreservas Personas date format");
+  });
+
+  it("rejects malformed amounts in transaction rows", () => {
+    expect(() =>
+      parseBanreservasPersonasTransactionRows([
+        { ...banreservasPersonasTransactions[0], debit: "abc", credit: "" },
+      ]),
+    ).toThrow("Invalid Banreservas Personas amount format");
+  });
+
+  it("rejects malformed comma grouping in transaction rows", () => {
+    expect(() =>
+      parseBanreservasPersonasTransactionRows([
+        { ...banreservasPersonasTransactions[0], debit: "", credit: "44,00.00" },
+      ]),
+    ).toThrow("Invalid Banreservas Personas amount format");
+  });
+
+  it("rejects row where both debit and credit are populated", () => {
+    expect(() =>
+      parseBanreservasPersonasTransactionRows([
+        { ...banreservasPersonasTransactions[0], debit: "-5,000.00", credit: "44,000.00" },
+      ]),
+    ).toThrow("ambiguous");
+  });
+
+  it("rejects row where both debit and credit are empty", () => {
+    expect(() =>
+      parseBanreservasPersonasTransactionRows([
+        { ...banreservasPersonasTransactions[0], debit: "", credit: "" },
+      ]),
+    ).toThrow("missing");
+  });
+
+  it("rejects debit column with positive amount (sign/column mismatch)", () => {
+    expect(() =>
+      parseBanreservasPersonasTransactionRows([
+        { ...banreservasPersonasTransactions[0], debit: "5,000.00", credit: "" },
+      ]),
+    ).toThrow("sign/column mismatch");
+  });
+
+  it("rejects credit column with negative amount (sign/column mismatch)", () => {
+    expect(() =>
+      parseBanreservasPersonasTransactionRows([
+        { ...banreservasPersonasTransactions[0], debit: "", credit: "-1,000.00" },
+      ]),
+    ).toThrow("sign/column mismatch");
+  });
+
+  it("normalizes whitespace-only reference to null", () => {
+    const movements = parseBanreservasPersonasTransactionRows([
+      { ...banreservasPersonasTransactions[0], reference: "   " },
+    ]);
+    expect(movements[0].reference).toBeNull();
+  });
+
+  it("trims whitespace from reference", () => {
+    const movements = parseBanreservasPersonasTransactionRows([
+      {
+        ...banreservasPersonasTransactions[0],
+        reference: "  # Nro. transacción : 408900123456 | Número de referencia : 408900123  ",
+      },
+    ]);
+    expect(movements[0].reference).toBe("Nro. transacción: 408900123456 | Número de referencia: 408900123");
   });
 });
