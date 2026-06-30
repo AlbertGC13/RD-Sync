@@ -52,7 +52,7 @@ const runs: AdminScrapeRun[] = [
   },
   {
     id: "run-2",
-    bankId: "banreservas",
+    bankId: "banreservas_personas",
     status: "succeeded",
     startedAt: "2026-06-07T12:00:00.000Z",
     endedAt: "2026-06-07T12:02:00.000Z",

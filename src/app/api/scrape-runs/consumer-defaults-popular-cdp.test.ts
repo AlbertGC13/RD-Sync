@@ -270,4 +270,39 @@ describe("resolveDefaultScraper — bankCode registry routing", () => {
     const scraper = resolveDefaultScraper("popular");
     expect(typeof scraper.collect).toBe("function");
   });
+
+  it("routes 'bhd' to the BHD adapter scraper (not Popular)", async () => {
+    // DEV_PREVIEW is enabled so a Popular fallback would return `collected`.
+    // The BHD adapter returns needs_admin_action with its own safeErrorSummary.
+    process.env.RD_SYNC_DEV_PREVIEW = "enabled";
+
+    const scraper = resolveDefaultScraper("bhd");
+    const result = await scraper.collect();
+
+    expect(result.status).toBe("needs_admin_action");
+    expect(result.safeErrorSummary).toBe("BHD Personal adapter is a skeleton");
+    expect(result.movements).toEqual([]);
+  });
+
+  it("routes 'banreservas_personas' to the Banreservas Personas adapter scraper (not Popular)", async () => {
+    process.env.RD_SYNC_DEV_PREVIEW = "enabled";
+
+    const scraper = resolveDefaultScraper("banreservas_personas");
+    const result = await scraper.collect();
+
+    expect(result.status).toBe("needs_admin_action");
+    expect(result.safeErrorSummary).toBe("Banreservas Personas adapter is a skeleton");
+    expect(result.movements).toEqual([]);
+  });
+
+  it("routes 'banreservas_empresas' to the Banreservas Empresas adapter scraper (not Popular)", async () => {
+    process.env.RD_SYNC_DEV_PREVIEW = "enabled";
+
+    const scraper = resolveDefaultScraper("banreservas_empresas");
+    const result = await scraper.collect();
+
+    expect(result.status).toBe("needs_admin_action");
+    expect(result.safeErrorSummary).toBe("Banreservas Empresas adapter is a skeleton");
+    expect(result.movements).toEqual([]);
+  });
 });

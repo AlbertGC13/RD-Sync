@@ -31,6 +31,11 @@ import {
   popularBankCode,
   popularPortalFixture,
 } from "./popular";
+import { bhdPersonalAdapter } from "./bhd";
+import {
+  banreservasPersonasAdapter,
+  banreservasEmpresasAdapter,
+} from "./banreservas";
 
 /**
  * Placeholder for the auto-login strategy contract. PR4 fleshes this out into
@@ -226,12 +231,16 @@ const popularAdapter: BankAdapter = createPopularBankAdapter({
 });
 
 /**
- * Default bank adapter registry. PR1 registers only Popular; Banreservas and
- * BHD adapters are added in PR5. Routing and run-now validation resolve
- * through this instance so an explicit unknown `bankCode` fails closed.
+ * Default bank adapter registry. PR5.2 registers Popular, BHD Personal,
+ * Banreservas Personas, and Banreservas Empresas. Routing and run-now
+ * validation resolve through this instance so an explicit unknown
+ * `bankCode` fails closed.
  */
 export const bankAdapterRegistry: BankAdapterRegistry = createBankAdapterRegistry([
   popularAdapter,
+  bhdPersonalAdapter,
+  banreservasPersonasAdapter,
+  banreservasEmpresasAdapter,
 ]);
 
 // Re-export the canonical Popular code alongside the registry for convenience.

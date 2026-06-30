@@ -229,8 +229,14 @@ describe("scrapeRunStatusLabel / bankDisplayName — label maps", () => {
 
   it("maps every supported bankId to its display name (no raw id leakage)", () => {
     expect(bankDisplayName("popular")).toBe("Banco Popular");
-    expect(bankDisplayName("banreservas")).toBe("Banreservas");
     expect(bankDisplayName("bhd")).toBe("BHD");
+    expect(bankDisplayName("banreservas_personas")).toBe("Banreservas Personas");
+    expect(bankDisplayName("banreservas_empresas")).toBe("Banreservas Empresas");
+  });
+
+  it("never exposes raw underscored codes to the operator UI", () => {
+    expect(bankDisplayName("banreservas_personas")).not.toContain("_");
+    expect(bankDisplayName("banreservas_empresas")).not.toContain("_");
   });
 
   it("falls back to the raw bankId when no display name is registered (defensive)", () => {

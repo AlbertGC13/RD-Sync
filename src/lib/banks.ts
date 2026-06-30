@@ -32,9 +32,15 @@ export const BANKS: Record<string, BankMeta> = {
     color: "#54AD4D",
     logoSrc: "/banks/bhd.svg",
   },
-  banreservas: {
-    id: "banreservas",
-    name: "Banreservas",
+  banreservas_personas: {
+    id: "banreservas_personas",
+    name: "Banreservas Personas",
+    color: "#264E72",
+    logoSrc: "/banks/banreservas.svg",
+  },
+  banreservas_empresas: {
+    id: "banreservas_empresas",
+    name: "Banreservas Empresas",
     color: "#264E72",
     logoSrc: "/banks/banreservas.svg",
   },
@@ -64,12 +70,18 @@ export function getBankMeta(bankId: string): BankMeta {
  * `src/modules/bank-adapters/registry.ts` (and implementing the scraper
  * profile).
  */
-export const SUPPORTED_RUN_NOW_BANK_CODES = ["popular"] as const;
+export const SUPPORTED_RUN_NOW_BANK_CODES = [
+  "popular",
+  "bhd",
+  "banreservas_personas",
+  "banreservas_empresas",
+] as const;
 export type SupportedRunNowBankCode = (typeof SUPPORTED_RUN_NOW_BANK_CODES)[number];
 
 /**
  * Bank the page-level "Run now" trigger targets when no card is selected.
- * Falls back to the only scraper currently shipping.
+ * Multiple banks are now supported for manual runs; this remains the default
+ * when the UI has no card-level bank context.
  */
 export const DEFAULT_RUN_NOW_BANK_CODE: SupportedRunNowBankCode = "popular";
 
