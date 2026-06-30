@@ -112,11 +112,31 @@ Gate: full gates + FRESH 4R review + Judgment Day before merge; PR3B1 <=400 line
 - [x] 5A.6 Create `src/modules/bank-adapters/fixtures/__tests__/bank-transaction-fixtures.test.ts`: 36 tests — fixture loadability, field completeness, date formats, amount formats, credit/debit coverage, PII sanitization, RNC/IBAN/account number detection, no secrets.
 - Gate: pnpm test (36 pass) + pnpm typecheck + pnpm lint clean; 398 changed lines (under 400 budget).
 
-### PR5B: Read-only adapters + parsers (NEXT)
+### PR5B1: BHD Personal read-only adapter skeleton (COMPLETE — slice 1)
 
-- [ ] 5.1 Create `src/modules/bank-adapters/banreservas.ts` + `bhd.ts`: read-only `createScraper`+`createSessionChecker`+pure parsers; `createAutoLoginStrategy` stub (not enabled); portal configs from recon (open Q).
-- [ ] 5.2 Register banreservas/bhd in registry; add to `SUPPORTED_RUN_NOW_BANK_CODES` for read-only run-now (auto-login still gated off).
-- [ ] 5.3 Expand `src/worker/scraper/auto-login.portal-drift.test.ts`: Banreservas+BHD pre-submit incompatible-flow fixtures (assert NO fill/submit) + post-submit unknown-flow fixtures.
+- [x] 5.1a Create `src/modules/bank-adapters/bhd.ts`: BHD Personal skeleton with scraper profile/selectors, portal config from recon, `createScraper`/`createSessionChecker` stubs, `createAutoLoginStrategy` stub (not enabled). Profile fields preserve core recon handoff facts for PR5C/D/E (accountFingerprint, loginStrategy, routes, navigation selectors, transaction table selectors, column mapping, amount formats). Stub session checker returns `expired` (fail-safe) until real CDP checker exists in PR5C/D/E.
+- [x] 5.1a-tests Tests: `bhd.test.ts` — identity (bankCode=bhd, portalVariant=personal), auto-login throws, stub scraper returns `needs_admin_action` with exact `safeErrorSummary`, stub session checker returns `expired` with exact `safeSummary`, full profile field assertions (selectors, column mapping, formats, pagination), portal config assertions (baseUrl, CDP env, login allowlist).
+- Gate: full gates; <=400 changed lines; NO auto-login enablement; NO registration in registry.
+
+### PR5B2: Banreservas Personas/Empresas read-only adapter skeletons (DEFERRED — slice 2)
+
+**IDENTITY NOTE — Banreservas Personas vs Empresas:** Both variants share
+`bankCode: "banreservas"` but are TWO completely different tech stacks (Angular
+SPA vs ASP.NET WebForms frameset). The current bankCode-keyed registry maps one
+bankCode → one adapter. Personas and Empresas cannot both be registered directly
+without either: (a) a single Banreservas entry with portalVariant routing, or
+(b) evolving the registry to support portalVariant-keyed resolution. Neither
+registration happens in PR5B2 — skeletons only. Registration is deferred to
+PR5.2 or later when the registry routing strategy is decided.
+
+- [ ] 5.1b Create `src/modules/bank-adapters/banreservas.ts`: Banreservas Personas + Empresas skeletons with scraper profiles/selectors, portal configs from recon, `createScraper`/`createSessionChecker` stubs, `createAutoLoginStrategy` stubs (not enabled). Profile fields preserve core recon handoff facts for PR5C/D/E.
+- [ ] 5.1b-tests Tests: `banreservas.test.ts` — shared bankCode, portalVariant differentiation, date format/pagination/inputStrategy divergence, stub scrapers return `needs_admin_action` with exact `safeErrorSummary`, stub session checkers return `expired` with exact `safeSummary`, full profile field assertions, portal config assertions.
+- Gate: full gates; <=400 changed lines; NO auto-login enablement.
+
+### PR5B shared deferred tasks (after PR5B2)
+
+- [ ] 5.2 Register banreservas/bhd in registry; add to `SUPPORTED_RUN_NOW_BANK_CODES` for read-only run-now (deferred to keep PR5B slices skeleton-only).
+- [ ] 5.3 Expand `src/worker/scraper/auto-login.portal-drift.test.ts`: Banreservas+BHD pre-submit incompatible-flow fixtures (assert NO fill/submit) + post-submit unknown-flow fixtures. **BLOCKED**: file belongs to PR4 (auto-login infrastructure); deferred.
 - [ ] 5.4 Tests: route by banreservas/bhd bankCode; read-only scrape parity; unknown fails closed ("Este banco aún no está disponible para actualización automática"); portal-drift incompatible pre-submit blocks fill; per-bank adapter kill switch.
 - Gate: full gates; <=400 lines; NO auto-login enablement.
 
