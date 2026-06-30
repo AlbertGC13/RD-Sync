@@ -60,6 +60,7 @@ function snapshot(
 
 const SUSTAIN_MS = 5 * 60_000;
 const OVER = snapshot(2, 5, 2, 0); // queueDepth 5 > 2*max(2)=4
+const AT_THRESHOLD = snapshot(2, 4, 2, 0); // queueDepth 4 === 2*max(2)
 
 function baseDeps(
   overrides: Partial<BrowserCapacityMonitorDeps> = {},
@@ -93,6 +94,23 @@ describe("createBrowserCapacityMonitor — normal / not-yet-sustained", () => {
 
     expect(state.status).toBe("normal");
     expect(calls).toHaveLength(0);
+  });
+
+  it("does not alert at the exact threshold boundary after the sustain window", async () => {
+    const { clock, advance } = makeFakeClock(0);
+    const { alertSink, calls } = makeAlertSink();
+    const { auditSink, events } = makeAuditSink();
+    const monitor = createBrowserCapacityMonitor(
+      baseDeps({ sample: makeSampleQueue([AT_THRESHOLD]), alertSink, auditSink, clock }),
+    );
+
+    await monitor.tick();
+    advance(SUSTAIN_MS);
+    const state = await monitor.tick();
+
+    expect(state.status).toBe("normal");
+    expect(calls).toHaveLength(0);
+    expect(events).toHaveLength(0);
   });
 
   it("never reports over_capacity when max is 0 (no NaN/Infinity from the multiplier math)", async () => {
@@ -172,6 +190,24 @@ describe("createBrowserCapacityMonitor — recovery", () => {
 
     await monitor.tick(); // further normal tick must not re-alert recovery
     expect(calls).toHaveLength(2);
+  });
+
+  it("treats the exact threshold boundary as recovery after over_capacity", async () => {
+    const { clock, advance } = makeFakeClock(0);
+    const { alertSink, calls } = makeAlertSink();
+    const { auditSink, events } = makeAuditSink();
+    const monitor = createBrowserCapacityMonitor(
+      baseDeps({ sample: makeSampleQueue([OVER, OVER, AT_THRESHOLD]), alertSink, auditSink, clock }),
+    );
+
+    await monitor.tick();
+    advance(SUSTAIN_MS);
+    await monitor.tick();
+    advance(1000);
+
+    expect((await monitor.tick()).status).toBe("recovered");
+    expect(calls[1]).toMatchObject({ status: "recovered", queueDepth: 4, max: 2 });
+    expect(events[1].action).toBe("bank_browser_capacity.recovered");
   });
 });
 
