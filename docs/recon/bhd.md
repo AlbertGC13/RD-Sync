@@ -24,7 +24,7 @@
 | **Personal post-login mapped** | Dashboard → account card → product-detail → "Ver estados y movimientos" → PrimeNG datatable |
 | Transactions are a clean PrimeNG `p-datatable` | Positional `<td>` columns; far easier to scrape than Banreservas' nested divs |
 | Date range = typed PrimeNG datepicker inputs | `placeholder="Fecha inicio"/"Fecha final"`, `DD/MM/YYYY` — no day-cell clicking needed |
-| Export "Descargar movimientos" | PDF / EXCEL / TXT — EXCEL/TXT preferred for extraction |
+| Export "Descargar movimientos" | PDF / EXCEL / TXT — FALLBACK only; primary path is direct DOM table read |
 
 ---
 
@@ -250,7 +250,9 @@ Selecting `Rango de fecha` replaces the period dropdown with two **PrimeNG datep
 
 ### 4.6 Pagination
 
-The table is a **PrimeNG scrollable datatable** (`p-datatable-scrollable`). Movements load into a single scrollable body (`p-datatable-scrollable-table`); ~40 rows were present for "Último mes". Scrolling the table body reveals more rows (virtual/lazy scroll) rather than discrete pages. Adapter strategy: scroll the table body to the bottom and collect rows until no new rows appear, OR use the export (more reliable — see §4.7).
+The table is a **PrimeNG scrollable datatable** (`p-datatable-scrollable`). Movements load into a single scrollable body (`p-datatable-scrollable-table`); ~40 rows were present for "Último mes". Scrolling the table body reveals more rows (virtual/lazy scroll) rather than discrete pages.
+
+**Primary adapter strategy (direct DOM read — same model as `popular.ts`):** set the date range, then scroll the table body to the bottom and collect `tr.body-responsive` rows until no new rows append (row count stabilizes). This is the hot path — fast, no file handling. The export (§4.7) is a fallback only.
 
 ### 4.7 Export Options
 
@@ -260,7 +262,7 @@ The table is a **PrimeNG scrollable datatable** (`p-datatable-scrollable`). Move
 | Descargar estados de cuenta | `button.bhd-btn-primary` (split/dropdown) | Account statements (PDF) |
 | Print | printer icon button | Browser print |
 
-> **EXCEL** or **TXT** of "Descargar movimientos" is the preferred extraction path (structured, complete — avoids scroll-pagination). Selecting a format triggers a **download** → out of scope for read-only recon; NOT exercised. Menu items are `a.p-menu-item-link` matched by text (PDF / EXCEL / TXT); the `li.p-menu-item` `ng-tns-c...` class is dynamic — match on link text.
+> **Export is a FALLBACK, not the primary path.** RD-Sync reads the rendered table directly (faster, no file handling, no download permission needed) — see §4.8. Export (EXCEL/TXT/PDF) is kept documented for: (a) recovery if the DOM structure changes and scraping breaks, (b) periodic reconciliation/audit against the scraped data, (c) one-time backfill of deep history beyond what the UI lazy-loads comfortably. Selecting a format triggers a **download** (a permission-required action) and PDF/Excel need binary parsing → extra reasons it is not the hot path. Menu items are `a.p-menu-item-link` matched by text (PDF / EXCEL / TXT); the `li.p-menu-item` `ng-tns-c...` class is dynamic — match on link text. NOT exercised during recon.
 
 ### 4.8 Transaction Table Selectors
 
@@ -395,7 +397,7 @@ export const bhdPersonalScraperProfile = {
     transactionRow:   "tr.body-responsive",
     // columns: 0=Fecha 1=Nº confirmación 2=Descripción 3=Comprobante 4=Débitos 5=Créditos 6=Balance
 
-    // --- Export (preferred extraction path) ---
+    // --- Export (FALLBACK only — primary path is direct table read above) ---
     exportMovementsButton: "button.p-button-outlined.bhd-btn-default", // "Descargar movimientos"
     exportFormatItem:      "a.p-menu-item-link", // match text: PDF / EXCEL / TXT
   },

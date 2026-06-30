@@ -269,7 +269,9 @@ Filters the already-loaded rows client-side; does not re-query the server.
 
 | Mechanism | Selector | Notes |
 |-----------|----------|-------|
-| Lazy "ver más" | `div.florida_wrapper_loader_default` (contains `span.florida_wrapper_loader_default_description` = "ver más") | Loads the next batch of movements in place; infinite-scroll style. Adapter loops: click "ver más" → wait → repeat until it disappears |
+| Lazy "ver más" | `div.florida_wrapper_loader_default` (contains `span.florida_wrapper_loader_default_description` = "ver más") | Loads the next batch of movements in place; infinite-scroll style |
+
+**Primary read strategy (direct DOM, the hot path):** select the period, then loop — click "ver más" → wait for new `div.rivera_row` to append → repeat until the "ver más" control disappears (all rows loaded), then read the full row set. This is THE extraction path; export (§3.8) is a fallback only.
 
 ### 3.8 Export Options
 
@@ -278,7 +280,7 @@ Filters the already-loaded rows client-side; does not re-query the server.
 | Export trigger | `a.ankara` (icon `i.stream-ext.stream-ext-export`, top-right) | Opens "Exportar archivo" dialog |
 | Format options | `a.oldham-panel-link` + `span.oldham-panel-title-text` | **PDF**, **Excel**, **CSV** available |
 
-> Selecting a format triggers a file **download** → out of scope for read-only recon. CSV is the preferred target for the adapter (structured, parseable). NOT exercised during recon.
+> **Export is a FALLBACK, not the primary path.** The adapter reads the rendered movements list directly (`div.rivera_row`, §3.9) — faster and no file handling. Export (PDF/Excel/CSV) is kept for recovery if the DOM changes, reconciliation/audit, or deep-history backfill. Selecting a format triggers a file **download** (a permission-required action) → out of scope for read-only recon; NOT exercised.
 
 ### 3.9 Transaction Table Selectors
 
@@ -533,6 +535,8 @@ Default.aspx (frameset)
 
 - ~40 rows returned for the default period. DevExpress grid supports column-sort by clicking headers and built-in paging.
 
+**Primary read strategy (direct DOM, the hot path):** set a wide `Desde/Hasta` range covering the target window → click `Consultar` → the grid re-renders server-side. Then read all `tr[id*='_DXDataRow']` rows. If the DevExpress grid paginates (caps visible rows per page), the adapter must advance the grid pager and read each page until exhausted — **CONFIRM the paging cap** (open question §10). A narrow date window keeps the result within one page and sidesteps paging entirely. Export (§9.6) is a fallback only.
+
 ### 9.6 Export Options
 
 Export menu (toggle `button#toggle`) exposes three formats, each a stable server-control link:
@@ -543,7 +547,7 @@ Export menu (toggle `button#toggle`) exposes three formats, each a stable server
 | **CSV** | `a#ctl00_MainHolder_AccountTransactionGrid_linkButtonCSV` |
 | **Excel** | `a#ctl00_MainHolder_AccountTransactionGrid_linkButton2` |
 
-> **CSV** is the cleanest extraction target. Each fires an ASP.NET `__doPostBack` → file download (out of scope for read-only recon; NOT exercised). Also "Estado de cuenta" menu → `AccountStatusPDF.aspx` for full statements.
+> **Export is a FALLBACK, not the primary path.** The adapter reads the DevExpress grid rows directly (§9.5) — faster, no file handling. Export (CSV cleanest, then Excel/PDF) is kept for recovery if the grid markup changes, reconciliation/audit, or deep-history backfill. Each fires an ASP.NET `__doPostBack` → file download (a permission-required action; out of scope for read-only recon; NOT exercised). Also "Estado de cuenta" menu → `AccountStatusPDF.aspx` for full statements.
 
 ### 9.7 Empresas Scraper Profile (draft)
 
