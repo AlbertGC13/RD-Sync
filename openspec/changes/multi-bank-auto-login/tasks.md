@@ -194,6 +194,23 @@ fail-safe (returns `expired`).
 - [x] 5.6a-tests TDD: `banreservas.test.ts` — 32 new tests (52 total) covering date parsing (happy + impossible calendar/error), amount parsing (raw format, empty/malformed, negative debits), transaction row parsing (fixture round-trip, pipe-separated reference normalization, no balance leakage, custom overrides, malformed rejection, debit/credit exclusivity, optional field normalization, absolute amount output).
 - Gate: targeted Banreservas tests + fixture tests; <=400 changed lines; session checker remains fail-safe; no auto-login enablement.
 
+### PR5E: Banreservas Empresas read-only DOM extraction (parser) [COMPLETE]
+
+**SCOPE:** Add pure transaction parsing functions for Banreservas Empresas
+ASP.NET WebForms DevExpress grid fixtures. This is NOT auto-login. Session
+checker remains fail-safe (returns `expired`).
+
+**Key Empresas format differences from Personas:**
+- Date format: DD/MM/YY (2-digit year, assumes 2000+)
+- Amounts: Always positive; direction determined by column (debit/credit), not by sign
+- Balance: "DOP " prefixed but NOT leaked into output
+- Reference: `transactionNumber` field (plain ID, not pipe-separated)
+
+- [x] 5.7a Add `parseBanreservasEmpresasDate`, `parseBanreservasEmpresasAmount`, `parseBanreservasEmpresasTransactionRows` to `src/modules/bank-adapters/banreservas.ts`: pure helpers that parse Banreservas Empresas DD/MM/YY dates (2-digit year → 2000+), positive-only amounts (column-based debit/credit classification), and fixture rows into normalized `BankMovement` objects matching the adapter contract.
+- [x] 5.7a-tests TDD: `banreservas.test.ts` — 44 tests (99 total) covering date parsing (DD/MM/YY happy + impossible calendar/error + leap year), amount parsing (positive-only, comma grouping validation, negative rejection, >2 decimal precision rejection), transaction row parsing (fixture round-trip with amount format assertion, transactionNumber→reference, no balance leakage, ambiguous/missing amount rejection, sign/column mismatch, malformed inactive-zero column rejection, whitespace normalization).
+- [x] 5.7b Add `accountFingerprint` to `banreservasEmpresasScraperProfile` ("banreservas-empresas-XXXXXXXXXX") matching Personas pattern; add profile assertion in existing test.
+- Gate: targeted Banreservas tests (99 pass) + full suite (997 pass) + typecheck + lint; 400 changed lines (at budget); session checker remains fail-safe; no auto-login enablement.
+
 ## PR6: Banreservas/BHD auto-login enablement
 
 - [ ] 6.1 Implement banreservas/bhd `createAutoLoginStrategy` (username/password-only; safe fallback->`needs_admin_action` on corporate/token/incompatible flow).
