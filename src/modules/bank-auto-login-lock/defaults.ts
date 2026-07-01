@@ -8,12 +8,10 @@
  * Exported as a globalThis-cached singleton (`defaultAutoLoginLock`) following
  * the project's env-switch singleton pattern (see `src/app/api/scrape-runs/defaults.ts`).
  *
- * **Redis Cluster note:** Lock keys use the pattern
- * `autologin:lock:{bankCode}:{expiredEventId}` — all segments are lowercase
- * alphanumeric. The fence key appends `:fence`. In Redis Cluster these are
- * hash-slot safe because the bankCode segment already constrains routing.
- * Single-instance Redis is the current production topology; if Cluster is
- * adopted, wrap keys in `{bankCode}` hash tags for guaranteed co-location.
+ * **Redis topology:** RD-Sync currently uses a single Redis endpoint from
+ * `RD_SYNC_REDIS_URL`. Redis Cluster requires explicit hash tags so the lock
+ * key and its `:fence` key share the same hash slot. Do not use this default
+ * wiring with Redis Cluster until those keys are wrapped with a shared hash tag.
  *
  * **Security:** The ioredis connection URL is read from env only. No
  * credentials are logged, exposed in API responses, or persisted.
