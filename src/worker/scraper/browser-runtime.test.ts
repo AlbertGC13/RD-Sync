@@ -5,6 +5,8 @@ import {
   ensureCdpBrowser,
   createEnsureBrowserFromEnv,
   createEnsureBrowserForBank,
+  createAcquireBrowserSlotFromEnv,
+  getBrowserCapacitySnapshotFromEnv,
   assertCdpLoopback,
   resolveBankBrowserEnv,
   BrowserSemaphore,
@@ -602,5 +604,40 @@ describe("BrowserSemaphore", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getBrowserCapacitySnapshotFromEnv — samples the REAL shared semaphore
+// ---------------------------------------------------------------------------
+
+describe("getBrowserCapacitySnapshotFromEnv", () => {
+  it("reflects the live capacity and throttleCount of the shared singleton, not a fresh instance", async () => {
+    const env = {
+      RD_SYNC_BANK_BROWSER_MAX_CONCURRENCY: "1",
+      RD_SYNC_BANK_BROWSER_QUEUE_LIMIT: "0",
+    };
+
+    // Drive the same env-keyed singleton that createAcquireBrowserSlotFromEnv
+    // uses, so we can assert the snapshot reflects real, live state.
+    const acquire = createAcquireBrowserSlotFromEnv(env);
+
+    const before = getBrowserCapacitySnapshotFromEnv(env);
+    expect(before).toEqual({ active: 0, queueDepth: 0, max: 1, throttleCount: 0 });
+
+    const held = await acquire();
+    expect(held.kind).toBe("acquired");
+
+    const duringHold = getBrowserCapacitySnapshotFromEnv(env);
+    expect(duringHold.active).toBe(1);
+
+    // queueLimit=0 means the next acquire immediately throttles.
+    const throttled = await acquire();
+    expect(throttled.kind).toBe("throttled");
+
+    const afterThrottle = getBrowserCapacitySnapshotFromEnv(env);
+    expect(afterThrottle).toEqual({ active: 1, queueDepth: 0, max: 1, throttleCount: 1 });
+
+    if (held.kind === "acquired") await held.release();
   });
 });

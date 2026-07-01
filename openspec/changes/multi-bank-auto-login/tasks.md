@@ -53,7 +53,7 @@ Tracker branch `feature/multi-bank-auto-login` (base = current/main per repo con
 ## PR2B: Browser capacity/backpressure + metrics (deferred)
 
 - [x] 2B.1 Add and wire browser semaphore/backpressure into the production Popular CDP scraper path (`RD_SYNC_BANK_BROWSER_MAX_CONCURRENCY`, bounded queue, acquire timeout, safe throttled result, release in `finally`).
-- [ ] 2B.2 Capacity metrics exporter/alert wiring deferred; removed standalone test-only metrics scaffolding from PR2B rather than marking production metrics complete.
+- [x] 2B.2 Capacity metrics exporter/alert wiring: poll-based `BrowserCapacityMonitor` (`src/modules/observability/browser-capacity-monitor.ts`) samples the real shared `BrowserSemaphore` and alerts/audits via the existing `AdminAlertSink`/`AuditSink` (no Prometheus/statsd/external exporter — no metrics backend exists in this codebase, by explicit user decision). Capacity is reported host-wide, not per-bank, because the underlying semaphore is a process-global singleton shared across all banks.
 - [x] 2B.3 Add deterministic throttle/capacity tests for scraper backpressure. No HTTP 503/Retry-After surface is implemented in this worker-only slice.
 - [x] 2B.4 Keep Banreservas/BHD placeholder portal configs deferred to PR5; no production-looking placeholder selectors in PR2B unless real read-only adapters land.
 - Gate: full gates; <=400 changed-line target; no credential vault or auto-login logic.

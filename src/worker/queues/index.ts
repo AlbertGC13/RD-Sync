@@ -62,6 +62,19 @@ export interface AdminAlertSink {
     safeSummary: string;
     checkedAt: string;
   }): Promise<void>;
+  /**
+   * Optional so existing implementers/mocks keep compiling without changes.
+   * Payload is strictly numeric (+ status/checkedAt) — no bankId, since the
+   * underlying BrowserSemaphore is a host-wide, process-global singleton.
+   */
+  notifyCapacityAttention?(event: {
+    status: "over_capacity" | "recovered";
+    active: number;
+    queueDepth: number;
+    max: number;
+    throttleEventsInWindow: number;
+    checkedAt: string;
+  }): Promise<void>;
 }
 
 export interface IngestionProcessorDependencies {

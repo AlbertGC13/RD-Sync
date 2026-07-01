@@ -387,3 +387,68 @@ describe("createEmailAlertSink — notifySessionAttention: expired", () => {
     expect(messages[0].to).toBe("team@acme.com");
   });
 });
+
+// ---------------------------------------------------------------------------
+// notifyCapacityAttention — email shape
+// ---------------------------------------------------------------------------
+
+describe("createEmailAlertSink — notifyCapacityAttention", () => {
+  it("uses a 'warning' subject and includes only numeric fields + checkedAt for over_capacity", async () => {
+    const { transport, messages } = makeTransport();
+    const sink = createEmailAlertSink({ transport, recipient: "ops@example.com" });
+
+    await sink.notifyCapacityAttention!({
+      status: "over_capacity",
+      active: 2,
+      queueDepth: 9,
+      max: 2,
+      throttleEventsInWindow: 4,
+      checkedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].subject).toBe("[RD-Sync] Bank browser capacity warning");
+    const body = messages[0].text;
+    expect(body).toContain("2");
+    expect(body).toContain("9");
+    expect(body).toContain("4");
+    expect(body).toContain("2026-01-01T00:00:00.000Z");
+    expect(body).toContain("/admin/scrape-runs");
+  });
+
+  it("uses a 'recovered' subject for recovered status", async () => {
+    const { transport, messages } = makeTransport();
+    const sink = createEmailAlertSink({ transport, recipient: "ops@example.com" });
+
+    await sink.notifyCapacityAttention!({
+      status: "recovered",
+      active: 1,
+      queueDepth: 0,
+      max: 2,
+      throttleEventsInWindow: 0,
+      checkedAt: "2026-01-01T00:05:00.000Z",
+    });
+
+    expect(messages[0].subject).toBe("[RD-Sync] Bank browser capacity recovered");
+  });
+
+  it("does not throw when transport.send rejects", async () => {
+    const throwingTransport: EmailTransport = {
+      send: async () => {
+        throw new Error("SMTP down");
+      },
+    };
+    const sink = createEmailAlertSink({ transport: throwingTransport, recipient: "ops@example.com" });
+
+    await expect(
+      sink.notifyCapacityAttention!({
+        status: "over_capacity",
+        active: 2,
+        queueDepth: 9,
+        max: 2,
+        throttleEventsInWindow: 1,
+        checkedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    ).resolves.toBeUndefined();
+  });
+});
