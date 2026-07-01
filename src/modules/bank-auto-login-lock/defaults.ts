@@ -104,7 +104,8 @@ export function createAutoLoginLockFromEnv(
 }
 
 // ---------------------------------------------------------------------------
-// Lazy singleton — created once, cached for the process lifetime
+// Module-evaluation singleton — resolved once at import, cached for the
+// process lifetime.  The Redis socket itself stays lazy (lazyConnect: true).
 // ---------------------------------------------------------------------------
 
 function getOrCreateDefaultLock(): AutoLoginLock | null {
