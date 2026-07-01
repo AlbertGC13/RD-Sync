@@ -9,12 +9,13 @@
  * Exported as a globalThis-cached singleton (`defaultAutoLoginLock`) following
  * the project's env-switch singleton pattern (see `src/app/api/scrape-runs/defaults.ts`).
  *
- * **Laziness guarantee:** Two separate mechanisms keep startup cost zero:
- * 1. **Singleton resolution** — `getOrCreateDefaultLock()` is only called on
- *    first property access of `defaultAutoLoginLock`, not at module-import time.
- * 2. **Socket connection** — `lazyConnect: true` ensures ioredis does not open
- *    a TCP/TLS socket until the first `EVAL` command.  Even after the singleton
- *    is resolved, no Redis traffic occurs until the first lock operation.
+ * **Module evaluation:** `defaultAutoLoginLock` is resolved at module evaluation
+ * time (import).  When `RD_SYNC_REDIS_URL` is set, the singleton is non-null
+ * immediately — no lazy "first property access" gate exists.
+ *
+ * **Socket connection:** `lazyConnect: true` ensures ioredis does not open
+ * a TCP/TLS socket until the first `EVAL` command.  Even after the singleton
+ * is resolved, no Redis traffic occurs until the first lock operation.
  *
  * **Redis topology:** RD-Sync currently uses a single Redis endpoint from
  * `RD_SYNC_REDIS_URL`. Redis Cluster requires explicit hash tags so the lock
@@ -56,7 +57,9 @@ export function createAutoLoginLockFromEnv(
       host: string;
       port: number;
       password?: string;
-      maxRetriesPerRequest: null;
+      maxRetriesPerRequest: number;
+      connectTimeout: number;
+      commandTimeout: number;
       lazyConnect: true;
     }) => RedisEvalClient;
   },
@@ -66,15 +69,25 @@ export function createAutoLoginLockFromEnv(
 
   const connectionOpts = buildRedisConnectionOptions(redisUrl);
 
+  // Lock-specific options: override BullMQ's maxRetriesPerRequest:null so lock
+  // commands fail closed (bounded retries + timeout) rather than waiting
+  // indefinitely during a Redis outage.  lazyConnect keeps the socket deferred
+  // until the first EVAL command.
+  const lockConnectionOpts = {
+    ...connectionOpts,
+    maxRetriesPerRequest: 3 as const,
+    connectTimeout: 5_000,
+    commandTimeout: 5_000,
+    lazyConnect: true as const,
+  };
+
   let client: RedisEvalClient;
   if (options?.redisClientFactory) {
-    client = options.redisClientFactory({ ...connectionOpts, lazyConnect: true });
+    client = options.redisClientFactory(lockConnectionOpts);
   } else {
-    // lazyConnect defers the TCP/TLS handshake until the first command (EVAL).
-    // The singleton itself is also deferred — see getOrCreateDefaultLock().
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Redis = require("ioredis") as new (opts: typeof connectionOpts & { lazyConnect: true }) => RedisEvalClient;
-    client = new Redis({ ...connectionOpts, lazyConnect: true });
+    const Redis = require("ioredis") as new (opts: typeof lockConnectionOpts) => RedisEvalClient;
+    client = new Redis(lockConnectionOpts);
   }
 
   const store = new RedisLockStore({ client });
@@ -86,7 +99,13 @@ export function createAutoLoginLockFromEnv(
 // ---------------------------------------------------------------------------
 
 function getOrCreateDefaultLock(): AutoLoginLock | null {
-  if (globalRegistry.__rdSyncAutoLoginLock !== UNINITIALIZED) {
+  // Property-presence check: `undefined` (slot missing) must NOT be confused
+  // with `UNINITIALIZED` (sentinel for "not yet created").  Without the `in`
+  // guard, the first call always returned null because `undefined !== UNINITIALIZED`.
+  if (
+    "__rdSyncAutoLoginLock" in globalRegistry &&
+    globalRegistry.__rdSyncAutoLoginLock !== UNINITIALIZED
+  ) {
     return globalRegistry.__rdSyncAutoLoginLock ?? null;
   }
 
@@ -98,10 +117,9 @@ function getOrCreateDefaultLock(): AutoLoginLock | null {
 /**
  * Default AutoLoginLock singleton backed by Redis.
  *
- * `null` when `RD_SYNC_REDIS_URL` is not set (dev/test mode). The lock is
- * created lazily on first access — no code runs at module-import time.
- * When `RD_SYNC_REDIS_URL` is set, the ioredis client is constructed with
- * `lazyConnect: true`, so even after singleton resolution no Redis socket is
- * opened until the first lock command.
+ * `null` when `RD_SYNC_REDIS_URL` is not set (dev/test mode).  Resolved at
+ * module evaluation time (import).  When `RD_SYNC_REDIS_URL` is set, the
+ * ioredis client is constructed with `lazyConnect: true`, so even after
+ * singleton resolution no Redis socket is opened until the first lock command.
  */
 export const defaultAutoLoginLock: AutoLoginLock | null = getOrCreateDefaultLock();

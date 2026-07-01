@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { RedisEvalClient } from "./redis-store";
 import { createAutoLoginLockFromEnv, defaultAutoLoginLock } from "./defaults";
 
@@ -151,22 +151,51 @@ describe("createAutoLoginLockFromEnv", () => {
     expect(receivedOpts[0]).toHaveProperty("lazyConnect", true);
   });
 
-  it("renew extends TTL and stale lease cannot release", async () => {
+  it("lock options use bounded maxRetriesPerRequest, not null (BUG-RO regression)", () => {
+    process.env.RD_SYNC_REDIS_URL = "redis://localhost:6379";
+    const receivedOpts: Record<string, unknown>[] = [];
+    createAutoLoginLockFromEnv(process.env, {
+      redisClientFactory: (opts) => {
+        receivedOpts.push(opts);
+        return fakeRedis;
+      },
+    });
+    expect(receivedOpts).toHaveLength(1);
+    const opts = receivedOpts[0];
+    // Lock must NOT use maxRetriesPerRequest:null (BullMQ-only) — that causes
+    // indefinite hangs during Redis outages.  Use a finite value instead.
+    expect(opts.maxRetriesPerRequest).not.toBeNull();
+    expect(typeof opts.maxRetriesPerRequest).toBe("number");
+    expect(opts.maxRetriesPerRequest).toBeGreaterThan(0);
+    // Bounded timeouts for fail-closed behavior
+    expect(opts.connectTimeout).toBeTypeOf("number");
+    expect(opts.commandTimeout).toBeTypeOf("number");
+  });
+
+  it("renew extends TTL so lock survives past original expiry", async () => {
     process.env.RD_SYNC_REDIS_URL = "redis://localhost:6379";
     fakeRedis.now = 1_000_000;
     const lock = createAutoLoginLockFromEnv(process.env, { redisClientFactory: () => fakeRedis })!;
 
-    const acquired = await lock.acquire("popular", "evt-001");
+    // Acquire with short TTL (30s) — without renewal, lock expires at T+30s
+    const acquired = await lock.acquire("popular", "evt-001", 30_000);
     expect(acquired).not.toBeNull();
 
-    // Renew extends TTL
-    const renewed = await lock.renew("popular", "evt-001", acquired!.leaseToken, 60_000);
+    // Renew with longer TTL (90s) — extends lock expiry to T+90s
+    const renewed = await lock.renew("popular", "evt-001", acquired!.leaseToken, 90_000);
     expect(renewed).toBe(true);
 
-    // Stale release after new acquire fails
-    fakeRedis.now += 120_000; // past original TTL but within renewed
+    // Advance past original TTL (50s > 30s) but within renewed TTL (50s < 90s)
+    fakeRedis.now = 1_050_000;
+    // Lock should still be held — renewal kept it alive past original expiry
+    const stillHeld = await lock.acquire("popular", "evt-001");
+    expect(stillHeld).toBeNull();
+
+    // Advance past renewed TTL (95s > 90s) — lock expires
+    fakeRedis.now = 1_095_000;
     const second = await lock.acquire("popular", "evt-001");
     expect(second).not.toBeNull();
+    // Old lease cannot release after lock expiry + new acquire
     expect(await lock.release("popular", "evt-001", acquired!.leaseToken)).toBe(false);
     expect(await lock.release("popular", "evt-001", second!.leaseToken)).toBe(true);
   });
@@ -177,5 +206,24 @@ describe("defaultAutoLoginLock (globalThis singleton)", () => {
     // In the test environment, RD_SYNC_REDIS_URL is not set at import time,
     // so the singleton is null (dev/test mode — no Redis required).
     expect(defaultAutoLoginLock).toBeNull();
+  });
+
+  it("initializes non-null when RD_SYNC_REDIS_URL is set at module evaluation (BUG-S1 regression)", async () => {
+    // BUG-S1 regression: the singleton never initialized because `undefined`
+    // (missing globalThis slot) was not distinguished from UNINITIALIZED.
+    // This test re-imports the module with env set to verify the fix.
+    vi.resetModules();
+    // Clear the globalThis singleton so the re-import re-evaluates
+    delete (globalThis as Record<string, unknown>).__rdSyncAutoLoginLock;
+    process.env.RD_SYNC_REDIS_URL = "redis://localhost:6379";
+    try {
+      const mod = await import("./defaults");
+      expect(mod.defaultAutoLoginLock).not.toBeNull();
+      expect(typeof mod.defaultAutoLoginLock!.acquire).toBe("function");
+    } finally {
+      delete process.env.RD_SYNC_REDIS_URL;
+      delete (globalThis as Record<string, unknown>).__rdSyncAutoLoginLock;
+      vi.resetModules();
+    }
   });
 });
