@@ -6,7 +6,8 @@ import type { RedisEvalClient } from "./redis-store";
  * Simulates the Lua EVAL contracts (acquire / release / renew) with native
  * TTL semantics so unit tests can run without a real Redis instance.
  *
- * Used by `redis-store.test.ts` and `defaults.test.ts`.
+ * Used by `defaults.test.ts`. `redis-store.test.ts` still owns its local fake
+ * in this PR to keep the review slice under the 400-line budget.
  */
 export class FakeRedisClient implements RedisEvalClient {
   private store = new Map<string, string>();
