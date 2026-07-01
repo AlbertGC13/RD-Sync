@@ -1,11 +1,12 @@
 /** Banreservas Personas + Empresas — read-only adapter skeletons (PR5B2/PR5B3)
- *  + Personas DOM extraction parser (PR5D/PR5F). */
+ *  + Personas DOM extraction parser (PR5D/PR5F)
+ *  + Empresas DOM extraction parser (PR5E). */
 
 import type { BankMovement, TransactionDirection } from "../../modules/transactions";
 import type { IngestionScraper } from "../../worker/queues";
 import type { CdpSessionChecker } from "../../modules/bank-sessions";
 import type { BankAdapter, BankAutoLoginStrategy } from "./registry";
-import type { BanreservasPersonasTransaction } from "./fixtures/types";
+import type { BanreservasPersonasTransaction, BanreservasEmpresasTransaction } from "./fixtures/types";
 
 /**
  * Portal-specific bank codes for Banreservas Personas and Empresas.
@@ -79,6 +80,7 @@ export const banreservasPersonasPortalConfig = {
 export const banreservasEmpresasScraperProfile = {
   bankId: banreservasEmpresasBankCode,
   portalVariant: banreservasEmpresasPortalVariant,
+  accountFingerprint: "banreservas-empresas-XXXXXXXXXX",
   loginUrl: "https://www.banreservas.com.do/TuBancoEmpresas/Login.aspx",
   landingUrl: "https://www.banreservas.com.do/TuBancoEmpresas/Default.aspx",
   framework: "aspnet-webforms+devexpress" as const,
@@ -269,6 +271,141 @@ export function parseBanreservasPersonasTransactionRows(
       metadata: null,
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Transaction parser — Banreservas Empresas DD/MM/YY + column-based amounts → BankMovement
+// ---------------------------------------------------------------------------
+
+export interface BanreservasEmpresasParseOptions {
+  accountFingerprint?: string;
+  bankId?: string;
+  currency?: string;
+}
+
+/**
+ * Parse Banreservas Empresas DD/MM/YY (2-digit year) dates.
+ * Assumes 2000+ for the 2-digit year (e.g., "26" → 2026).
+ */
+export function parseBanreservasEmpresasDate(value: string): string {
+  const match = /^(\d{2})\/(\d{2})\/(\d{2})$/.exec(value.trim());
+  if (!match) throw new Error("Invalid Banreservas Empresas date format");
+
+  const [, dayStr, monthStr, yearStr] = match;
+  const day = Number(dayStr);
+  const month = Number(monthStr);
+  const year = 2000 + Number(yearStr);
+
+  // Validate month range.
+  if (month < 1 || month > 12) throw new Error("Invalid Banreservas Empresas date format");
+
+  // Validate day range for the given month (including leap-year check for Feb).
+  const daysInMonth = new Date(year, month, 0).getDate();
+  if (day < 1 || day > daysInMonth) throw new Error("Invalid Banreservas Empresas date format");
+
+  const fullYearStr = String(year);
+  return `${fullYearStr}-${monthStr}-${dayStr}T00:00:00${SANTO_DOMINGO_OFFSET}`;
+}
+
+/**
+ * Parse Banreservas Empresas amounts. Amounts are always positive in the
+ * Empresas format; direction is determined by which column (debit/credit)
+ * contains the non-zero value. Rejects negative amounts (sign not expected).
+ */
+export function parseBanreservasEmpresasAmount(value: string): { value: number; direction: TransactionDirection } {
+  const trimmed = value.trim();
+  if (trimmed === "") throw new Error("Invalid Banreservas Empresas amount format");
+
+  // Reject negative amounts — Empresas format uses separate columns, not signs.
+  if (trimmed.startsWith("-")) throw new Error("Invalid Banreservas Empresas amount format");
+
+  // Validate comma grouping BEFORE stripping: commas must follow standard
+  // thousands grouping (exactly 3 digits after each comma).
+  const hasCommas = trimmed.includes(",");
+  if (hasCommas && !/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(trimmed)) {
+    throw new Error("Invalid Banreservas Empresas amount format");
+  }
+
+  const normalized = trimmed.replace(/,/g, "");
+  // Reject malformed patterns: leading/trailing dots, etc.
+  if (!/^\d+(\.\d+)?$/.test(normalized)) {
+    throw new Error("Invalid Banreservas Empresas amount format");
+  }
+
+  // Reject >2 decimal places — toFixed(2) must not silently round.
+  if (/\.\d{3,}$/.test(normalized)) {
+    throw new Error("Invalid Banreservas Empresas amount format");
+  }
+
+  const amount = Number(normalized);
+  if (!Number.isFinite(amount)) throw new Error("Invalid Banreservas Empresas amount format");
+
+  return {
+    value: amount,
+    direction: "credit",
+  };
+}
+
+export function parseBanreservasEmpresasTransactionRows(
+  rows: readonly BanreservasEmpresasTransaction[],
+  options: BanreservasEmpresasParseOptions = {},
+): BankMovement[] {
+  return rows.map((row) => {
+    const postedAt = parseBanreservasEmpresasDate(row.date);
+
+    const debitText = row.debit.trim();
+    const creditText = row.credit.trim();
+
+    // Sign/column mismatch: Empresas amounts are always positive.
+    if (debitText.startsWith("-")) {
+      throw new Error(
+        `Banreservas Empresas parser: sign/column mismatch — debit column contains negative amount "${debitText}"`,
+      );
+    }
+    if (creditText.startsWith("-")) {
+      throw new Error(
+        `Banreservas Empresas parser: sign/column mismatch — credit column contains negative amount "${creditText}"`,
+      );
+    }
+
+    // Validate BOTH columns' format before deciding direction.
+    // Catches malformed inactive-zero cells like "0,00.00" that a blind
+    // Number() conversion would silently coerce to 0.
+    const debitParsed = parseBanreservasEmpresasAmount(debitText);
+    const creditParsed = parseBanreservasEmpresasAmount(creditText);
+
+    if (debitParsed.value !== 0 && creditParsed.value !== 0) {
+      throw new Error(
+        `Banreservas Empresas parser: ambiguous amount — both debit ("${debitText}") and credit ("${creditText}") are non-zero`,
+      );
+    }
+
+    if (debitParsed.value === 0 && creditParsed.value === 0) {
+      throw new Error(
+        "Banreservas Empresas parser: missing amount — both debit and credit columns are zero",
+      );
+    }
+
+    const isDebit = debitParsed.value !== 0;
+
+    return {
+      bankId: options.bankId ?? banreservasEmpresasBankCode,
+      accountFingerprint: options.accountFingerprint ?? banreservasEmpresasScraperProfile.accountFingerprint,
+      postedAt,
+      amount: Math.abs(isDebit ? debitParsed.value : creditParsed.value).toFixed(2),
+      currency: options.currency ?? "DOP",
+      direction: (isDebit ? "debit" : "credit") as TransactionDirection,
+      reference: normalizeOptionalField(row.transactionNumber),
+      concept: normalizeText(row.description),
+      originator: null,
+      metadata: null,
+    };
+  });
+}
+
+function normalizeOptionalField(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 // ── Adapter factories + stubs ────────────────────────────────────────────
