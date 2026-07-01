@@ -68,12 +68,11 @@ return nextFencing
 
 /**
  * releaseIfOwner: atomically delete the lock key only when the stored lease
- * token matches and the lease has not expired. Returns 1 on success, 0 if
- * token mismatches or the key has expired / does not exist.
+ * token matches. Redis native TTL/key existence is the expiry authority.
+ * Returns 1 on success, 0 if token mismatches or the key no longer exists.
  *
  * KEYS[1] = lock key
  * ARGV[1] = expected lease token
- * ARGV[2] = current timestamp in milliseconds
  */
 const RELEASE_SCRIPT = `
 local lockKey = KEYS[1]
@@ -92,13 +91,12 @@ return 1
 
 /**
  * renewIfOwner: atomically extend the TTL of the lock key only when the stored
- * lease token matches and the lease has not expired. Returns 1 on success,
- * 0 if token mismatches or the lease has already expired.
+ * lease token matches. Redis native TTL/key existence is the expiry authority.
+ * Returns 1 on success, 0 if token mismatches or the key no longer exists.
  *
  * KEYS[1] = lock key
  * ARGV[1] = expected lease token
  * ARGV[2] = new TTL in milliseconds
- * ARGV[3] = current timestamp in milliseconds
  */
 const RENEW_SCRIPT = `
 local lockKey = KEYS[1]
