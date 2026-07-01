@@ -12,7 +12,7 @@ class InMemoryLockStore {
   private store = new Map<string, string>();
   private counters = new Map<string, number>();
   constructor(private readonly now?: () => number) {}
-  async acquireSlot(key: string, leaseToken: string, ttlMs: number, nowMs: number): Promise<number | null> {
+  async acquireSlot({ key, leaseToken, ttlMs, nowMs }: { key: string; leaseToken: string; ttlMs: number; nowMs: number }): Promise<number | null> {
     const raw = this.store.get(key);
     if (raw) {
       const d = JSON.parse(raw) as { expiresAt: number; fencingToken: number };
@@ -34,7 +34,7 @@ class InMemoryLockStore {
     this.store.delete(key);
     return true;
   }
-  async renewIfOwner(key: string, expected: string, newTtlMs: number, nowMs: number): Promise<boolean> {
+  async renewIfOwner({ key, expectedLeaseToken: expected, newTtlMs, nowMs }: { key: string; expectedLeaseToken: string; newTtlMs: number; nowMs: number }): Promise<boolean> {
     const raw = this.store.get(key);
     if (!raw) return false;
     const d = JSON.parse(raw) as { leaseToken: string; fencingToken: number; expiresAt: number };
@@ -56,7 +56,6 @@ function setup(opts?: { defaultTtlMs?: number; maxTtlMs?: number; now?: () => nu
   });
   return { store, lock, startTimeMs };
 }
-
 describe("AutoLoginLock", () => {
   describe("acquire", () => {
     it("returns lease with leaseToken, fencingToken=1, and expiresAt", async () => {
@@ -264,6 +263,10 @@ describe("AutoLoginLock", () => {
       expect(buildLockKey("popular", "evt-001")).toBe("autologin:lock:popular:evt-001");
       expect(LOCK_KEY_PREFIX).toBe("autologin:lock");
       expect(DEFAULT_LOCK_TTL_MS).toBe(5 * 60 * 1000);
+    });
+    it("throws when store is missing (fail-fast)", () => {
+      // Force an undefined store to exercise the runtime guard (TS would catch this normally).
+      expect(() => createAutoLoginLock({ store: undefined as unknown as import("./index").LockStore })).toThrow("LockStore is required");
     });
   });
 });

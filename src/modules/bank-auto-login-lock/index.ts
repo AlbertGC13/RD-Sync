@@ -1,8 +1,3 @@
-/**
- * AutoLoginLock with fencing tokens. Prevents concurrent scrape runs from
- * double-submitting credentials for the SAME expired session event.
- * Scoped to bankCode + expiredEventId.
- */
 import { randomBytes } from "node:crypto";
 
 export interface AcquiredLock {
@@ -17,21 +12,22 @@ export interface AutoLoginLock {
   renew(bankCode: string, expiredEventId: string, leaseToken: string, ttlMs?: number): Promise<boolean>;
 }
 
-/** Store abstraction for distributed locking. Production wraps ioredis via atomic Lua scripts. */
-export interface LockStore {
-  acquireSlot(key: string, leaseToken: string, ttlMs: number, nowMs: number): Promise<number | null>;
-  releaseIfOwner(key: string, expectedLeaseToken: string): Promise<boolean>;
-  renewIfOwner(key: string, expectedLeaseToken: string, newTtlMs: number, nowMs: number): Promise<boolean>;
+export interface AcquireSlotParams {
+  key: string;
+  leaseToken: string;
+  ttlMs: number;
+  nowMs: number;
 }
-
-
-
-export interface CreateAutoLoginLockOptions {
-  store: LockStore;
-  defaultTtlMs?: number;
-  maxTtlMs?: number;
-  generateLeaseToken?: () => string;
-  now?: () => number;
+export interface RenewIfOwnerParams {
+  key: string;
+  expectedLeaseToken: string;
+  newTtlMs: number;
+  nowMs: number;
+}
+export interface LockStore {
+  acquireSlot(params: AcquireSlotParams): Promise<number | null>;
+  releaseIfOwner(key: string, expectedLeaseToken: string): Promise<boolean>;
+  renewIfOwner(params: RenewIfOwnerParams): Promise<boolean>;
 }
 
 export const DEFAULT_LOCK_TTL_MS = 5 * 60 * 1000;
@@ -44,25 +40,24 @@ export class LockValidationError extends Error {
     this.name = "LockValidationError";
   }
 }
-
 const BANK_CODE_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 const EVENT_ID_RE = /^[a-zA-Z0-9-]{1,64}$/;
 
-function validate(field: string, value: unknown, tests: [boolean, string][]): void {
+function validate(field: string, tests: [boolean, string][]): void {
   for (const [ok, msg] of tests) {
     if (!ok) throw new LockValidationError(field, msg);
   }
 }
 
 function validateBankCode(bankCode: string): void {
-  validate("bankCode", bankCode, [
+  validate("bankCode", [
     [typeof bankCode === "string" && bankCode.length > 0, "must be a non-empty string"],
     [BANK_CODE_RE.test(bankCode), "must be 1-32 chars, lowercase alphanumeric/underscore/hyphen, starting with a letter"],
   ]);
 }
 
 function validateEventId(eventId: string): void {
-  validate("expiredEventId", eventId, [
+  validate("expiredEventId", [
     [typeof eventId === "string" && eventId.length > 0, "must be a non-empty string"],
     [eventId.length <= 64, "must be at most 64 characters"],
     [EVENT_ID_RE.test(eventId), "must contain only alphanumeric characters and hyphens"],
@@ -70,26 +65,29 @@ function validateEventId(eventId: string): void {
 }
 
 function validateLeaseToken(leaseToken: string): void {
-  validate("leaseToken", leaseToken, [
+  validate("leaseToken", [
     [typeof leaseToken === "string" && leaseToken.length > 0, "must be a non-empty string"],
   ]);
 }
 
 function validateTtlMs(ttlMs: number, maxTtlMs?: number): void {
-  validate("ttlMs", ttlMs, [
+  validate("ttlMs", [
     [typeof ttlMs === "number" && Number.isFinite(ttlMs) && ttlMs > 0, "must be a positive number"],
     ...(maxTtlMs != null ? [[ttlMs <= maxTtlMs, `must not exceed ${maxTtlMs}ms`] as [boolean, string]] : []),
   ]);
 }
 
-export function buildLockKey(bankCode: string, expiredEventId: string): string {
-  return `${LOCK_KEY_PREFIX}:${bankCode}:${expiredEventId}`;
-}
-function defaultGenerateLeaseToken(): string {
-  return randomBytes(16).toString("hex");
-}
+export const buildLockKey = (bankCode: string, expiredEventId: string): string =>
+  `${LOCK_KEY_PREFIX}:${bankCode}:${expiredEventId}`;
 
-export function createAutoLoginLock(options: CreateAutoLoginLockOptions): AutoLoginLock {
+const defaultGenerateLeaseToken = (): string => randomBytes(16).toString("hex");
+export function createAutoLoginLock(options: {
+  store: LockStore;
+  defaultTtlMs?: number;
+  maxTtlMs?: number;
+  generateLeaseToken?: () => string;
+  now?: () => number;
+}): AutoLoginLock {
   const { store, defaultTtlMs = DEFAULT_LOCK_TTL_MS, maxTtlMs = MAX_LOCK_TTL_MS, generateLeaseToken = defaultGenerateLeaseToken, now = () => Date.now() } = options;
 
   if (!store) throw new Error("LockStore is required");
@@ -103,7 +101,7 @@ export function createAutoLoginLock(options: CreateAutoLoginLockOptions): AutoLo
       const key = buildLockKey(bankCode, expiredEventId);
       const leaseToken = generateLeaseToken();
       const currentTime = now();
-      const fencingToken = await store.acquireSlot(key, leaseToken, effectiveTtlMs, currentTime);
+      const fencingToken = await store.acquireSlot({ key, leaseToken, ttlMs: effectiveTtlMs, nowMs: currentTime });
       if (fencingToken === null) return null;
       return { leaseToken, fencingToken, expiresAt: currentTime + effectiveTtlMs };
     },
@@ -119,7 +117,7 @@ export function createAutoLoginLock(options: CreateAutoLoginLockOptions): AutoLo
       validateLeaseToken(leaseToken);
       const effectiveTtlMs = ttlMs ?? defaultTtlMs;
       validateTtlMs(effectiveTtlMs, maxTtlMs);
-      return store.renewIfOwner(buildLockKey(bankCode, expiredEventId), leaseToken, effectiveTtlMs, now());
+      return store.renewIfOwner({ key: buildLockKey(bankCode, expiredEventId), expectedLeaseToken: leaseToken, newTtlMs: effectiveTtlMs, nowMs: now() });
     },
   };
 }
