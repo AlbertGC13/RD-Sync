@@ -91,7 +91,7 @@ Gate: full gates + FRESH 4R review + Judgment Day before merge; PR3B1 <=400 line
 
 - [x] 4.1a Create `src/modules/bank-auto-login-lock/index.ts`: lock contract + `AutoLoginLock` interface + `LockStore` abstraction + `createAutoLoginLock` factory with bounded TTL, CAS-guarded fencing tokens, input validation, and comprehensive unit tests (no Redis adapter yet — see 4.1b).
 - [x] 4.1b Redis-backed `LockStore` adapter: atomic Lua scripts for `acquireSlot`/`releaseIfOwner`/`renewIfOwner` with TTL-bound CAS, fencing-token increment, and expired-key semantics matching Redis native expiry.
-- [ ] 4.1c Wire `LockStore` Redis adapter into production `createAutoLoginLock` calls via DI/config.
+- [x] 4.1c Wire `LockStore` Redis adapter into production `createAutoLoginLock` calls via DI/config.
 - [ ] 4.2 `prisma/schema.prisma`: add `BankAutoLoginConfig` (`autoLoginEnabled` default false; breaker `closed|open` only, NO half_open) + `BankAdapterConfig` (`scrapingEnabled` default true); migration.
 - [ ] 4.3 Create `src/modules/bank-auto-login-config/` + `src/modules/bank-adapter-config/`: repos + conservative breaker policy (3 failures/30min->open, NO half-open, manual admin reset only clears window, alert on open + <=every 30min).
 - [ ] 4.4 Create `src/worker/scraper/auto-login.ts`: `BankAutoLoginStrategy` state machine + `LoginMutationGuard` (HTTPS + exact origin + login-path allowlist, re-check before fill AND submit, `assertCompatiblePreSubmit`).
