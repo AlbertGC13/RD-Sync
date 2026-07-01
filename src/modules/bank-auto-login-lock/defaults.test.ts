@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { RedisEvalClient } from "./redis-store";
-import { createAutoLoginLockFromEnv, defaultAutoLoginLock } from "./defaults";
+import { createAutoLoginLockFromEnv } from "./defaults";
 
 // ---------------------------------------------------------------------------
 // Fake Redis client — same contract as redis-store.test.ts
@@ -202,20 +202,36 @@ describe("createAutoLoginLockFromEnv", () => {
 });
 
 describe("defaultAutoLoginLock (globalThis singleton)", () => {
-  it("is null when RD_SYNC_REDIS_URL was not set at module load", () => {
-    // In the test environment, RD_SYNC_REDIS_URL is not set at import time,
-    // so the singleton is null (dev/test mode — no Redis required).
-    expect(defaultAutoLoginLock).toBeNull();
+  const originalEnv = process.env.RD_SYNC_REDIS_URL;
+
+  afterEach(() => {
+    // Restore ambient env and clean up globalThis singleton between tests
+    if (originalEnv !== undefined) {
+      process.env.RD_SYNC_REDIS_URL = originalEnv;
+    } else {
+      delete process.env.RD_SYNC_REDIS_URL;
+    }
+    delete (globalThis as Record<string, unknown>).__rdSyncAutoLoginLock;
+    vi.resetModules();
+  });
+
+  it("is null when RD_SYNC_REDIS_URL is not set at module load", async () => {
+    // Deterministic: explicitly clear env + globalThis singleton, then dynamic import.
+    // This test passes regardless of ambient RD_SYNC_REDIS_URL.
+    delete process.env.RD_SYNC_REDIS_URL;
+    delete (globalThis as Record<string, unknown>).__rdSyncAutoLoginLock;
+    vi.resetModules();
+    const mod = await import("./defaults");
+    expect(mod.defaultAutoLoginLock).toBeNull();
   });
 
   it("initializes non-null when RD_SYNC_REDIS_URL is set at module evaluation (BUG-S1 regression)", async () => {
     // BUG-S1 regression: the singleton never initialized because `undefined`
     // (missing globalThis slot) was not distinguished from UNINITIALIZED.
-    // This test re-imports the module with env set to verify the fix.
-    vi.resetModules();
-    // Clear the globalThis singleton so the re-import re-evaluates
+    // This test dynamically imports the module with env set to verify the fix.
     delete (globalThis as Record<string, unknown>).__rdSyncAutoLoginLock;
     process.env.RD_SYNC_REDIS_URL = "redis://localhost:6379";
+    vi.resetModules();
     try {
       const mod = await import("./defaults");
       expect(mod.defaultAutoLoginLock).not.toBeNull();

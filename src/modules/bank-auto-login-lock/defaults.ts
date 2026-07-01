@@ -31,14 +31,23 @@ import { createAutoLoginLock, type AutoLoginLock } from "./index";
 import { RedisLockStore, type RedisEvalClient } from "./redis-store";
 
 // ---------------------------------------------------------------------------
+// Redis fail-closed policy — named constants for lock-specific overrides
+//
+// BullMQ sets maxRetriesPerRequest: null (infinite) for queue connections.
+// Lock connections override this with bounded retries and timeouts so
+// Redis outages fail closed instead of hanging indefinitely.
+// ---------------------------------------------------------------------------
+
+const LOCK_MAX_RETRIES = 3;
+const LOCK_CONNECT_TIMEOUT_MS = 5_000;
+const LOCK_COMMAND_TIMEOUT_MS = 5_000;
+
+// ---------------------------------------------------------------------------
 // globalThis singleton — one lock per process, shared across module graphs
 // ---------------------------------------------------------------------------
 
-// Sentinel distinguishes "not yet initialised" from "null (disabled)".
-const UNINITIALIZED = Symbol("uninitialized");
-
 const globalRegistry = globalThis as typeof globalThis & {
-  __rdSyncAutoLoginLock?: AutoLoginLock | null | typeof UNINITIALIZED;
+  __rdSyncAutoLoginLock?: AutoLoginLock | null;
 };
 
 /**
@@ -75,9 +84,9 @@ export function createAutoLoginLockFromEnv(
   // until the first EVAL command.
   const lockConnectionOpts = {
     ...connectionOpts,
-    maxRetriesPerRequest: 3 as const,
-    connectTimeout: 5_000,
-    commandTimeout: 5_000,
+    maxRetriesPerRequest: LOCK_MAX_RETRIES,
+    connectTimeout: LOCK_CONNECT_TIMEOUT_MS,
+    commandTimeout: LOCK_COMMAND_TIMEOUT_MS,
     lazyConnect: true as const,
   };
 
@@ -99,13 +108,9 @@ export function createAutoLoginLockFromEnv(
 // ---------------------------------------------------------------------------
 
 function getOrCreateDefaultLock(): AutoLoginLock | null {
-  // Property-presence check: `undefined` (slot missing) must NOT be confused
-  // with `UNINITIALIZED` (sentinel for "not yet created").  Without the `in`
-  // guard, the first call always returned null because `undefined !== UNINITIALIZED`.
-  if (
-    "__rdSyncAutoLoginLock" in globalRegistry &&
-    globalRegistry.__rdSyncAutoLoginLock !== UNINITIALIZED
-  ) {
+  // Property-presence check: if the slot exists on globalThis, it holds either
+  // a lock instance or null (disabled).  An absent slot means "not yet created".
+  if ("__rdSyncAutoLoginLock" in globalRegistry) {
     return globalRegistry.__rdSyncAutoLoginLock ?? null;
   }
 
