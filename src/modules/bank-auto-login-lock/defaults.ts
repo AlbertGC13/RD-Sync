@@ -2,11 +2,19 @@
  * Production wiring for AutoLoginLock backed by Redis.
  *
  * Reads `RD_SYNC_REDIS_URL` from the environment, creates a dedicated ioredis
- * connection (lazy, connected on first EVAL), wraps it in `RedisLockStore`
- * (atomic Lua CAS scripts), and passes it to `createAutoLoginLock`.
+ * connection with `lazyConnect: true` (socket deferred until first EVAL),
+ * wraps it in `RedisLockStore` (atomic Lua CAS scripts), and passes it to
+ * `createAutoLoginLock`.
  *
  * Exported as a globalThis-cached singleton (`defaultAutoLoginLock`) following
  * the project's env-switch singleton pattern (see `src/app/api/scrape-runs/defaults.ts`).
+ *
+ * **Laziness guarantee:** Two separate mechanisms keep startup cost zero:
+ * 1. **Singleton resolution** — `getOrCreateDefaultLock()` is only called on
+ *    first property access of `defaultAutoLoginLock`, not at module-import time.
+ * 2. **Socket connection** — `lazyConnect: true` ensures ioredis does not open
+ *    a TCP/TLS socket until the first `EVAL` command.  Even after the singleton
+ *    is resolved, no Redis traffic occurs until the first lock operation.
  *
  * **Redis topology:** RD-Sync currently uses a single Redis endpoint from
  * `RD_SYNC_REDIS_URL`. Redis Cluster requires explicit hash tags so the lock
@@ -49,6 +57,7 @@ export function createAutoLoginLockFromEnv(
       port: number;
       password?: string;
       maxRetriesPerRequest: null;
+      lazyConnect: true;
     }) => RedisEvalClient;
   },
 ): AutoLoginLock | null {
@@ -59,12 +68,13 @@ export function createAutoLoginLockFromEnv(
 
   let client: RedisEvalClient;
   if (options?.redisClientFactory) {
-    client = options.redisClientFactory(connectionOpts);
+    client = options.redisClientFactory({ ...connectionOpts, lazyConnect: true });
   } else {
-    // ioredis connection is lazy — no socket is opened here.
+    // lazyConnect defers the TCP/TLS handshake until the first command (EVAL).
+    // The singleton itself is also deferred — see getOrCreateDefaultLock().
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Redis = require("ioredis") as new (opts: typeof connectionOpts) => RedisEvalClient;
-    client = new Redis(connectionOpts);
+    const Redis = require("ioredis") as new (opts: typeof connectionOpts & { lazyConnect: true }) => RedisEvalClient;
+    client = new Redis({ ...connectionOpts, lazyConnect: true });
   }
 
   const store = new RedisLockStore({ client });
@@ -89,7 +99,9 @@ function getOrCreateDefaultLock(): AutoLoginLock | null {
  * Default AutoLoginLock singleton backed by Redis.
  *
  * `null` when `RD_SYNC_REDIS_URL` is not set (dev/test mode). The lock is
- * created lazily on first access — no Redis connection is opened at
- * module-import time.
+ * created lazily on first access — no code runs at module-import time.
+ * When `RD_SYNC_REDIS_URL` is set, the ioredis client is constructed with
+ * `lazyConnect: true`, so even after singleton resolution no Redis socket is
+ * opened until the first lock command.
  */
 export const defaultAutoLoginLock: AutoLoginLock | null = getOrCreateDefaultLock();

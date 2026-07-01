@@ -138,6 +138,19 @@ describe("createAutoLoginLockFromEnv", () => {
     expect(a).not.toBe(b);
   });
 
+  it("passes lazyConnect: true to the redisClientFactory (BUG-RL regression)", () => {
+    process.env.RD_SYNC_REDIS_URL = "redis://localhost:6379";
+    const receivedOpts: unknown[] = [];
+    createAutoLoginLockFromEnv(process.env, {
+      redisClientFactory: (opts) => {
+        receivedOpts.push(opts);
+        return fakeRedis;
+      },
+    });
+    expect(receivedOpts).toHaveLength(1);
+    expect(receivedOpts[0]).toHaveProperty("lazyConnect", true);
+  });
+
   it("renew extends TTL and stale lease cannot release", async () => {
     process.env.RD_SYNC_REDIS_URL = "redis://localhost:6379";
     fakeRedis.now = 1_000_000;
