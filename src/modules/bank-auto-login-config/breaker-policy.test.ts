@@ -12,6 +12,7 @@ const closed = (overrides: Partial<BreakerRuntimeState> = {}): BreakerRuntimeSta
   breakerState: "closed",
   breakerFailureCount: 0,
   breakerFailureWindowStart: null,
+  breakerOpenedAt: null,
   ...overrides,
 });
 const minutes = (n: number) => n * 60 * 1000;
@@ -84,6 +85,7 @@ describe("nextStateOnFailure — stale window restart", () => {
       breakerState: "closed",
       breakerFailureCount: 2,
       breakerFailureWindowStart: T0,
+      breakerOpenedAt: null,
     };
     const t = new Date(T0.getTime() + minutes(31)); // just past failureWindowMs
     const next = nextStateOnFailure(staleState, t);
@@ -91,6 +93,23 @@ describe("nextStateOnFailure — stale window restart", () => {
       breakerState: "closed",
       breakerFailureCount: 1,
       breakerFailureWindowStart: t,
+      breakerOpenedAt: null,
+    });
+  });
+
+  it("treats the exact failure-window boundary as stale", () => {
+    const boundaryState: BreakerRuntimeState = {
+      breakerState: "closed",
+      breakerFailureCount: 2,
+      breakerFailureWindowStart: T0,
+      breakerOpenedAt: null,
+    };
+    const exactBoundary = new Date(T0.getTime() + AutoLoginCircuitBreakerPolicy.failureWindowMs);
+    const next = nextStateOnFailure(boundaryState, exactBoundary);
+    expect(next).toEqual({
+      breakerState: "closed",
+      breakerFailureCount: 1,
+      breakerFailureWindowStart: exactBoundary,
       breakerOpenedAt: null,
     });
   });
@@ -106,10 +125,12 @@ describe("nextStateOnFailure — stale window restart", () => {
 
 describe("nextStateOnFailure — open stays open (no half-open, no auto-close)", () => {
   it("recording a failure while already open is a safe no-op", () => {
+    const openedAt = new Date(T0.getTime() + minutes(10));
     const openState: BreakerRuntimeState = {
       breakerState: "open",
       breakerFailureCount: 3,
       breakerFailureWindowStart: T0,
+      breakerOpenedAt: openedAt,
     };
     const later = new Date(T0.getTime() + minutes(45));
     const next = nextStateOnFailure(openState, later);
@@ -117,7 +138,7 @@ describe("nextStateOnFailure — open stays open (no half-open, no auto-close)",
       breakerState: "open",
       breakerFailureCount: 3,
       breakerFailureWindowStart: T0,
-      breakerOpenedAt: null,
+      breakerOpenedAt: openedAt,
     });
   });
 
@@ -126,6 +147,7 @@ describe("nextStateOnFailure — open stays open (no half-open, no auto-close)",
       breakerState: "open",
       breakerFailureCount: 3,
       breakerFailureWindowStart: null,
+      breakerOpenedAt: null,
     };
     const later = new Date(T0.getTime() + minutes(45));
     const next = nextStateOnFailure(openState, later);
@@ -138,7 +160,12 @@ describe("nextStateOnFailure — open stays open (no half-open, no auto-close)",
   });
 
   it("stays open forever without a manual reset, no matter how much time passes", () => {
-    const openState: BreakerRuntimeState = { breakerState: "open", breakerFailureCount: 3, breakerFailureWindowStart: T0 };
+    const openState: BreakerRuntimeState = {
+      breakerState: "open",
+      breakerFailureCount: 3,
+      breakerFailureWindowStart: T0,
+      breakerOpenedAt: T0,
+    };
     const oneYearLater = new Date(T0.getTime() + minutes(60 * 24 * 365));
     expect(canAttempt(openState, oneYearLater)).toBe(false);
     expect(shouldOpen(openState, oneYearLater)).toBe(false); // already open, nothing to "re-decide"
