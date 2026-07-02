@@ -15,6 +15,7 @@ export interface BreakerRuntimeState {
   breakerState: BreakerState;
   breakerFailureCount: number;
   breakerFailureWindowStart: Date | null;
+  breakerOpenedAt: Date | null;
 }
 
 export const AutoLoginCircuitBreakerPolicy = {
@@ -50,7 +51,7 @@ export interface BreakerFailureTransition {
   breakerState: BreakerState;
   breakerFailureCount: number;
   breakerFailureWindowStart: Date | null;
-  /** Set only on the failure that crosses the open threshold; otherwise `null`. */
+  /** Preserved while already open; set on the failure that crosses the open threshold; otherwise `null`. */
   breakerOpenedAt: Date | null;
 }
 
@@ -66,7 +67,7 @@ export function nextStateOnFailure(state: BreakerRuntimeState, now: Date): Break
       breakerState: "open",
       breakerFailureCount: state.breakerFailureCount,
       breakerFailureWindowStart: state.breakerFailureWindowStart,
-      breakerOpenedAt: null,
+      breakerOpenedAt: state.breakerOpenedAt,
     };
   }
 
