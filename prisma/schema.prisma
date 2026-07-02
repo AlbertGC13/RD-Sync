@@ -203,7 +203,7 @@ model BankCredential {
 
 // PR4: Per-bank auto-login kill switch + circuit breaker state.
 // autoLoginEnabled is the manual kill switch (default off).
-// breakerState is closed|open only — NO half_open (conservative, manual reset only).
+// breakerState remains a String; the PR4.2 migration enforces closed|open only — NO half_open.
 model BankAutoLoginConfig {
   id                        String    @id @default(cuid())
   bankCode                  String    @unique

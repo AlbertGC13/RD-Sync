@@ -6,12 +6,10 @@
  * design (PR4.2). No database connection required — the tests validate
  * the generated Prisma client types and the migration SQL file.
  *
- * TDD: RED phase — these tests reference models that do NOT exist yet.
- * After schema + migration, they should pass.
  */
 
 import { describe, it, expect } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -35,8 +33,6 @@ describe("BankAutoLoginConfig model contract", () => {
     };
     expect(assertShape).toBeDefined();
 
-    // Runtime: verify the type was imported successfully (non-undefined).
-    expect(true).toBe(true);
   });
 
   it("breakerState is a string (closed|open only, NO half_open)", () => {
@@ -67,7 +63,6 @@ describe("BankAdapterConfig model contract", () => {
       void row;
     };
     expect(assertShape).toBeDefined();
-    expect(true).toBe(true);
   });
 
   it("scrapingEnabled defaults to true per design", () => {
@@ -90,95 +85,64 @@ describe("BankAdapterConfig model contract", () => {
 // ---------------------------------------------------------------------------
 
 describe("migration SQL for BankAutoLoginConfig + BankAdapterConfig", () => {
-  const migrationDir = resolve(process.cwd(), "prisma/migrations");
+  const pr4ConfigMigrationSql = readPr4ConfigMigrationSql();
 
   it("contains a migration file that creates both tables", () => {
-    // Find the migration directory that adds auto-login config tables.
-    // We look for a migration whose SQL mentions both table names.
-    const migrations = readdirSync(migrationDir, { withFileTypes: true })
-      .filter((d: { isDirectory: () => boolean }) => d.isDirectory())
-      .map((d: { name: string }) => d.name)
-      .sort();
-
-    // Find the latest migration (should be the one we create).
-    const latestMigration = migrations[migrations.length - 1];
-    const sqlPath = resolve(migrationDir, latestMigration, "migration.sql");
-    const sql = readFileSync(sqlPath, "utf-8");
-
     // Must create both tables
-    expect(sql).toContain("CREATE TABLE \"BankAutoLoginConfig\"");
-    expect(sql).toContain("CREATE TABLE \"BankAdapterConfig\"");
+    expect(pr4ConfigMigrationSql).toContain("CREATE TABLE \"BankAutoLoginConfig\"");
+    expect(pr4ConfigMigrationSql).toContain("CREATE TABLE \"BankAdapterConfig\"");
   });
 
   it("BankAutoLoginConfig has correct columns and constraints", () => {
-    const migrations = readdirSync(migrationDir, { withFileTypes: true })
-      .filter((d: { isDirectory: () => boolean }) => d.isDirectory())
-      .map((d: { name: string }) => d.name)
-      .sort();
-
-    const latestMigration = migrations[migrations.length - 1];
-    const sql = readFileSync(
-      resolve(migrationDir, latestMigration, "migration.sql"),
-      "utf-8"
-    );
-
     // Required columns
-    expect(sql).toContain('"bankCode" TEXT NOT NULL');
-    expect(sql).toContain('"autoLoginEnabled" BOOLEAN NOT NULL DEFAULT false');
-    expect(sql).toContain('"breakerState" TEXT NOT NULL DEFAULT \'closed\'');
-    expect(sql).toContain('"breakerFailureCount" INTEGER NOT NULL DEFAULT 0');
-    expect(sql).toContain('"breakerFailureWindowStart" TIMESTAMP(3)');
-    expect(sql).toContain('"breakerOpenedAt" TIMESTAMP(3)');
-    expect(sql).toContain('"breakerLastResetAt" TIMESTAMP(3)');
-    expect(sql).toContain('"updatedBy" TEXT');
+    expect(pr4ConfigMigrationSql).toContain('"bankCode" TEXT NOT NULL');
+    expect(pr4ConfigMigrationSql).toContain('"autoLoginEnabled" BOOLEAN NOT NULL DEFAULT false');
+    expect(pr4ConfigMigrationSql).toContain('"breakerState" TEXT NOT NULL DEFAULT \'closed\'');
+    expect(pr4ConfigMigrationSql).toContain('"breakerFailureCount" INTEGER NOT NULL DEFAULT 0');
+    expect(pr4ConfigMigrationSql).toContain('"breakerFailureWindowStart" TIMESTAMP(3)');
+    expect(pr4ConfigMigrationSql).toContain('"breakerOpenedAt" TIMESTAMP(3)');
+    expect(pr4ConfigMigrationSql).toContain('"breakerLastResetAt" TIMESTAMP(3)');
+    expect(pr4ConfigMigrationSql).toContain('"updatedBy" TEXT');
 
     // Unique constraint on bankCode
-    expect(sql).toContain('"BankAutoLoginConfig_bankCode_key"');
+    expect(pr4ConfigMigrationSql).toContain('"BankAutoLoginConfig_bankCode_key"');
+    // DB-level invariant for breakerState
+    expect(pr4ConfigMigrationSql).toContain(
+      'CONSTRAINT "BankAutoLoginConfig_breakerState_check" CHECK ("breakerState" IN (\'closed\', \'open\'))'
+    );
     // Foreign key to Bank.code
-    expect(sql).toContain('"BankAutoLoginConfig_bankCode_fkey"');
-    expect(sql).toContain('REFERENCES "Bank"("code")');
+    expect(pr4ConfigMigrationSql).toContain('"BankAutoLoginConfig_bankCode_fkey"');
+    expect(pr4ConfigMigrationSql).toContain('REFERENCES "Bank"("code")');
   });
 
   it("BankAdapterConfig has correct columns and constraints", () => {
-    const migrations = readdirSync(migrationDir, { withFileTypes: true })
-      .filter((d: { isDirectory: () => boolean }) => d.isDirectory())
-      .map((d: { name: string }) => d.name)
-      .sort();
-
-    const latestMigration = migrations[migrations.length - 1];
-    const sql = readFileSync(
-      resolve(migrationDir, latestMigration, "migration.sql"),
-      "utf-8"
-    );
-
     // Required columns
-    expect(sql).toContain('"bankCode" TEXT NOT NULL');
-    expect(sql).toContain('"scrapingEnabled" BOOLEAN NOT NULL DEFAULT true');
-    expect(sql).toContain('"updatedBy" TEXT');
+    expect(pr4ConfigMigrationSql).toContain('"bankCode" TEXT NOT NULL');
+    expect(pr4ConfigMigrationSql).toContain('"scrapingEnabled" BOOLEAN NOT NULL DEFAULT true');
+    expect(pr4ConfigMigrationSql).toContain('"updatedBy" TEXT');
 
     // Unique constraint on bankCode
-    expect(sql).toContain('"BankAdapterConfig_bankCode_key"');
+    expect(pr4ConfigMigrationSql).toContain('"BankAdapterConfig_bankCode_key"');
     // Foreign key to Bank.code
-    expect(sql).toContain('"BankAdapterConfig_bankCode_fkey"');
-    expect(sql).toContain('REFERENCES "Bank"("code")');
+    expect(pr4ConfigMigrationSql).toContain('"BankAdapterConfig_bankCode_fkey"');
+    expect(pr4ConfigMigrationSql).toContain('REFERENCES "Bank"("code")');
   });
 
   it("does NOT contain any half_open breaker state", () => {
-    const migrations = readdirSync(migrationDir, { withFileTypes: true })
-      .filter((d: { isDirectory: () => boolean }) => d.isDirectory())
-      .map((d: { name: string }) => d.name)
-      .sort();
-
-    const latestMigration = migrations[migrations.length - 1];
-    const sql = readFileSync(
-      resolve(migrationDir, latestMigration, "migration.sql"),
-      "utf-8"
-    );
-
     // The design explicitly prohibits half_open state
-    expect(sql.toLowerCase()).not.toContain("half_open");
+    expect(pr4ConfigMigrationSql.toLowerCase()).not.toContain("half_open");
   });
 });
+
+function readPr4ConfigMigrationSql(): string {
+  return readFileSync(
+    resolve(
+      process.cwd(),
+      "prisma/migrations/20260702000000_add_bank_auto_login_and_adapter_config/migration.sql"
+    ),
+    "utf-8"
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Schema model back-relation validation

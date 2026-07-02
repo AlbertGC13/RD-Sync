@@ -11,7 +11,8 @@ CREATE TABLE "BankAutoLoginConfig" (
     "updatedAt" TIMESTAMP(3) NOT NULL,
     "updatedBy" TEXT,
 
-    CONSTRAINT "BankAutoLoginConfig_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "BankAutoLoginConfig_pkey" PRIMARY KEY ("id"),
+    CONSTRAINT "BankAutoLoginConfig_breakerState_check" CHECK ("breakerState" IN ('closed', 'open'))
 );
 
 -- CreateTable
