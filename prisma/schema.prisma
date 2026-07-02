@@ -88,16 +88,18 @@ model UserRole {
 
 // Change 4: DROP sessions EncryptedSessionRef[] from Bank (EncryptedSessionRef model removed).
 model Bank {
-  id           String        @id @default(cuid())
-  code         String        @unique
-  name         String
-  isActive     Boolean       @default(true)
-  accounts          BankAccount[]
-  scrapeRuns        ScrapeRun[]
-  transactions      Transaction[]
-  bankCredential    BankCredential?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  id                 String                @id @default(cuid())
+  code               String                @unique
+  name               String
+  isActive           Boolean               @default(true)
+  accounts           BankAccount[]
+  scrapeRuns         ScrapeRun[]
+  transactions       Transaction[]
+  bankCredential     BankCredential?
+  autoLoginConfig    BankAutoLoginConfig?
+  adapterConfig      BankAdapterConfig?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
 }
 
 model BankAccount {
@@ -197,4 +199,33 @@ model BankCredential {
   lastRotatedAt             DateTime?
   createdAt                 DateTime @default(now())
   updatedAt                 DateTime @updatedAt
+}
+
+// PR4: Per-bank auto-login kill switch + circuit breaker state.
+// autoLoginEnabled is the manual kill switch (default off).
+// breakerState remains a String; the PR4.2 migration enforces closed|open only — NO half_open.
+model BankAutoLoginConfig {
+  id                        String    @id @default(cuid())
+  bankCode                  String    @unique
+  bank                      Bank      @relation(fields: [bankCode], references: [code], onDelete: Cascade)
+  autoLoginEnabled          Boolean   @default(false)
+  breakerState              String    @default("closed")
+  breakerFailureCount       Int       @default(0)
+  breakerFailureWindowStart DateTime?
+  breakerOpenedAt           DateTime?
+  breakerLastResetAt        DateTime?
+  updatedAt                 DateTime  @updatedAt
+  updatedBy                 String?
+}
+
+// PR4: Per-bank adapter kill switch (read-only scraping).
+// scrapingEnabled is SEPARATE from autoLoginEnabled — disabling it
+// stops ALL scraping for that bank without disabling other banks.
+model BankAdapterConfig {
+  id              String   @id @default(cuid())
+  bankCode        String   @unique
+  bank            Bank     @relation(fields: [bankCode], references: [code], onDelete: Cascade)
+  scrapingEnabled Boolean  @default(true)
+  updatedAt       DateTime @updatedAt
+  updatedBy       String?
 }
