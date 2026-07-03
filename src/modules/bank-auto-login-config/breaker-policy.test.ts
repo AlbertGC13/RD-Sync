@@ -18,7 +18,7 @@ const closed = (overrides: Partial<BreakerRuntimeState> = {}): BreakerRuntimeSta
 const minutes = (n: number) => n * 60 * 1000;
 
 describe("AutoLoginCircuitBreakerPolicy constants", () => {
-  it("matches the design.md conservative policy verbatim", () => {
+  it("matches the enforced conservative policy constants", () => {
     expect(AutoLoginCircuitBreakerPolicy).toEqual({
       maxAttemptsPerEvent: 1,
       failureWindowMs: minutes(30),
