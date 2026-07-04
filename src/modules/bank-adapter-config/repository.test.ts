@@ -10,8 +10,15 @@ const RECORD_SELECT = {
 } as const;
 
 type FindUniqueArgs = { where: { bankCode: string }; select?: unknown };
-type UpdateArgs = { where: { bankCode: string }; data: { scrapingEnabled: boolean; updatedBy: string }; select?: unknown };
-type FindUniqueResult = BankAdapterConfigRecord | { bankCode: string } | null;
+type BankFindUniqueArgs = { where: { code: string }; select?: unknown };
+type UpsertArgs = {
+  where: { bankCode: string };
+  update: { scrapingEnabled: boolean; updatedBy: string };
+  create: { bankCode: string; scrapingEnabled: boolean; updatedBy: string };
+  select?: unknown;
+};
+type FindUniqueResult = BankAdapterConfigRecord | null;
+type BankFindUniqueResult = { code: string } | null;
 
 function defaultRow(overrides: Partial<BankAdapterConfigRecord> = {}): BankAdapterConfigRecord {
   return {
@@ -26,20 +33,27 @@ function defaultRow(overrides: Partial<BankAdapterConfigRecord> = {}): BankAdapt
 function makePrisma(
   overrides: {
     findUnique?: FindUniqueResult | ((args: FindUniqueArgs) => FindUniqueResult | Promise<FindUniqueResult>);
-    update?: BankAdapterConfigRecord | ((args: UpdateArgs) => BankAdapterConfigRecord | Promise<BankAdapterConfigRecord>);
+    bankFindUnique?: BankFindUniqueResult | ((args: BankFindUniqueArgs) => BankFindUniqueResult | Promise<BankFindUniqueResult>);
+    upsert?: BankAdapterConfigRecord | ((args: UpsertArgs) => BankAdapterConfigRecord | Promise<BankAdapterConfigRecord>);
   } = {},
 ) {
+  const bank = {
+    findUnique: vi.fn((args: BankFindUniqueArgs) => {
+      const result = overrides.bankFindUnique ?? null;
+      return Promise.resolve(typeof result === "function" ? result(args) : result);
+    }),
+  };
   const bankAdapterConfig = {
     findUnique: vi.fn((args: FindUniqueArgs) => {
       const result = overrides.findUnique ?? null;
       return Promise.resolve(typeof result === "function" ? result(args) : result);
     }),
-    update: vi.fn((args: UpdateArgs) => {
-      const result = overrides.update ?? defaultRow();
+    upsert: vi.fn((args: UpsertArgs) => {
+      const result = overrides.upsert ?? defaultRow();
       return Promise.resolve(typeof result === "function" ? result(args) : result);
     }),
   };
-  return { prisma: { bankAdapterConfig } as unknown as PrismaClient, bankAdapterConfig };
+  return { prisma: { bank, bankAdapterConfig } as unknown as PrismaClient, bank, bankAdapterConfig };
 }
 
 describe("BankAdapterConfigRepository.getByBankCode", () => {
@@ -65,40 +79,45 @@ describe("BankAdapterConfigRepository.getByBankCode", () => {
 
 describe("BankAdapterConfigRepository.setScrapingEnabled", () => {
   it("is a no-op for an unknown bankCode — never falls back to another bank", async () => {
-    const { prisma, bankAdapterConfig } = makePrisma({ findUnique: null });
+    const { prisma, bank, bankAdapterConfig } = makePrisma({ bankFindUnique: null });
     const repo = new BankAdapterConfigRepository(prisma);
     await expect(repo.setScrapingEnabled("unknown", false, "admin-1")).resolves.toBeNull();
-    expect(bankAdapterConfig.findUnique).toHaveBeenCalledWith({ where: { bankCode: "unknown" }, select: { bankCode: true } });
-    expect(bankAdapterConfig.update).not.toHaveBeenCalled();
+    expect(bank.findUnique).toHaveBeenCalledWith({ where: { code: "unknown" }, select: { code: true } });
+    expect(bankAdapterConfig.findUnique).not.toHaveBeenCalled();
+    expect(bankAdapterConfig.upsert).not.toHaveBeenCalled();
   });
 
-  it("disables scraping for one bank without touching auto-login state (separate kill switch)", async () => {
-    const { prisma, bankAdapterConfig } = makePrisma({
-      findUnique: defaultRow(),
-      update: defaultRow({ scrapingEnabled: false, updatedBy: "admin-1" }),
+  it("creates config for a known bank missing a config row", async () => {
+    const { prisma, bank, bankAdapterConfig } = makePrisma({
+      bankFindUnique: { code: "popular" },
+      upsert: defaultRow({ scrapingEnabled: false, updatedBy: "admin-1" }),
     });
     const repo = new BankAdapterConfigRepository(prisma);
     const record = await repo.setScrapingEnabled("popular", false, "admin-1");
     expect(record).toMatchObject({ scrapingEnabled: false, updatedBy: "admin-1" });
-    expect(bankAdapterConfig.findUnique).toHaveBeenCalledWith({ where: { bankCode: "popular" }, select: { bankCode: true } });
-    expect(bankAdapterConfig.update).toHaveBeenCalledWith({
+    expect(bank.findUnique).toHaveBeenCalledWith({ where: { code: "popular" }, select: { code: true } });
+    expect(bankAdapterConfig.findUnique).not.toHaveBeenCalled();
+    expect(bankAdapterConfig.upsert).toHaveBeenCalledWith({
       where: { bankCode: "popular" },
-      data: { scrapingEnabled: false, updatedBy: "admin-1" },
+      update: { scrapingEnabled: false, updatedBy: "admin-1" },
+      create: { bankCode: "popular", scrapingEnabled: false, updatedBy: "admin-1" },
       select: RECORD_SELECT,
     });
   });
 
   it("re-enables scraping (rollback path)", async () => {
-    const { prisma, bankAdapterConfig } = makePrisma({
-      findUnique: defaultRow({ scrapingEnabled: false }),
-      update: defaultRow({ scrapingEnabled: true, updatedBy: "admin-2" }),
+    const { prisma, bank, bankAdapterConfig } = makePrisma({
+      bankFindUnique: { code: "popular" },
+      upsert: defaultRow({ scrapingEnabled: true, updatedBy: "admin-2" }),
     });
     const repo = new BankAdapterConfigRepository(prisma);
     const record = await repo.setScrapingEnabled("popular", true, "admin-2");
     expect(record?.scrapingEnabled).toBe(true);
-    expect(bankAdapterConfig.update).toHaveBeenCalledWith({
+    expect(bank.findUnique).toHaveBeenCalledWith({ where: { code: "popular" }, select: { code: true } });
+    expect(bankAdapterConfig.upsert).toHaveBeenCalledWith({
       where: { bankCode: "popular" },
-      data: { scrapingEnabled: true, updatedBy: "admin-2" },
+      update: { scrapingEnabled: true, updatedBy: "admin-2" },
+      create: { bankCode: "popular", scrapingEnabled: true, updatedBy: "admin-2" },
       select: RECORD_SELECT,
     });
   });
