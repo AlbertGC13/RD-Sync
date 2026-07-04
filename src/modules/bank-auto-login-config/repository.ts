@@ -1,12 +1,4 @@
-/**
- * Prisma repository for `BankAutoLoginConfig` — per-bank auto-login kill
- * switch + circuit-breaker state. Speaks domain `bankCode` (`Bank.code`)
- * everywhere, never Prisma's internal `Bank.id`. Unknown bankCode always
- * fails closed (null / no-op, never falls back to another bank). Unused
- * in production yet — the state machine (PR4.4/4.5) is the first caller.
- */
-
-import type { PrismaClient } from "../../generated/prisma/client";
+import { Prisma, type PrismaClient } from "../../generated/prisma/client";
 import { nextStateOnFailure, type BreakerState } from "./breaker-policy";
 
 export interface BankAutoLoginConfigRecord {
@@ -21,17 +13,8 @@ export interface BankAutoLoginConfigRecord {
   updatedBy: string | null;
 }
 
-type Row = {
-  bankCode: string;
-  autoLoginEnabled: boolean;
-  breakerState: string;
-  breakerFailureCount: number;
-  breakerFailureWindowStart: Date | null;
-  breakerOpenedAt: Date | null;
-  breakerLastResetAt: Date | null;
-  updatedAt: Date;
-  updatedBy: string | null;
-};
+type Row = Omit<BankAutoLoginConfigRecord, "breakerState"> & { breakerState: string };
+type BankAutoLoginConfigTx = Pick<PrismaClient, "bankAutoLoginConfig">;
 
 const RECORD_SELECT = {
   bankCode: true,
@@ -45,7 +28,8 @@ const RECORD_SELECT = {
   updatedBy: true,
 } as const;
 
-/** Validates the persisted breaker state against the closed|open union — rejects any other value. */
+const SERIALIZABLE_RETRY_ATTEMPTS = 3;
+
 function toBreakerState(value: string): BreakerState {
   if (value !== "closed" && value !== "open") {
     throw new Error(`Invalid breaker state persisted for BankAutoLoginConfig: ${value}`);
@@ -57,19 +41,18 @@ function mapRow(row: Row): BankAutoLoginConfigRecord {
   return { ...row, breakerState: toBreakerState(row.breakerState) };
 }
 
+function hasPrismaCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === code;
+}
+
 export class BankAutoLoginConfigRepository {
   constructor(private readonly prisma: PrismaClient) {}
 
-  /** Returns `null` for an unknown bankCode — never falls back to another bank. */
   async getByBankCode(bankCode: string): Promise<BankAutoLoginConfigRecord | null> {
-    const row = await this.prisma.bankAutoLoginConfig.findUnique({
-      where: { bankCode },
-      select: RECORD_SELECT,
-    });
+    const row = await this.prisma.bankAutoLoginConfig.findUnique({ where: { bankCode }, select: RECORD_SELECT });
     return row ? mapRow(row) : null;
   }
 
-  /** Auto-provisions the default row (mirrors `upsertBankByCode`). Fails closed (null) if the parent Bank row is missing. */
   async upsertDefaults(bankCode: string): Promise<BankAutoLoginConfigRecord | null> {
     try {
       const row = await this.prisma.bankAutoLoginConfig.upsert({
@@ -80,39 +63,36 @@ export class BankAutoLoginConfigRepository {
       });
       return mapRow(row);
     } catch (error: unknown) {
-      if (isForeignKeyViolation(error)) return null;
+      if (hasPrismaCode(error, "P2003")) return null;
       throw error;
     }
   }
 
-  /** Applies the pure `nextStateOnFailure` transition for one failure at `now`. Fail-closed no-op for an unknown bankCode. */
   async recordFailure(bankCode: string, now: Date): Promise<BankAutoLoginConfigRecord | null> {
-    const existing = await this.prisma.bankAutoLoginConfig.findUnique({
-      where: { bankCode },
-      select: RECORD_SELECT,
-    });
-    if (!existing) return null;
+    return this.runSerializableWithRetry(async (tx) => {
+      const existing = await tx.bankAutoLoginConfig.findUnique({ where: { bankCode }, select: RECORD_SELECT });
+      if (!existing) return null;
 
-    const next = nextStateOnFailure(mapRow(existing), now);
-    const row = await this.prisma.bankAutoLoginConfig.update({
-      where: { bankCode },
-      data: {
-        breakerState: next.breakerState,
-        breakerFailureCount: next.breakerFailureCount,
-        breakerFailureWindowStart: next.breakerFailureWindowStart,
-        ...(next.breakerOpenedAt ? { breakerOpenedAt: next.breakerOpenedAt } : {}),
-      },
-      select: RECORD_SELECT,
+      const current = mapRow(existing);
+      if (current.breakerState === "open") return current;
+
+      const next = nextStateOnFailure(current, now);
+      const row = await tx.bankAutoLoginConfig.update({
+        where: { bankCode },
+        data: {
+          breakerState: next.breakerState,
+          breakerFailureCount: next.breakerFailureCount,
+          breakerFailureWindowStart: next.breakerFailureWindowStart,
+          breakerOpenedAt: next.breakerOpenedAt,
+        },
+        select: RECORD_SELECT,
+      });
+      return mapRow(row);
     });
-    return mapRow(row);
   }
 
-  /** Explicit force-open, independent of failure counting. Idempotent while already open; no-op for unknown bankCode. */
   async openBreaker(bankCode: string, now: Date): Promise<BankAutoLoginConfigRecord | null> {
-    const existing = await this.prisma.bankAutoLoginConfig.findUnique({
-      where: { bankCode },
-      select: RECORD_SELECT,
-    });
+    const existing = await this.prisma.bankAutoLoginConfig.findUnique({ where: { bankCode }, select: RECORD_SELECT });
     if (!existing) return null;
     if (existing.breakerState === "open") return mapRow(existing);
 
@@ -124,7 +104,6 @@ export class BankAutoLoginConfigRepository {
     return mapRow(row);
   }
 
-  /** The ONLY open->closed transition. Clears count/window, stamps `breakerLastResetAt`; requires `updatedBy`. */
   async resetBreaker(bankCode: string, updatedBy: string, now: Date = new Date()): Promise<BankAutoLoginConfigRecord | null> {
     if (!updatedBy) throw new Error("resetBreaker requires an updatedBy actor id");
 
@@ -137,6 +116,7 @@ export class BankAutoLoginConfigRepository {
         breakerState: "closed",
         breakerFailureCount: 0,
         breakerFailureWindowStart: null,
+        breakerOpenedAt: null,
         breakerLastResetAt: now,
         updatedBy,
       },
@@ -145,7 +125,6 @@ export class BankAutoLoginConfigRepository {
     return mapRow(row);
   }
 
-  /** Flips the manual auto-login kill switch. Fail-closed no-op for an unknown bankCode. */
   async setAutoLoginEnabled(bankCode: string, enabled: boolean, updatedBy: string): Promise<BankAutoLoginConfigRecord | null> {
     const existing = await this.prisma.bankAutoLoginConfig.findUnique({ where: { bankCode }, select: { bankCode: true } });
     if (!existing) return null;
@@ -157,13 +136,15 @@ export class BankAutoLoginConfigRepository {
     });
     return mapRow(row);
   }
-}
 
-function isForeignKeyViolation(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code: unknown }).code === "P2003"
-  );
+  private async runSerializableWithRetry<T>(operation: (tx: BankAutoLoginConfigTx) => Promise<T>): Promise<T> {
+    for (let attempt = 1; attempt <= SERIALIZABLE_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.prisma.$transaction(operation, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      } catch (error: unknown) {
+        if (!hasPrismaCode(error, "P2034") || attempt === SERIALIZABLE_RETRY_ATTEMPTS) throw error;
+      }
+    }
+    throw new Error("Unreachable serializable transaction retry state");
+  }
 }
