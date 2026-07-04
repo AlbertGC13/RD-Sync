@@ -1,8 +1,9 @@
 /**
  * Prisma repository for `BankAdapterConfig` — the per-bank read-only adapter
- * kill switch. Separate from `BankAutoLoginConfig.autoLoginEnabled`:
- * disabling this stops ALL scraping (read-only included) for one bank
- * without touching auto-login state or any other bank.
+ * kill-switch state. Separate from `BankAutoLoginConfig.autoLoginEnabled`:
+ * disabling this persists the intent to stop adapter scraping for one bank
+ * without touching auto-login state or any other bank. Future scrape-path wiring
+ * enforces this persisted state at runtime.
  *
  * Repos speak domain `bankCode` (`Bank.code`) everywhere, never Prisma's
  * internal `Bank.id`. An unknown `bankCode` always fails closed: methods
@@ -40,14 +41,15 @@ export class BankAdapterConfigRepository {
     return row ?? null;
   }
 
-  /** Flips the adapter (read-only scraping) kill switch. Fail-closed no-op for an unknown bankCode. */
+  /** Persists the adapter scraping kill-switch state. Fail-closed no-op for an unknown bankCode. */
   async setScrapingEnabled(bankCode: string, enabled: boolean, updatedBy: string): Promise<BankAdapterConfigRecord | null> {
-    const existing = await this.prisma.bankAdapterConfig.findUnique({ where: { bankCode }, select: { bankCode: true } });
-    if (!existing) return null;
+    const bank = await this.prisma.bank.findUnique({ where: { code: bankCode }, select: { code: true } });
+    if (!bank) return null;
 
-    const row = await this.prisma.bankAdapterConfig.update({
+    const row = await this.prisma.bankAdapterConfig.upsert({
       where: { bankCode },
-      data: { scrapingEnabled: enabled, updatedBy },
+      update: { scrapingEnabled: enabled, updatedBy },
+      create: { bankCode, scrapingEnabled: enabled, updatedBy },
       select: RECORD_SELECT,
     });
     return row;
