@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createBankAutoLoginStrategy, executeScrapeTimeAutoLoginTrigger, type BankAutoLoginPage } from "./auto-login";
+import { encryptCredentialField } from "../../modules/bank-credentials/crypto";
+import { createBankAutoLoginStrategy, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginTrigger, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
 import type { BankPortalConfig } from "./login-mutation-guard";
 
 const portalConfig: BankPortalConfig = {
@@ -472,5 +473,164 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
     })).resolves.toEqual({ status: "needs_admin_action", reason: "protected_flow", safeSummary: "MFA is required" });
 
     expect(recordLockReleaseFailure.mock.calls).toEqual([[{ bankCode: "popular", expiredEventId: "E1" }]]);
+  });
+});
+
+describe("createScrapeTimeAutoLoginRunner", () => {
+  const key = Buffer.alloc(32, 7);
+  const keyResolver = () => key;
+
+  function encryptedCredentialRecord(bankCode = "popular") {
+    return {
+      bankCode,
+      isActive: true,
+      keyVersion: 1,
+      encryptedUsernameEnvelope: JSON.stringify(encryptCredentialField("bank-user", keyResolver)),
+      encryptedPasswordEnvelope: JSON.stringify(encryptCredentialField("bank-password", keyResolver)),
+    };
+  }
+
+  it("fails closed for an explicit unknown bank without falling back to Popular", async () => {
+    const findByBankCode = vi.fn();
+    const run = createScrapeTimeAutoLoginRunner({
+      adapterRegistry: { get: vi.fn().mockReturnValue(undefined) },
+      autoLoginConfigs: { getByBankCode: vi.fn() },
+      credentials: { findByBankCode },
+      keyResolver,
+      lock: { acquire: vi.fn(), release: vi.fn() },
+      cdpUrlForBankCode: vi.fn(),
+      ensureBrowser: vi.fn(),
+    });
+    await expect(run({ data: { bankId: "bhd", expiredEventId: "E1" } })).resolves.toMatchObject({
+      status: "needs_admin_action",
+      reason: "unsupported_bank",
+    });
+    expect(findByBankCode).not.toHaveBeenCalled();
+  });
+
+  it("skips auto-login safely when the per-bank kill switch is off", async () => {
+    const findByBankCode = vi.fn();
+    const acquire = vi.fn();
+    const run = createScrapeTimeAutoLoginRunner({
+      adapterRegistry: { get: vi.fn().mockReturnValue({ bankCode: "popular", createAutoLoginStrategy: vi.fn() }) },
+      autoLoginConfigs: { getByBankCode: vi.fn().mockResolvedValue({ autoLoginEnabled: false, breakerState: "closed" }) },
+      credentials: { findByBankCode },
+      keyResolver,
+      lock: { acquire, release: vi.fn() },
+      cdpUrlForBankCode: vi.fn(),
+      ensureBrowser: vi.fn(),
+    });
+    await expect(run({ data: { bankId: "popular", expiredEventId: "E1" } })).resolves.toBeNull();
+    expect(findByBankCode).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the stored credential belongs to a different bank", async () => {
+    const acquire = vi.fn();
+    const ensureBrowser = vi.fn();
+    const run = createScrapeTimeAutoLoginRunner({
+      adapterRegistry: { get: vi.fn().mockReturnValue({ bankCode: "popular", createAutoLoginStrategy: vi.fn() }) },
+      autoLoginConfigs: { getByBankCode: vi.fn().mockResolvedValue({ autoLoginEnabled: true, breakerState: "closed" }) },
+      credentials: { findByBankCode: vi.fn().mockResolvedValue(encryptedCredentialRecord("bhd")) },
+      keyResolver,
+      lock: { acquire, release: vi.fn() },
+      cdpUrlForBankCode: vi.fn().mockReturnValue("http://127.0.0.1:9222"),
+      ensureBrowser,
+    });
+
+    await expect(run({ data: { bankId: "popular", expiredEventId: "E1" } })).resolves.toMatchObject({
+      status: "needs_admin_action",
+      reason: "credential_bank_mismatch",
+    });
+    expect(acquire).not.toHaveBeenCalled();
+    expect(ensureBrowser).not.toHaveBeenCalled();
+  });
+
+  it("maps expected config and credential dependency failures to safe admin action outcomes", async () => {
+    const baseDeps = {
+      adapterRegistry: { get: vi.fn().mockReturnValue({ bankCode: "popular", createAutoLoginStrategy: vi.fn() }) },
+      keyResolver,
+      lock: { acquire: vi.fn(), release: vi.fn() },
+      cdpUrlForBankCode: vi.fn().mockReturnValue("http://127.0.0.1:9222"),
+      ensureBrowser: vi.fn(),
+    };
+
+    await expect(createScrapeTimeAutoLoginRunner({
+      ...baseDeps,
+      autoLoginConfigs: { getByBankCode: vi.fn().mockRejectedValue(new Error("database host internal failed")) },
+      credentials: { findByBankCode: vi.fn() },
+    })({ data: { bankId: "popular", expiredEventId: "E1" } })).resolves.toMatchObject({
+      status: "needs_admin_action",
+      reason: "auto_login_config_unavailable",
+    });
+
+    await expect(createScrapeTimeAutoLoginRunner({
+      ...baseDeps,
+      autoLoginConfigs: { getByBankCode: vi.fn().mockResolvedValue({ autoLoginEnabled: true, breakerState: "closed" }) },
+      credentials: { findByBankCode: vi.fn().mockRejectedValue(new Error("vault token=secret failed")) },
+    })({ data: { bankId: "popular", expiredEventId: "E1" } })).resolves.toMatchObject({
+      status: "needs_admin_action",
+      reason: "credential_unavailable",
+    });
+    expect(baseDeps.lock.acquire).not.toHaveBeenCalled();
+  });
+
+  it("uses the production default unavailable browser opener as a safe terminal admin action", async () => {
+    const release = vi.fn().mockResolvedValue(true);
+    const run = createScrapeTimeAutoLoginRunner({
+      adapterRegistry: { get: vi.fn().mockReturnValue({ bankCode: "popular", createAutoLoginStrategy: vi.fn() }) },
+      autoLoginConfigs: { getByBankCode: vi.fn().mockResolvedValue({ autoLoginEnabled: true, breakerState: "closed" }) },
+      credentials: { findByBankCode: vi.fn().mockResolvedValue(encryptedCredentialRecord()) },
+      keyResolver,
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release },
+      cdpUrlForBankCode: vi.fn().mockReturnValue("http://127.0.0.1:9222"),
+      ensureBrowser: unavailableScrapeTimeAutoLoginBrowserOpener,
+    });
+
+    await expect(run({ data: { bankId: "popular", expiredEventId: "E1" } })).resolves.toEqual({
+      status: "needs_admin_action",
+      reason: "browser_unavailable",
+      safeSummary: "Bank auto-login requires admin action",
+    });
+    expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
+  });
+
+  it("passes safe lock-release failure metadata through the runner dependency seam", async () => {
+    const recordLockReleaseFailure = vi.fn();
+    const run = createScrapeTimeAutoLoginRunner({
+      adapterRegistry: { get: vi.fn().mockReturnValue({ bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin: vi.fn().mockResolvedValue({ status: "succeeded" }) }) }) },
+      autoLoginConfigs: { getByBankCode: vi.fn().mockResolvedValue({ autoLoginEnabled: true, breakerState: "closed" }) },
+      credentials: { findByBankCode: vi.fn().mockResolvedValue(encryptedCredentialRecord()) },
+      keyResolver,
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn().mockResolvedValue(false) },
+      cdpUrlForBankCode: vi.fn().mockReturnValue("http://127.0.0.1:9222"),
+      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page: makePage() }),
+      recordLockReleaseFailure,
+    });
+
+    await expect(run({ data: { bankId: "popular", expiredEventId: "E1" } })).resolves.toEqual({ status: "succeeded" });
+    expect(recordLockReleaseFailure).toHaveBeenCalledWith({ bankCode: "popular", expiredEventId: "E1" });
+  });
+
+  it("decrypts active credentials in memory and delegates enabled runs to the scrape-time trigger", async () => {
+    const page = makePage();
+    const autoLogin = vi.fn().mockResolvedValue({ status: "succeeded" });
+    const adapter = { bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin }) };
+    const acquire = vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 });
+    const release = vi.fn().mockResolvedValue(true);
+    const run = createScrapeTimeAutoLoginRunner({
+      adapterRegistry: { get: vi.fn().mockReturnValue(adapter) },
+      autoLoginConfigs: { getByBankCode: vi.fn().mockResolvedValue({ autoLoginEnabled: true, breakerState: "closed" }) },
+      credentials: { findByBankCode: vi.fn().mockResolvedValue(encryptedCredentialRecord()) },
+      keyResolver,
+      lock: { acquire, release },
+      cdpUrlForBankCode: vi.fn().mockReturnValue("http://127.0.0.1:9222"),
+      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page }),
+    });
+
+    await expect(run({ data: { bankId: "popular", expiredEventId: "E1" } })).resolves.toEqual({ status: "succeeded" });
+    expect(autoLogin).toHaveBeenCalledWith({ credential: { bankCode: "popular", username: "bank-user", password: "bank-password" }, page });
+    expect(acquire).toHaveBeenCalledWith("popular", "E1");
+    expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
   });
 });
