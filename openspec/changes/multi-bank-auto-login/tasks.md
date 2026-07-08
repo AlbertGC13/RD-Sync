@@ -94,7 +94,7 @@ Gate: full gates + FRESH 4R review + Judgment Day before merge; PR3B1 <=400 line
 - [x] 4.1c Wire `LockStore` Redis adapter into production `createAutoLoginLock` calls via DI/config.
 - [x] 4.2 `prisma/schema.prisma`: add `BankAutoLoginConfig` (`autoLoginEnabled` default false; breaker `closed|open` only, NO half_open) + `BankAdapterConfig` (`scrapingEnabled` default true); migration.
 - [x] 4.3 Create `src/modules/bank-auto-login-config/` + `src/modules/bank-adapter-config/`: repos + conservative breaker policy (3 failures/30min->open, NO half-open, manual admin reset only clears window, alert on open + <=every 30min).
-- [ ] 4.4 Create `src/worker/scraper/auto-login.ts`: `BankAutoLoginStrategy` state machine + `LoginMutationGuard` (HTTPS + exact origin + login-path allowlist, re-check before fill AND submit, `assertCompatiblePreSubmit`).
+- [x] 4.4 Create `src/worker/scraper/auto-login.ts`: `BankAutoLoginStrategy` state machine + `LoginMutationGuard` (HTTPS + exact origin + login-path allowlist, re-check before fill AND submit, `assertCompatiblePreSubmit`).
 - [ ] 4.5 Wire scrape-time canonical trigger: expired->assert `adapter.bankCode===credential.bankCode`->`assertCdpLoopback`->acquire lock (or skip->manual)->ensureBrowser (or throttled)->login->detect(dashboard|mfa|unknown|redirect|incompatible)->success|needs_admin_action->owner release.
 - [ ] 4.6 Modify `src/modules/bank-sessions/index.ts`: `expired` assigns/retains `expiredEventId` (UUID until restore), records/alerts/schedules only (NO credential submission).
 - [ ] 4.7 Enable Popular: register `createAutoLoginStrategy`, set `autoLoginEnabled=true` (gated); Popular portal-drift fixture (incompatible pre-submit asserts NO fill/submit + post-submit unknown).
