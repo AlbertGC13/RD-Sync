@@ -31,6 +31,16 @@ import { Worker } from "bullmq";
 import { buildRedisConnectionOptions } from "./queues/bullmq-queue";
 import { createIngestionWorker, type WorkerConstructor } from "./ingestion-worker-factory";
 import { resolveDefaultAlertSink } from "./alerts/email-alert-sink";
+import { bankAdapterRegistry } from "../modules/bank-adapters/registry";
+import { BankAutoLoginConfigRepository } from "../modules/bank-auto-login-config/repository";
+import { defaultAutoLoginLock } from "../modules/bank-auto-login-lock/defaults";
+import { BankCredentialRepository } from "../modules/bank-credentials/repository";
+import { resolveCredentialKey } from "../modules/bank-credentials/key-resolver";
+import { createAuditEvent } from "../modules/audit";
+import { BANK_AUTOLOGIN_ACTIONS, BANK_CREDENTIAL_ACTIONS } from "../modules/audit/bank-actions";
+import { getPrismaClient } from "../modules/persistence/prisma-client";
+import { resolveBankBrowserEnv } from "./scraper/browser-runtime";
+import { createScrapeTimeAutoLoginRunner, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginStrategy } from "./scraper/auto-login";
 import { resolveDefaultScraper } from "../app/api/scrape-runs/consumer-defaults";
 import { defaultScrapeRunRepository } from "../app/api/scrape-runs/defaults";
 import { defaultTransactionRepository } from "../app/api/transactions/defaults";
@@ -56,6 +66,62 @@ if (!redisUrl) {
 // ---------------------------------------------------------------------------
 
 const connection = buildRedisConnectionOptions(redisUrl);
+const prisma = getPrismaClient();
+
+function toScrapeTimeAutoLoginStrategy(strategy: unknown, bankCode: string): BankAutoLoginStrategy {
+  if (isScrapeTimeAutoLoginStrategy(strategy)) return strategy;
+  return {
+    bankCode,
+    async autoLogin() {
+      return { status: "needs_admin_action", reason: "incompatible_flow", safeSummary: "Bank auto-login requires admin action" };
+    },
+  };
+}
+
+function isScrapeTimeAutoLoginStrategy(strategy: unknown): strategy is BankAutoLoginStrategy {
+  if (typeof strategy !== "object" || strategy === null) return false;
+  const candidate = strategy as { autoLogin?: unknown };
+  return typeof candidate.autoLogin === "function";
+}
+
+const runScrapeTimeAutoLogin = createScrapeTimeAutoLoginRunner({
+  adapterRegistry: {
+    get(bankCode) {
+      const adapter = bankAdapterRegistry.get(bankCode);
+      if (!adapter) return undefined;
+      return {
+        bankCode: adapter.bankCode,
+        createAutoLoginStrategy: () => toScrapeTimeAutoLoginStrategy(adapter.createAutoLoginStrategy(), adapter.bankCode),
+      };
+    },
+  },
+  autoLoginConfigs: new BankAutoLoginConfigRepository(prisma),
+  credentials: new BankCredentialRepository(prisma),
+  keyResolver: resolveCredentialKey,
+  lock: defaultAutoLoginLock,
+  cdpUrlForBankCode: (bankCode) => resolveBankBrowserEnv(bankCode, process.env).cdpUrl || undefined,
+  ensureBrowser: unavailableScrapeTimeAutoLoginBrowserOpener,
+  async recordLockReleaseFailure({ bankCode, expiredEventId }) {
+    await defaultAuditSink.record(createAuditEvent({
+      actorId: "system:auto-login",
+      actorRole: null,
+      action: BANK_AUTOLOGIN_ACTIONS.FAILED,
+      target: "bank_autologin_lock",
+      targetId: null,
+      metadata: { bankCode, expiredEventId, failure: "lock_release_failed" },
+    }));
+  },
+  async recordCredentialDecryptUse({ bankCode, keyVersion }) {
+    await defaultAuditSink.record(createAuditEvent({
+      actorId: "system:auto-login",
+      actorRole: null,
+      action: BANK_CREDENTIAL_ACTIONS.DECRYPT_USE,
+      target: "bank_credential",
+      targetId: null,
+      metadata: { bankCode, keyVersion },
+    }));
+  },
+});
 
 const processor = createIngestionProcessor({
   scrapeRuns: defaultScrapeRunRepository,
@@ -63,6 +129,7 @@ const processor = createIngestionProcessor({
   adminAlerts: resolveDefaultAlertSink(),
   auditSink: defaultAuditSink,
   resolveScraper: resolveDefaultScraper,
+  runScrapeTimeAutoLogin,
 });
 
 // ---------------------------------------------------------------------------

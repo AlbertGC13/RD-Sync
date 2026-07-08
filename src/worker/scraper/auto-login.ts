@@ -1,5 +1,6 @@
 import { LOGIN_MUTATION_GUARD_ERROR_SUMMARIES, LoginMutationGuard, LoginMutationGuardError, type BankPortalConfig, type LoginMutationPage } from "./login-mutation-guard";
 import { assertCdpLoopback, getSafeCdpErrorSummary } from "./browser-runtime";
+import { decryptCredentialField, type AesGcmEnvelope, type KeyResolver } from "../../modules/bank-credentials/crypto";
 import type { AutoLoginLock } from "../../modules/bank-auto-login-lock";
 
 export interface BankAutoLoginCredential {
@@ -16,6 +17,8 @@ export interface BankAutoLoginPage extends LoginMutationPage {
 export type BankAutoLoginAdminActionReason =
   | "unsupported_bank"
   | "credential_bank_mismatch"
+  | "auto_login_config_unavailable"
+  | "credential_unavailable"
   | "incompatible_flow"
   | "protected_flow"
   | "missing_required_login_control"
@@ -50,9 +53,171 @@ export interface ScrapeTimeAutoLoginTriggerContext {
   recordLockReleaseFailure?(metadata: { bankCode: string; expiredEventId: string }): void | Promise<void>;
 }
 
+export interface ScrapeTimeAutoLoginRunnerJob {
+  data: {
+    bankId: string;
+    expiredEventId?: string;
+  };
+}
+
+export interface ScrapeTimeAutoLoginCredentialRecord {
+  bankCode: string;
+  isActive: boolean;
+  keyVersion: number;
+  encryptedUsernameEnvelope: string;
+  encryptedPasswordEnvelope: string;
+}
+
+export interface ScrapeTimeAutoLoginConfigRecord {
+  autoLoginEnabled: boolean;
+  breakerState: "closed" | "open";
+}
+
+export interface ScrapeTimeAutoLoginRunnerDependencies {
+  adapterRegistry: {
+    get(bankCode: string): { readonly bankCode: string; createAutoLoginStrategy(): BankAutoLoginStrategy } | undefined;
+  };
+  autoLoginConfigs: {
+    getByBankCode(bankCode: string): Promise<ScrapeTimeAutoLoginConfigRecord | null>;
+  };
+  credentials: {
+    findByBankCode(bankCode: string): Promise<ScrapeTimeAutoLoginCredentialRecord | null>;
+  };
+  keyResolver: KeyResolver;
+  lock: Pick<AutoLoginLock, "acquire" | "release"> | null;
+  cdpUrlForBankCode(bankCode: string): string | undefined;
+  ensureBrowser(bankCode: string, cdpUrl: string): Promise<{ status: "ready"; page: BankAutoLoginPage } | { status: "throttled" }>;
+  recordLockReleaseFailure?(metadata: { bankCode: string; expiredEventId: string }): void | Promise<void>;
+  recordCredentialDecryptUse?(metadata: { bankCode: string; keyVersion: number }): void | Promise<void>;
+}
+
 const SAFE_ADMIN_ACTION_SUMMARY = "Bank auto-login requires admin action";
 const SAFE_BROWSER_THROTTLED_SUMMARY = "Bank browser capacity is temporarily unavailable";
 const SAFE_MANUAL_REQUIRED_SUMMARY = "Manual scrape required before retrying bank auto-login";
+
+type CredentialResolution =
+  | { status: "found"; credential: BankAutoLoginCredential }
+  | { status: "not_found" }
+  | BankAutoLoginOutcome;
+
+type RunnerAdapter = ReturnType<ScrapeTimeAutoLoginRunnerDependencies["adapterRegistry"]["get"]>;
+
+export const unavailableScrapeTimeAutoLoginBrowserOpener: ScrapeTimeAutoLoginRunnerDependencies["ensureBrowser"] = async () => { throw new Error("Scrape-time auto-login browser page opener is not wired yet"); };
+
+export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerDependencies) {
+  return async function runScrapeTimeAutoLogin(job: ScrapeTimeAutoLoginRunnerJob): Promise<ScrapeTimeAutoLoginOutcome | null> {
+    const expiredEventId = job.data.expiredEventId;
+    if (!expiredEventId) return null;
+
+    const bankCode = job.data.bankId;
+    const adapter = safelyResolveAdapter(deps, bankCode);
+    if (isAdminActionOutcome(adapter)) return adapter;
+    if (!adapter) return needsAdminAction("unsupported_bank");
+
+    const config = await safelyResolveConfig(deps, bankCode);
+    if (isAdminActionOutcome(config)) return config;
+    if (!config?.autoLoginEnabled || config.breakerState === "open") return null;
+
+    if (!deps.lock) return manualRequired("lock_unavailable");
+
+    const cdpUrl = safelyResolveCdpUrl(deps, bankCode);
+    if (isAdminActionOutcome(cdpUrl)) return cdpUrl;
+    if (!cdpUrl) return needsAdminAction("browser_unavailable");
+
+    const credentialResolution = await resolveAutoLoginCredential(deps, bankCode);
+    if (credentialResolution.status === "not_found") return null;
+    if (isAdminActionOutcome(credentialResolution)) return credentialResolution;
+
+    return executeScrapeTimeAutoLoginTrigger({
+      bankCode,
+      expiredEventId,
+      adapter,
+      credential: credentialResolution.credential,
+      cdpUrl,
+      lock: deps.lock,
+      ensureBrowser: (url) => deps.ensureBrowser(bankCode, url),
+      recordLockReleaseFailure: deps.recordLockReleaseFailure,
+    });
+  };
+}
+
+function safelyResolveAdapter(
+  deps: Pick<ScrapeTimeAutoLoginRunnerDependencies, "adapterRegistry">,
+  bankCode: string,
+): RunnerAdapter | BankAutoLoginOutcome {
+  try {
+    return deps.adapterRegistry.get(bankCode);
+  } catch {
+    return needsAdminAction("auto_login_config_unavailable");
+  }
+}
+
+async function safelyResolveConfig(
+  deps: Pick<ScrapeTimeAutoLoginRunnerDependencies, "autoLoginConfigs">,
+  bankCode: string,
+): Promise<ScrapeTimeAutoLoginConfigRecord | null | BankAutoLoginOutcome> {
+  try {
+    return await deps.autoLoginConfigs.getByBankCode(bankCode);
+  } catch {
+    return needsAdminAction("auto_login_config_unavailable");
+  }
+}
+
+function safelyResolveCdpUrl(
+  deps: Pick<ScrapeTimeAutoLoginRunnerDependencies, "cdpUrlForBankCode">,
+  bankCode: string,
+): string | undefined | BankAutoLoginOutcome {
+  try {
+    return deps.cdpUrlForBankCode(bankCode);
+  } catch {
+    return needsAdminAction("browser_unavailable");
+  }
+}
+
+async function resolveAutoLoginCredential(
+  deps: Pick<ScrapeTimeAutoLoginRunnerDependencies, "credentials" | "keyResolver" | "recordCredentialDecryptUse">,
+  bankCode: string,
+): Promise<CredentialResolution> {
+  let record: ScrapeTimeAutoLoginCredentialRecord | null;
+  try {
+    record = await deps.credentials.findByBankCode(bankCode);
+  } catch {
+    return needsAdminAction("credential_unavailable");
+  }
+  if (!record?.isActive) return { status: "not_found" };
+  if (record.bankCode !== bankCode) return needsAdminAction("credential_bank_mismatch");
+
+  try {
+    const credential = {
+      bankCode,
+      username: decryptCredentialField(parseCredentialEnvelope(record.encryptedUsernameEnvelope), deps.keyResolver),
+      password: decryptCredentialField(parseCredentialEnvelope(record.encryptedPasswordEnvelope), deps.keyResolver),
+    };
+    await recordCredentialDecryptUse(deps, { bankCode, keyVersion: record.keyVersion });
+    return { status: "found", credential };
+  } catch {
+    return needsAdminAction("credential_unavailable");
+  }
+}
+
+async function recordCredentialDecryptUse(
+  deps: Pick<ScrapeTimeAutoLoginRunnerDependencies, "recordCredentialDecryptUse">,
+  metadata: { bankCode: string; keyVersion: number },
+): Promise<void> {
+  try {
+    await deps.recordCredentialDecryptUse?.(metadata);
+  } catch {
+    // Audit/metrics failures must not leak or change scrape-time auto-login safety.
+  }
+}
+
+function parseCredentialEnvelope(json: string): AesGcmEnvelope {
+  const parsed = JSON.parse(json) as Partial<AesGcmEnvelope> | null;
+  if (!parsed || typeof parsed.keyVersion !== "number" || typeof parsed.iv !== "string" || typeof parsed.ciphertext !== "string" || typeof parsed.tag !== "string") {
+    throw new Error("Malformed credential envelope");
+  }
+  return parsed as AesGcmEnvelope;
+}
 
 export async function executeScrapeTimeAutoLoginTrigger(context: ScrapeTimeAutoLoginTriggerContext): Promise<ScrapeTimeAutoLoginOutcome> {
   if (context.adapter.bankCode !== context.bankCode) return needsAdminAction("unsupported_bank");
@@ -224,6 +389,10 @@ async function runGuard(operation: () => Promise<void>): Promise<BankAutoLoginOu
 
 function needsAdminAction(reason: BankAutoLoginAdminActionReason, safeSummary = SAFE_ADMIN_ACTION_SUMMARY): BankAutoLoginOutcome {
   return { status: "needs_admin_action", reason, safeSummary };
+}
+
+function isAdminActionOutcome(value: unknown): value is BankAutoLoginOutcome {
+  return typeof value === "object" && value !== null && "status" in value && value.status === "needs_admin_action";
 }
 
 function hasNonBlankString(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
