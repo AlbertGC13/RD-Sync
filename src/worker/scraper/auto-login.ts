@@ -47,6 +47,7 @@ export interface ScrapeTimeAutoLoginTriggerContext {
   cdpUrl: string;
   lock: Pick<AutoLoginLock, "acquire" | "release">;
   ensureBrowser(cdpUrl: string): Promise<{ status: "ready"; page: BankAutoLoginPage } | { status: "throttled" }>;
+  recordLockReleaseFailure?(metadata: { bankCode: string; expiredEventId: string }): void | Promise<void>;
 }
 
 const SAFE_ADMIN_ACTION_SUMMARY = "Bank auto-login requires admin action";
@@ -81,9 +82,19 @@ export async function executeScrapeTimeAutoLoginTrigger(context: ScrapeTimeAutoL
 
 async function releaseOwnedLock(context: ScrapeTimeAutoLoginTriggerContext, leaseToken: string): Promise<void> {
   try {
-    await context.lock.release(context.bankCode, context.expiredEventId, leaseToken);
+    const released = await context.lock.release(context.bankCode, context.expiredEventId, leaseToken);
+    if (!released) await recordLockReleaseFailure(context);
   } catch {
     // Lock TTL bounds eventual cleanup; do not let infrastructure details leak past the safe outcome.
+    await recordLockReleaseFailure(context);
+  }
+}
+
+async function recordLockReleaseFailure(context: ScrapeTimeAutoLoginTriggerContext): Promise<void> {
+  try {
+    await context.recordLockReleaseFailure?.({ bankCode: context.bankCode, expiredEventId: context.expiredEventId });
+  } catch {
+    // Observability failures must not change the safe auto-login outcome.
   }
 }
 
