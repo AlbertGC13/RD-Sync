@@ -139,6 +139,21 @@ describe("createBankAutoLoginStrategy", () => {
     }
   });
 
+  it("does not treat dashboard path prefix collisions as success", async () => {
+    const page = makePage({ onClick: () => page.setUrl("https://ib.bpd.com.do/dashboardevil") });
+
+    await expect(createBankAutoLoginStrategy(portalConfig).autoLogin({ credential, page })).resolves.toMatchObject({
+      status: "needs_admin_action",
+      reason: "unknown_post_submit_state",
+    });
+  });
+
+  it("treats dashboard subpaths as success", async () => {
+    const page = makePage({ onClick: () => page.setUrl("https://ib.bpd.com.do/dashboard/accounts") });
+
+    await expect(createBankAutoLoginStrategy(portalConfig).autoLogin({ credential, page })).resolves.toEqual({ status: "succeeded" });
+  });
+
   it("maps malformed portal config and browser mutation failures to safe admin action", async () => {
     await expect(createBankAutoLoginStrategy({ ...portalConfig, baseUrl: "not-a-url" }).autoLogin({ credential, page: makePage() })).resolves.toMatchObject({
       status: "needs_admin_action",

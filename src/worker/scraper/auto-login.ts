@@ -103,7 +103,7 @@ async function detectPostSubmitOutcome(page: BankAutoLoginPage, config: BankPort
       !hasUserInfo(baseUrl) &&
       !hasUserInfo(currentUrl) &&
       config.dashboardPathIndicator &&
-      currentUrl.pathname.startsWith(config.dashboardPathIndicator)
+      hasDashboardPathBoundary(currentUrl.pathname, config.dashboardPathIndicator)
     ) {
       return { status: "succeeded" };
     }
@@ -140,4 +140,5 @@ function needsAdminAction(reason: BankAutoLoginAdminActionReason, safeSummary = 
 }
 
 function hasNonBlankString(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
+function hasDashboardPathBoundary(pathname: string, dashboardPathIndicator: string): boolean { return pathname === dashboardPathIndicator || pathname.startsWith(`${dashboardPathIndicator}/`); }
 function hasUserInfo(url: URL): boolean { return url.username.length > 0 || url.password.length > 0; }
