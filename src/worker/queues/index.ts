@@ -2,6 +2,7 @@ import type { JobsOptions } from "bullmq";
 
 import { createAuditEvent, type AuditSink } from "../../modules/audit";
 import { type BankMovement, type TransactionRecord, normalizeBankMovement } from "../../modules/transactions";
+import type { ScrapeTimeAutoLoginOutcome } from "../scraper/auto-login";
 import { redactDiagnosticText, type ScrapeCollectionResult } from "../scraper";
 
 export type ScrapeRunStatus = "queued" | "running" | "succeeded" | "failed" | "needs_admin_action";
@@ -14,6 +15,8 @@ export interface IngestionJobData {
    * the value is a domain code, NOT the Prisma `Bank.id` cuid.
    */
   bankId: string;
+  /** Stable session-expiry event id. When present, the processor may run the canonical scrape-time auto-login trigger before collection. */
+  expiredEventId?: string;
   accountFingerprint: string;
 }
 
@@ -96,6 +99,7 @@ export interface IngestionProcessorDependencies {
   adminAlerts?: AdminAlertSink;
   auditSink?: Pick<AuditSink, "record">;
   now?: () => Date;
+  runScrapeTimeAutoLogin?: (job: IngestionJob) => Promise<ScrapeTimeAutoLoginOutcome | null>;
 }
 
 export interface QueueLike {
@@ -130,24 +134,28 @@ export function createIngestionProcessor(dependencies: IngestionProcessorDepende
     });
 
     try {
+      const autoLoginOutcome = await runScrapeTimeAutoLoginIfNeeded(job, dependencies.runScrapeTimeAutoLogin);
+      if (autoLoginOutcome && shouldStopAfterAutoLogin(autoLoginOutcome)) {
+        return markNeedsAdminActionTerminal(
+          dependencies,
+          job.data,
+          requestedBankCode,
+          autoLoginOutcome.safeSummary,
+          now,
+        );
+      }
+
       const scrapeResult = await scraper.collect();
 
       if (scrapeResult.status === "needs_admin_action") {
         const safeErrorSummary = scrapeResult.safeErrorSummary ?? "Bank session requires admin action";
-        await dependencies.scrapeRuns.markNeedsAdminAction(
-          job.data.runId,
+        return markNeedsAdminActionTerminal(
+          dependencies,
+          job.data,
+          requestedBankCode,
           safeErrorSummary,
-          now(),
+          now,
         );
-        await notifyAdminAttention(dependencies.adminAlerts, job.data, "needs_admin_action", safeErrorSummary);
-        await emitAuditEvent(dependencies.auditSink, {
-          action: "scrape_run.needs_admin_action",
-          runId: job.data.runId,
-          bankId: requestedBankCode,
-          metadata: { safeErrorSummary },
-        });
-
-        return { status: "needs_admin_action", inserted: 0, skipped: 0 };
       }
 
       const records = normalizeMovements(scrapeResult.movements, job.data.runId);
@@ -179,6 +187,49 @@ export function createIngestionProcessor(dependencies: IngestionProcessorDepende
       return { status: "failed", inserted: 0, skipped: 0 };
     }
   };
+}
+
+async function runScrapeTimeAutoLoginIfNeeded(
+  job: IngestionJob,
+  runScrapeTimeAutoLogin: IngestionProcessorDependencies["runScrapeTimeAutoLogin"],
+): Promise<ScrapeTimeAutoLoginOutcome | null> {
+  if (!job.data.expiredEventId || !runScrapeTimeAutoLogin) return null;
+  try {
+    return await runScrapeTimeAutoLogin(job);
+  } catch {
+    return {
+      status: "needs_admin_action",
+      reason: "browser_unavailable",
+      safeSummary: "Bank auto-login requires admin action",
+    };
+  }
+}
+
+function shouldStopAfterAutoLogin(outcome: ScrapeTimeAutoLoginOutcome): outcome is Extract<ScrapeTimeAutoLoginOutcome, { status: "needs_admin_action" | "throttled" }> {
+  return outcome.status === "needs_admin_action" || outcome.status === "throttled";
+}
+
+async function markNeedsAdminActionTerminal(
+  dependencies: Pick<IngestionProcessorDependencies, "scrapeRuns" | "adminAlerts" | "auditSink">,
+  jobData: IngestionJobData,
+  requestedBankCode: string,
+  safeErrorSummary: string,
+  now: () => Date,
+): Promise<IngestionResult> {
+  await dependencies.scrapeRuns.markNeedsAdminAction(
+    jobData.runId,
+    safeErrorSummary,
+    now(),
+  );
+  await notifyAdminAttention(dependencies.adminAlerts, jobData, "needs_admin_action", safeErrorSummary);
+  await emitAuditEvent(dependencies.auditSink, {
+    action: "scrape_run.needs_admin_action",
+    runId: jobData.runId,
+    bankId: requestedBankCode,
+    metadata: { safeErrorSummary },
+  });
+
+  return { status: "needs_admin_action", inserted: 0, skipped: 0 };
 }
 
 export function createIngestionQueueOptions(runId: string): JobsOptions {
