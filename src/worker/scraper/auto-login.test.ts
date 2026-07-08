@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createBankAutoLoginStrategy, type BankAutoLoginPage } from "./auto-login";
+import { createBankAutoLoginStrategy, executeScrapeTimeAutoLoginTrigger, type BankAutoLoginPage } from "./auto-login";
 import type { BankPortalConfig } from "./login-mutation-guard";
 
 const portalConfig: BankPortalConfig = {
@@ -182,5 +182,295 @@ describe("createBankAutoLoginStrategy", () => {
 
     await expect(strategy.autoLogin({ credential, page: mfaPage })).resolves.toMatchObject({ status: "needs_admin_action", reason: "protected_flow" });
     await expect(strategy.autoLogin({ credential, page: unknownPage })).resolves.toMatchObject({ status: "needs_admin_action", reason: "unknown_post_submit_state" });
+  });
+});
+
+describe("executeScrapeTimeAutoLoginTrigger", () => {
+  it("acquires the expired-event lock, runs browser login, and awaits owner release after success", async () => {
+    const page = makePage();
+    const events: string[] = [];
+    let releaseStartedResolve: () => void = () => undefined;
+    let releaseSettledResolve: (value: boolean) => void = () => undefined;
+    const releaseStarted = new Promise<void>((resolve) => { releaseStartedResolve = resolve; });
+    const releaseSettled = new Promise<boolean>((resolve) => { releaseSettledResolve = resolve; });
+    const acquire = vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 7, expiresAt: 12345 });
+    const release = vi.fn(() => {
+      events.push("release started");
+      releaseStartedResolve();
+      return releaseSettled;
+    });
+    const autoLogin = vi.fn(() => Promise.resolve({ status: "succeeded" as const }).then((outcome) => {
+      events.push("autoLogin settled");
+      return outcome;
+    }));
+    const ensureBrowser = vi.fn(() => Promise.resolve({ status: "ready" as const, page }).then((browser) => {
+      events.push("ensureBrowser settled");
+      return browser;
+    }));
+
+    let helperResolved = false;
+    const result = executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular",
+      expiredEventId: "E1",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin }) },
+      credential,
+      cdpUrl: "http://127.0.0.1:9222",
+      lock: { acquire, release },
+      ensureBrowser,
+    }).then((outcome) => {
+      helperResolved = true;
+      events.push("helper resolved");
+      return outcome;
+    });
+
+    await releaseStarted;
+    await Promise.resolve();
+    expect(helperResolved).toBe(false);
+    expect(events).toEqual(["ensureBrowser settled", "autoLogin settled", "release started"]);
+
+    releaseSettledResolve(true);
+    await expect(result).resolves.toEqual({ status: "succeeded" });
+
+    expect(acquire).toHaveBeenCalledWith("popular", "E1");
+    expect(ensureBrowser).toHaveBeenCalledWith("http://127.0.0.1:9222");
+    expect(autoLogin).toHaveBeenCalledWith({ credential, page });
+    expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
+    expect(events).toEqual(["ensureBrowser settled", "autoLogin settled", "release started", "helper resolved"]);
+  });
+
+  it("requires manual scraping when the same expired event lock is already held", async () => {
+    const acquire = vi.fn().mockResolvedValue(null);
+    const ensureBrowser = vi.fn();
+    const release = vi.fn();
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular",
+      expiredEventId: "E1",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => createBankAutoLoginStrategy(portalConfig) },
+      credential,
+      cdpUrl: "http://127.0.0.1:9222",
+      lock: { acquire, release },
+      ensureBrowser,
+    })).resolves.toEqual({
+      status: "manual_required",
+      reason: "lock_busy",
+      safeSummary: "Manual scrape required before retrying bank auto-login",
+    });
+
+    expect(ensureBrowser).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("requires manual scraping without leaking raw errors when lock acquire fails", async () => {
+    const acquire = vi.fn().mockRejectedValue(new Error("redis token=secret unavailable"));
+    const ensureBrowser = vi.fn();
+    const release = vi.fn();
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular",
+      expiredEventId: "E1",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => createBankAutoLoginStrategy(portalConfig) },
+      credential,
+      cdpUrl: "http://127.0.0.1:9222",
+      lock: { acquire, release },
+      ensureBrowser,
+    })).resolves.toEqual({
+      status: "manual_required",
+      reason: "lock_unavailable",
+      safeSummary: "Manual scrape required before retrying bank auto-login",
+    });
+
+    expect(ensureBrowser).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before credential use on adapter mismatch or unsafe CDP URL", async () => {
+    const createAutoLoginStrategy = vi.fn();
+    const acquire = vi.fn();
+    const release = vi.fn();
+    const base = {
+      bankCode: "popular",
+      expiredEventId: "E1",
+      credential: { ...credential, bankCode: "bhd" },
+      lock: { acquire, release },
+      ensureBrowser: vi.fn(),
+    };
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      ...base,
+      adapter: { bankCode: "popular", createAutoLoginStrategy },
+      cdpUrl: "http://127.0.0.1:9222",
+    })).resolves.toMatchObject({ status: "needs_admin_action", reason: "credential_bank_mismatch" });
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      ...base,
+      credential,
+      adapter: { bankCode: "popular", createAutoLoginStrategy },
+      cdpUrl: "http://10.0.0.5:9222",
+    })).resolves.toMatchObject({ status: "needs_admin_action", reason: "browser_unavailable" });
+
+    expect(createAutoLoginStrategy).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on adapter/context bank mismatch before lock, browser, or credential use", async () => {
+    const createAutoLoginStrategy = vi.fn();
+    const acquire = vi.fn();
+    const release = vi.fn();
+    const ensureBrowser = vi.fn();
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "bhd",
+      expiredEventId: "E1",
+      adapter: { bankCode: "popular", createAutoLoginStrategy },
+      credential,
+      cdpUrl: "http://127.0.0.1:9222",
+      lock: { acquire, release },
+      ensureBrowser,
+    })).resolves.toMatchObject({ status: "needs_admin_action", reason: "unsupported_bank" });
+
+    expect(createAutoLoginStrategy).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
+    expect(ensureBrowser).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("owner-releases the lock when browser capacity is throttled", async () => {
+    const acquire = vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 7, expiresAt: 12345 });
+    const release = vi.fn().mockResolvedValue(true);
+    const autoLogin = vi.fn();
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular",
+      expiredEventId: "E1",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin }) },
+      credential,
+      cdpUrl: "http://127.0.0.1:9222",
+      lock: { acquire, release },
+      ensureBrowser: vi.fn().mockResolvedValue({ status: "throttled" }),
+    })).resolves.toEqual({ status: "throttled", safeSummary: "Bank browser capacity is temporarily unavailable" });
+
+    expect(autoLogin).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
+  });
+
+  it("owner-releases the lock when browser startup fails without leaking raw errors", async () => {
+    const release = vi.fn().mockResolvedValue(true);
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular",
+      expiredEventId: "E1",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin: vi.fn() }) },
+      credential,
+      cdpUrl: "http://127.0.0.1:9222",
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 7, expiresAt: 12345 }), release },
+      ensureBrowser: vi.fn().mockRejectedValue(new Error("cdp token=secret refused")),
+    })).resolves.toEqual({
+      status: "needs_admin_action",
+      reason: "browser_unavailable",
+      safeSummary: "Bank auto-login requires admin action",
+    });
+
+    expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
+  });
+
+  it("owner-releases the lock when delegated login returns admin action", async () => {
+    const release = vi.fn().mockResolvedValue(true);
+    const autoLogin = vi.fn().mockResolvedValue({
+      status: "needs_admin_action",
+      reason: "protected_flow",
+      safeSummary: "MFA is required",
+    });
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular",
+      expiredEventId: "E1",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin }) },
+      credential,
+      cdpUrl: "http://127.0.0.1:9222",
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 7, expiresAt: 12345 }), release },
+      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page: makePage() }),
+    })).resolves.toEqual({
+      status: "needs_admin_action",
+      reason: "protected_flow",
+      safeSummary: "MFA is required",
+    });
+
+    expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
+  });
+
+  it("owner-releases the lock and reports portal state unavailable when delegated login rejects", async () => {
+    const release = vi.fn().mockResolvedValue(true);
+    const autoLogin = vi.fn().mockRejectedValue(new Error("portal token=secret crashed"));
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular",
+      expiredEventId: "E1",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin }) },
+      credential,
+      cdpUrl: "http://127.0.0.1:9222",
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 7, expiresAt: 12345 }), release },
+      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page: makePage() }),
+    })).resolves.toEqual({
+      status: "needs_admin_action",
+      reason: "portal_state_unavailable",
+      safeSummary: "Bank auto-login requires admin action",
+    });
+
+    expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
+  });
+
+  it("records safe release failure metadata without changing a successful outcome", async () => {
+    const release = vi.fn().mockRejectedValue(new Error("Redis token=secret failed"));
+    const recordLockReleaseFailure = vi.fn().mockResolvedValue(undefined);
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular",
+      expiredEventId: "E1",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin: vi.fn().mockResolvedValue({ status: "succeeded" }) }) },
+      credential,
+      cdpUrl: "http://127.0.0.1:9222",
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 7, expiresAt: 12345 }), release },
+      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page: makePage() }),
+      recordLockReleaseFailure,
+    })).resolves.toEqual({ status: "succeeded" });
+
+    expect(recordLockReleaseFailure.mock.calls).toEqual([[{ bankCode: "popular", expiredEventId: "E1" }]]);
+  });
+
+  it("records safe release failure metadata when release resolves false", async () => {
+    const release = vi.fn().mockResolvedValue(false);
+    const recordLockReleaseFailure = vi.fn().mockResolvedValue(undefined);
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular",
+      expiredEventId: "E1",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin: vi.fn().mockResolvedValue({ status: "succeeded" }) }) },
+      credential,
+      cdpUrl: "http://127.0.0.1:9222",
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 7, expiresAt: 12345 }), release },
+      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page: makePage() }),
+      recordLockReleaseFailure,
+    })).resolves.toEqual({ status: "succeeded" });
+
+    expect(recordLockReleaseFailure.mock.calls).toEqual([[{ bankCode: "popular", expiredEventId: "E1" }]]);
+  });
+
+  it("swallows release failure hook rejections without changing admin outcomes", async () => {
+    const release = vi.fn().mockRejectedValue(new Error("Redis token=secret failed"));
+    const recordLockReleaseFailure = vi.fn().mockRejectedValue(new Error("metrics token=secret failed"));
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular",
+      expiredEventId: "E1",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin: vi.fn().mockResolvedValue({ status: "needs_admin_action", reason: "protected_flow", safeSummary: "MFA is required" }) }) },
+      credential,
+      cdpUrl: "http://127.0.0.1:9222",
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 7, expiresAt: 12345 }), release },
+      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page: makePage() }),
+      recordLockReleaseFailure,
+    })).resolves.toEqual({ status: "needs_admin_action", reason: "protected_flow", safeSummary: "MFA is required" });
+
+    expect(recordLockReleaseFailure.mock.calls).toEqual([[{ bankCode: "popular", expiredEventId: "E1" }]]);
   });
 });
