@@ -6,8 +6,8 @@ export interface BankPortalConfig {
   usernameSelector: string;
   passwordSelector: string;
   submitSelector: string;
-  mfaIndicatorSelector?: string;
-  incompatibleFlowSelector?: string;
+  mfaIndicatorSelector: string;
+  incompatibleFlowSelector: string;
   dashboardPathIndicator?: string;
 }
 
@@ -54,18 +54,25 @@ export class LoginMutationGuard {
 
   constructor(private readonly config: BankPortalConfig) {
     const baseUrl = parseSafeUrl(config.baseUrl);
-    if (!baseUrl || baseUrl.protocol !== "https:") {
+    if (!baseUrl || baseUrl.protocol !== "https:" || hasUserInfo(baseUrl)) {
       throw new LoginMutationGuardError(
         "malformed_url",
         LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.MALFORMED_PORTAL_URL,
       );
     }
 
+    const requiredSelectors = [config.usernameSelector, config.passwordSelector, config.submitSelector, config.mfaIndicatorSelector, config.incompatibleFlowSelector];
+    if (!requiredSelectors.every(hasNonBlankString)) {
+      throw createPortalStateUnavailableError();
+    }
+
+    const loginPathAllowlist = config.loginPathAllowlist;
+    if (!Array.isArray(loginPathAllowlist) || loginPathAllowlist.length === 0 || !loginPathAllowlist.every(hasNonBlankString)) throw createPortalStateUnavailableError();
     this.allowedOrigin = baseUrl.origin;
-    this.allowedLoginPaths = new Set(config.loginPathAllowlist.map(normalizeAllowedPath));
+    this.allowedLoginPaths = new Set(loginPathAllowlist.map(normalizeAllowedPath));
   }
 
-  async assertLoginPage(page: LoginMutationPage): Promise<void> {
+  private async assertAuthorizedLoginUrl(page: LoginMutationPage): Promise<void> {
     const currentUrl = parseSafeUrl(await this.currentUrl(page));
     if (!currentUrl) {
       throw new LoginMutationGuardError(
@@ -77,6 +84,7 @@ export class LoginMutationGuard {
     if (
       currentUrl.protocol !== "https:" ||
       currentUrl.origin !== this.allowedOrigin ||
+      hasUserInfo(currentUrl) ||
       !this.allowedLoginPaths.has(currentUrl.pathname)
     ) {
       throw new LoginMutationGuardError(
@@ -97,24 +105,18 @@ export class LoginMutationGuard {
 
   async assertCompatiblePreSubmit(page: LoginMutationPage): Promise<void> {
     await this.assertSafeLoginState(page);
-    await this.assertRequiredControls(page, [
-      this.config.usernameSelector,
-      this.config.passwordSelector,
-      this.config.submitSelector,
-    ]);
+    await this.assertRequiredControls(page, [this.config.usernameSelector, this.config.passwordSelector, this.config.submitSelector]);
   }
 
   private async assertSafeLoginState(page: LoginMutationPage): Promise<void> {
-    await this.assertLoginPage(page);
+    await this.assertAuthorizedLoginUrl(page);
 
-    if (this.config.mfaIndicatorSelector && (await this.hasVisibleSelector(page, this.config.mfaIndicatorSelector))) {
+    if (await this.hasVisibleSelector(page, this.config.mfaIndicatorSelector)) {
       throw new LoginMutationGuardError(
         "protected_flow",
         LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.PROTECTED_FLOW,
       );
     }
-
-    if (!this.config.incompatibleFlowSelector) return;
 
     if (await this.hasVisibleSelector(page, this.config.incompatibleFlowSelector)) {
       throw new LoginMutationGuardError(
@@ -153,10 +155,7 @@ export class LoginMutationGuard {
 }
 
 function createPortalStateUnavailableError(): LoginMutationGuardError {
-  return new LoginMutationGuardError(
-    "portal_state_unavailable",
-    LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.PORTAL_STATE_UNAVAILABLE,
-  );
+  return new LoginMutationGuardError("portal_state_unavailable", LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.PORTAL_STATE_UNAVAILABLE);
 }
 
 function parseSafeUrl(rawUrl: string): URL | null {
@@ -167,7 +166,6 @@ function parseSafeUrl(rawUrl: string): URL | null {
   }
 }
 
-function normalizeAllowedPath(path: string): string {
-  if (!path.startsWith("/")) return `/${path}`;
-  return path;
-}
+function hasUserInfo(url: URL): boolean { return url.username.length > 0 || url.password.length > 0; }
+function hasNonBlankString(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
+function normalizeAllowedPath(path: string): string { return path.startsWith("/") ? path : `/${path}`; }
