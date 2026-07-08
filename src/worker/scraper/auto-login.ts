@@ -55,7 +55,7 @@ export interface ScrapeTimeAutoLoginTriggerContext {
 
 export interface ScrapeTimeAutoLoginRunnerJob {
   data: {
-    bankId: string;
+    bankId: string; // Canonical bank code from IngestionJobData, not a database id.
     expiredEventId?: string;
   };
 }
@@ -98,7 +98,7 @@ const SAFE_MANUAL_REQUIRED_SUMMARY = "Manual scrape required before retrying ban
 type CredentialResolution =
   | { status: "found"; credential: BankAutoLoginCredential }
   | { status: "not_found" }
-  | BankAutoLoginOutcome;
+  | Extract<BankAutoLoginOutcome, { status: "needs_admin_action" }>;
 
 type RunnerAdapter = ReturnType<ScrapeTimeAutoLoginRunnerDependencies["adapterRegistry"]["get"]>;
 
@@ -144,7 +144,7 @@ export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerD
 function safelyResolveAdapter(
   deps: Pick<ScrapeTimeAutoLoginRunnerDependencies, "adapterRegistry">,
   bankCode: string,
-): RunnerAdapter | BankAutoLoginOutcome {
+): RunnerAdapter | Extract<BankAutoLoginOutcome, { status: "needs_admin_action" }> {
   try {
     return deps.adapterRegistry.get(bankCode);
   } catch {
@@ -155,7 +155,7 @@ function safelyResolveAdapter(
 async function safelyResolveConfig(
   deps: Pick<ScrapeTimeAutoLoginRunnerDependencies, "autoLoginConfigs">,
   bankCode: string,
-): Promise<ScrapeTimeAutoLoginConfigRecord | null | BankAutoLoginOutcome> {
+): Promise<ScrapeTimeAutoLoginConfigRecord | null | Extract<BankAutoLoginOutcome, { status: "needs_admin_action" }>> {
   try {
     return await deps.autoLoginConfigs.getByBankCode(bankCode);
   } catch {
@@ -166,7 +166,7 @@ async function safelyResolveConfig(
 function safelyResolveCdpUrl(
   deps: Pick<ScrapeTimeAutoLoginRunnerDependencies, "cdpUrlForBankCode">,
   bankCode: string,
-): string | undefined | BankAutoLoginOutcome {
+): string | undefined | Extract<BankAutoLoginOutcome, { status: "needs_admin_action" }> {
   try {
     return deps.cdpUrlForBankCode(bankCode);
   } catch {
@@ -387,11 +387,11 @@ async function runGuard(operation: () => Promise<void>): Promise<BankAutoLoginOu
   }
 }
 
-function needsAdminAction(reason: BankAutoLoginAdminActionReason, safeSummary = SAFE_ADMIN_ACTION_SUMMARY): BankAutoLoginOutcome {
+function needsAdminAction(reason: BankAutoLoginAdminActionReason, safeSummary = SAFE_ADMIN_ACTION_SUMMARY): Extract<BankAutoLoginOutcome, { status: "needs_admin_action" }> {
   return { status: "needs_admin_action", reason, safeSummary };
 }
 
-function isAdminActionOutcome(value: unknown): value is BankAutoLoginOutcome {
+function isAdminActionOutcome(value: unknown): value is Extract<BankAutoLoginOutcome, { status: "needs_admin_action" }> {
   return typeof value === "object" && value !== null && "status" in value && value.status === "needs_admin_action";
 }
 

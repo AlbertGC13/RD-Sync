@@ -501,7 +501,6 @@ describe("createScrapeTimeAutoLoginRunner", () => {
       cdpUrlForBankCode: vi.fn(),
       ensureBrowser: vi.fn(),
     });
-
     await expect(run({ data: { bankId: "bhd", expiredEventId: "E1" } })).resolves.toMatchObject({
       status: "needs_admin_action",
       reason: "unsupported_bank",
@@ -521,7 +520,6 @@ describe("createScrapeTimeAutoLoginRunner", () => {
       cdpUrlForBankCode: vi.fn(),
       ensureBrowser: vi.fn(),
     });
-
     await expect(run({ data: { bankId: "popular", expiredEventId: "E1" } })).resolves.toBeNull();
     expect(findByBankCode).not.toHaveBeenCalled();
     expect(acquire).not.toHaveBeenCalled();
