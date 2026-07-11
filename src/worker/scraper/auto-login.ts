@@ -1,5 +1,14 @@
 import { LOGIN_MUTATION_GUARD_ERROR_SUMMARIES, LoginMutationGuard, LoginMutationGuardError, type BankPortalConfig, type LoginMutationPage } from "./login-mutation-guard";
-import { assertCdpLoopback, getSafeCdpErrorSummary } from "./browser-runtime";
+import {
+  assertCdpLoopback,
+  connectPlaywrightOverCdp,
+  getSafeCdpErrorSummary,
+  openCdpPageInDefaultContext,
+  type AcquireBrowserSlot,
+  type CdpBrowserLike,
+  type CdpPageLike,
+  type EnsureCdpBrowserResult,
+} from "./browser-runtime";
 import { decryptCredentialField, type AesGcmEnvelope, type KeyResolver } from "../../modules/bank-credentials/crypto";
 import type { AutoLoginLock } from "../../modules/bank-auto-login-lock";
 
@@ -14,6 +23,29 @@ export interface BankAutoLoginPage extends LoginMutationPage {
   click(selector: string): void | Promise<void>;
 }
 
+export type ScrapeTimeAutoLoginBrowserResult = { status: "ready"; page: BankAutoLoginPage; close(): Promise<void> } | { status: "throttled" };
+export interface AutoLoginCdpPageLike extends CdpPageLike {
+  waitForSelector(selector: string, options?: { timeout?: number; state?: string }): Promise<unknown>;
+  fill(selector: string, value: string): Promise<void>;
+  click(selector: string): Promise<void>;
+}
+export type AutoLoginCdpBrowserLike = CdpBrowserLike<AutoLoginCdpPageLike>;
+export interface ScrapeTimeAutoLoginBrowserOpenerOptions {
+  /** Trusted adapter/factory configuration; never derived from the attached page. */
+  trustedLoginUrl: string;
+  connect?: (cdpUrl: string) => Promise<AutoLoginCdpBrowserLike>;
+  ensureBrowserRuntime?: (cdpUrl: string) => Promise<EnsureCdpBrowserResult>;
+  acquireBrowserSlot?: AcquireBrowserSlot;
+  recordCleanupFailure?(metadata: { bankCode: string; failure: "browser_slot_release_failed" | "page_close_failed" | "browser_close_failed" }): void | Promise<void>;
+  cleanupTimeoutMs?: number;
+  pageSetupTimeoutMs?: number;
+  visibleSelectorTimeoutMs?: number;
+}
+type EnsureBrowserRuntime = NonNullable<ScrapeTimeAutoLoginBrowserOpenerOptions["ensureBrowserRuntime"]>;
+export interface ScrapeTimeAutoLoginProductionOpenerOptions extends Omit<ScrapeTimeAutoLoginBrowserOpenerOptions, "ensureBrowserRuntime" | "trustedLoginUrl"> {
+  ensureBrowserRuntimeForCdpUrl(cdpUrl: string): ReturnType<EnsureBrowserRuntime>;
+  trustedLoginUrlForBank(bankCode: string): string | undefined;
+}
 export type BankAutoLoginAdminActionReason =
   | "unsupported_bank"
   | "credential_bank_mismatch"
@@ -49,7 +81,7 @@ export interface ScrapeTimeAutoLoginTriggerContext {
   credential: BankAutoLoginCredential;
   cdpUrl: string;
   lock: Pick<AutoLoginLock, "acquire" | "release">;
-  ensureBrowser(cdpUrl: string): Promise<{ status: "ready"; page: BankAutoLoginPage } | { status: "throttled" }>;
+  ensureBrowser(cdpUrl: string): Promise<ScrapeTimeAutoLoginBrowserResult>;
   recordLockReleaseFailure?(metadata: { bankCode: string; expiredEventId: string }): void | Promise<void>;
 }
 
@@ -86,7 +118,7 @@ export interface ScrapeTimeAutoLoginRunnerDependencies {
   keyResolver: KeyResolver;
   lock: Pick<AutoLoginLock, "acquire" | "release"> | null;
   cdpUrlForBankCode(bankCode: string): string | undefined;
-  ensureBrowser(bankCode: string, cdpUrl: string): Promise<{ status: "ready"; page: BankAutoLoginPage } | { status: "throttled" }>;
+  ensureBrowser(bankCode: string, cdpUrl: string): Promise<ScrapeTimeAutoLoginBrowserResult>;
   recordLockReleaseFailure?(metadata: { bankCode: string; expiredEventId: string }): void | Promise<void>;
   recordCredentialDecryptUse?(metadata: { bankCode: string; keyVersion: number }): void | Promise<void>;
 }
@@ -102,8 +134,130 @@ type CredentialResolution =
 
 type RunnerAdapter = ReturnType<ScrapeTimeAutoLoginRunnerDependencies["adapterRegistry"]["get"]>;
 
-export const unavailableScrapeTimeAutoLoginBrowserOpener: ScrapeTimeAutoLoginRunnerDependencies["ensureBrowser"] = async () => { throw new Error("Scrape-time auto-login browser page opener is not wired yet"); };
+export const unavailableScrapeTimeAutoLoginBrowserOpener: ScrapeTimeAutoLoginRunnerDependencies["ensureBrowser"] = async () => {
+  throw new Error("Scrape-time auto-login browser page opener is not wired yet");
+};
 
+const DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS = 500;
+const DEFAULT_BROWSER_CLEANUP_TIMEOUT_MS = 1_000;
+const DEFAULT_BROWSER_PAGE_SETUP_TIMEOUT_MS = 15_000;
+const PAGE_SETUP_TIMEOUT_ERROR = "Timed out while preparing the trusted bank login page";
+export function createScrapeTimeAutoLoginBrowserOpener(options: ScrapeTimeAutoLoginBrowserOpenerOptions): ScrapeTimeAutoLoginRunnerDependencies["ensureBrowser"] {
+  const {
+    trustedLoginUrl, connect = connectPlaywrightOverCdp<AutoLoginCdpBrowserLike>, ensureBrowserRuntime, acquireBrowserSlot,
+    recordCleanupFailure,
+    cleanupTimeoutMs = DEFAULT_BROWSER_CLEANUP_TIMEOUT_MS,
+    pageSetupTimeoutMs = DEFAULT_BROWSER_PAGE_SETUP_TIMEOUT_MS,
+    visibleSelectorTimeoutMs = DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS,
+  } = options;
+  return async (bankCode, cdpUrl) => {
+    assertCdpLoopback(cdpUrl);
+    const browserSlot = await acquireBrowserSlot?.();
+    if (browserSlot?.kind === "throttled") return { status: "throttled" };
+    let browser: AutoLoginCdpBrowserLike | null = null;
+    let page: AutoLoginCdpPageLike | null = null;
+    const closeResources = () => closeAutoLoginBrowserResources({ bankCode, page, browser,
+      browserSlot: browserSlot?.kind === "acquired" ? browserSlot : null, recordCleanupFailure, cleanupTimeoutMs });
+    try {
+      const browserCheck = await ensureBrowserRuntime?.(cdpUrl);
+      if (browserCheck && !browserCheck.ok) throw new Error(browserCheck.safeErrorSummary);
+      browser = await connect(cdpUrl);
+      page = await openTrustedLoginPage(browser, trustedLoginUrl, pageSetupTimeoutMs);
+      return { status: "ready", page: new CdpBankAutoLoginPage(page, visibleSelectorTimeoutMs), close: closeResources };
+    } catch (error) {
+      await closeResources();
+      throw error;
+    }
+  };
+}
+export function createScrapeTimeAutoLoginProductionOpener(options: ScrapeTimeAutoLoginProductionOpenerOptions): ScrapeTimeAutoLoginRunnerDependencies["ensureBrowser"] {
+  const { ensureBrowserRuntimeForCdpUrl, trustedLoginUrlForBank, ...openerOptions } = options;
+  return async (bankCode, cdpUrl) => {
+    const trustedLoginUrl = trustedLoginUrlForBank(bankCode);
+    if (!trustedLoginUrl) throw new Error("Bank login page is not configured");
+    return createScrapeTimeAutoLoginBrowserOpener({ ...openerOptions, trustedLoginUrl,
+      ensureBrowserRuntime: ensureBrowserRuntimeForCdpUrl })(bankCode, cdpUrl);
+  };
+}
+async function openTrustedLoginPage(browser: AutoLoginCdpBrowserLike, trustedLoginUrl: string, timeoutMs: number): Promise<AutoLoginCdpPageLike> {
+  let openedPage: AutoLoginCdpPageLike | null = null;
+  let closedPage: Promise<void> | undefined;
+  let timedOut = false;
+  const closeOpenedPage = () => {
+    if (!openedPage) return;
+    closedPage ??= Promise.resolve().then(() => openedPage!.close()).catch(() => undefined);
+    return closedPage;
+  };
+  const setup = openCdpPageInDefaultContext(browser).then(async (page) => {
+    openedPage = page;
+    if (timedOut) {
+      void closeOpenedPage();
+      throw new Error(PAGE_SETUP_TIMEOUT_ERROR);
+    }
+    await page.goto(trustedLoginUrl);
+    return page;
+  });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      setup,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          reject(new Error(PAGE_SETUP_TIMEOUT_ERROR));
+        }, timeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    void closeOpenedPage();
+    void setup.then(closeOpenedPage).catch(() => undefined);
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+class CdpBankAutoLoginPage implements BankAutoLoginPage {
+  constructor(private readonly page: AutoLoginCdpPageLike, private readonly visibleSelectorTimeoutMs: number) {}
+  async currentUrl(): Promise<string> { return this.page.url(); }
+  async fill(selector: string, value: string): Promise<void> { await this.page.fill(selector, value); }
+  async click(selector: string): Promise<void> { await this.page.click(selector); }
+  async hasVisibleSelector(selector: string): Promise<boolean> {
+    try {
+      await this.page.waitForSelector(selector, { timeout: this.visibleSelectorTimeoutMs, state: "visible" });
+      return true;
+    } catch (error) {
+      if (isExpectedSelectorTimeout(error)) return false;
+      throw error;
+    }
+  }
+}
+async function closeAutoLoginBrowserResources(options: {
+  bankCode: string;
+  page: AutoLoginCdpPageLike | null;
+  browser: AutoLoginCdpBrowserLike | null;
+  browserSlot: { release(): Promise<void> } | null;
+  recordCleanupFailure?: ScrapeTimeAutoLoginBrowserOpenerOptions["recordCleanupFailure"];
+  cleanupTimeoutMs: number;
+}): Promise<void> {
+  const { bankCode, page, browser, browserSlot, recordCleanupFailure, cleanupTimeoutMs } = options;
+  // Free capacity before bounded CDP teardown; Popular owns its separate scraper lifecycle.
+  if (browserSlot) await runBoundedCleanup(() => browserSlot.release(), cleanupTimeoutMs, () => recordBrowserCleanupFailure(recordCleanupFailure, bankCode, "browser_slot_release_failed"));
+  if (page) await runBoundedCleanup(() => page.close(), cleanupTimeoutMs, () => recordBrowserCleanupFailure(recordCleanupFailure, bankCode, "page_close_failed"));
+  if (browser) await runBoundedCleanup(() => browser.close(), cleanupTimeoutMs, () => recordBrowserCleanupFailure(recordCleanupFailure, bankCode, "browser_close_failed"));
+}
+async function runBoundedCleanup(cleanup: () => Promise<void>, timeoutMs: number, onFailure: () => Promise<void>): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const cleanupResult = Promise.resolve().then(cleanup).then(() => "completed" as const, () => "failed" as const);
+  const timeoutResult = new Promise<"timed_out">((resolve) => { timeout = setTimeout(() => resolve("timed_out"), timeoutMs); });
+  const result = await Promise.race([cleanupResult, timeoutResult]);
+  if (timeout) clearTimeout(timeout);
+  if (result !== "completed") void Promise.resolve().then(onFailure).catch(() => undefined);
+}
+function isExpectedSelectorTimeout(error: unknown): boolean { return error instanceof Error && error.name === "TimeoutError"; }
+async function recordBrowserCleanupFailure(recordCleanupFailure: ScrapeTimeAutoLoginBrowserOpenerOptions["recordCleanupFailure"] | undefined,
+  bankCode: string, failure: "browser_slot_release_failed" | "page_close_failed" | "browser_close_failed"): Promise<void> {
+  return Promise.resolve(recordCleanupFailure?.({ bankCode, failure })).then(() => undefined);
+}
 export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerDependencies) {
   return async function runScrapeTimeAutoLogin(job: ScrapeTimeAutoLoginRunnerJob): Promise<ScrapeTimeAutoLoginOutcome | null> {
     const expiredEventId = job.data.expiredEventId;
@@ -264,7 +418,7 @@ async function recordLockReleaseFailure(context: ScrapeTimeAutoLoginTriggerConte
 }
 
 async function runOwnedAutoLogin(context: ScrapeTimeAutoLoginTriggerContext, cdpUrl: string): Promise<ScrapeTimeAutoLoginOutcome> {
-  let browser: { status: "ready"; page: BankAutoLoginPage } | { status: "throttled" };
+  let browser: ScrapeTimeAutoLoginBrowserResult | undefined;
 
   try {
     browser = await context.ensureBrowser(cdpUrl);
@@ -272,12 +426,19 @@ async function runOwnedAutoLogin(context: ScrapeTimeAutoLoginTriggerContext, cdp
     return needsAdminAction("browser_unavailable");
   }
 
-  if (browser.status === "throttled") return { status: "throttled", safeSummary: SAFE_BROWSER_THROTTLED_SUMMARY };
+  if (browser?.status === "throttled") return { status: "throttled", safeSummary: SAFE_BROWSER_THROTTLED_SUMMARY };
+  if (!browser) return needsAdminAction("browser_unavailable");
 
   try {
     return await context.adapter.createAutoLoginStrategy().autoLogin({ credential: context.credential, page: browser.page });
   } catch {
     return needsAdminAction("portal_state_unavailable");
+  } finally {
+    try {
+      await browser.close();
+    } catch {
+      // Cleanup failures must not change or leak past the safe auto-login outcome.
+    }
   }
 }
 
@@ -356,9 +517,7 @@ async function detectPostSubmitOutcome(page: BankAutoLoginPage, config: BankPort
       !hasUserInfo(currentUrl) &&
       config.dashboardPathIndicator &&
       hasDashboardPathBoundary(currentUrl.pathname, config.dashboardPathIndicator)
-    ) {
-      return { status: "succeeded" };
-    }
+    ) return { status: "succeeded" };
   } catch {
     return needsAdminAction("portal_state_unavailable");
   }
