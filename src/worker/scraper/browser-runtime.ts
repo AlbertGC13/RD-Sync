@@ -78,8 +78,33 @@ export function getSafeCdpErrorSummary(error: unknown): string {
     : SAFE_SUMMARY_MALFORMED_CDP_URL;
 }
 
+export interface CdpPageLike {
+  url(): string;
+  goto(url: string, options?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
+  close(): Promise<void>;
+}
+export interface CdpContextLike<Page extends CdpPageLike = CdpPageLike> {
+  newPage(): Promise<Page>;
+}
+export interface CdpBrowserLike<Page extends CdpPageLike = CdpPageLike> {
+  contexts(): CdpContextLike<Page>[];
+  newPage(): Promise<Page>;
+  close(): Promise<void>;
+}
+export async function connectPlaywrightOverCdp<Browser extends CdpBrowserLike>(cdpUrl: string): Promise<Browser> {
+  assertCdpLoopback(cdpUrl);
+
+  const { chromium } = await import("playwright-core");
+  return chromium.connectOverCDP(cdpUrl) as unknown as Promise<Browser>;
+}
+export async function openCdpPageInDefaultContext<Page extends CdpPageLike>(browser: CdpBrowserLike<Page>): Promise<Page> {
+  const defaultContext = browser.contexts()[0];
+  if (defaultContext) return defaultContext.newPage();
+
+  return browser.newPage();
+}
 // ---------------------------------------------------------------------------
-// Types
+// Runtime types
 // ---------------------------------------------------------------------------
 
 /**

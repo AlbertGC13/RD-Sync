@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { encryptCredentialField } from "../../modules/bank-credentials/crypto";
-import { createBankAutoLoginStrategy, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginTrigger, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
+import { createBankAutoLoginStrategy, createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginTrigger, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
 import type { BankPortalConfig } from "./login-mutation-guard";
 
 const portalConfig: BankPortalConfig = {
@@ -33,6 +33,14 @@ function makePage(options: { url?: string; visible?: readonly string[]; onFill?:
     },
     setUrl(nextUrl: string) { url = nextUrl; },
     show(selector: string) { visible.add(selector); },
+  };
+}
+
+function readyBrowser(page: BankAutoLoginPage) {
+  return {
+    status: "ready" as const,
+    page,
+    close: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -204,9 +212,10 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
       events.push("autoLogin settled");
       return outcome;
     }));
+    const close = vi.fn(() => { events.push("browser closed"); return Promise.resolve(); });
     const ensureBrowser = vi.fn(() => Promise.resolve({ status: "ready" as const, page }).then((browser) => {
       events.push("ensureBrowser settled");
-      return browser;
+      return { ...browser, close };
     }));
 
     let helperResolved = false;
@@ -227,7 +236,7 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
     await releaseStarted;
     await Promise.resolve();
     expect(helperResolved).toBe(false);
-    expect(events).toEqual(["ensureBrowser settled", "autoLogin settled", "release started"]);
+    expect(events).toEqual(["ensureBrowser settled", "autoLogin settled", "browser closed", "release started"]);
 
     releaseSettledResolve(true);
     await expect(result).resolves.toEqual({ status: "succeeded" });
@@ -235,8 +244,9 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
     expect(acquire).toHaveBeenCalledWith("popular", "E1");
     expect(ensureBrowser).toHaveBeenCalledWith("http://127.0.0.1:9222");
     expect(autoLogin).toHaveBeenCalledWith({ credential, page });
+    expect(close).toHaveBeenCalledTimes(1);
     expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
-    expect(events).toEqual(["ensureBrowser settled", "autoLogin settled", "release started", "helper resolved"]);
+    expect(events).toEqual(["ensureBrowser settled", "autoLogin settled", "browser closed", "release started", "helper resolved"]);
   });
 
   it("requires manual scraping when the same expired event lock is already held", async () => {
@@ -376,12 +386,15 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
   });
 
   it("owner-releases the lock when delegated login returns admin action", async () => {
-    const release = vi.fn().mockResolvedValue(true);
+    const events: string[] = [];
+    const release = vi.fn(() => { events.push("lock.release"); return Promise.resolve(true); });
     const autoLogin = vi.fn().mockResolvedValue({
       status: "needs_admin_action",
       reason: "protected_flow",
       safeSummary: "MFA is required",
     });
+    const browser = readyBrowser(makePage());
+    browser.close.mockImplementation(() => { events.push("browser.close"); return Promise.resolve(); });
 
     await expect(executeScrapeTimeAutoLoginTrigger({
       bankCode: "popular",
@@ -390,7 +403,7 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
       credential,
       cdpUrl: "http://127.0.0.1:9222",
       lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 7, expiresAt: 12345 }), release },
-      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page: makePage() }),
+      ensureBrowser: vi.fn().mockResolvedValue(browser),
     })).resolves.toEqual({
       status: "needs_admin_action",
       reason: "protected_flow",
@@ -398,11 +411,15 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
     });
 
     expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
+    expect(events).toEqual(["browser.close", "lock.release"]);
   });
 
   it("owner-releases the lock and reports portal state unavailable when delegated login rejects", async () => {
-    const release = vi.fn().mockResolvedValue(true);
+    const events: string[] = [];
+    const release = vi.fn(() => { events.push("lock.release"); return Promise.resolve(true); });
     const autoLogin = vi.fn().mockRejectedValue(new Error("portal token=secret crashed"));
+    const browser = readyBrowser(makePage());
+    browser.close.mockImplementation(() => { events.push("browser.close"); return Promise.resolve(); });
 
     await expect(executeScrapeTimeAutoLoginTrigger({
       bankCode: "popular",
@@ -411,7 +428,7 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
       credential,
       cdpUrl: "http://127.0.0.1:9222",
       lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 7, expiresAt: 12345 }), release },
-      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page: makePage() }),
+      ensureBrowser: vi.fn().mockResolvedValue(browser),
     })).resolves.toEqual({
       status: "needs_admin_action",
       reason: "portal_state_unavailable",
@@ -419,6 +436,7 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
     });
 
     expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
+    expect(events).toEqual(["browser.close", "lock.release"]);
   });
 
   it("records safe release failure metadata without changing a successful outcome", async () => {
@@ -432,7 +450,7 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
       credential,
       cdpUrl: "http://127.0.0.1:9222",
       lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 7, expiresAt: 12345 }), release },
-      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page: makePage() }),
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(makePage())),
       recordLockReleaseFailure,
     })).resolves.toEqual({ status: "succeeded" });
 
@@ -450,7 +468,7 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
       credential,
       cdpUrl: "http://127.0.0.1:9222",
       lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 7, expiresAt: 12345 }), release },
-      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page: makePage() }),
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(makePage())),
       recordLockReleaseFailure,
     })).resolves.toEqual({ status: "succeeded" });
 
@@ -458,7 +476,7 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
   });
 
   it("swallows release failure hook rejections without changing admin outcomes", async () => {
-    const release = vi.fn().mockRejectedValue(new Error("Redis token=secret failed"));
+    const release = vi.fn().mockRejectedValue(new Error("lock release failed"));
     const recordLockReleaseFailure = vi.fn().mockRejectedValue(new Error("metrics token=secret failed"));
 
     await expect(executeScrapeTimeAutoLoginTrigger({
@@ -468,7 +486,7 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
       credential,
       cdpUrl: "http://127.0.0.1:9222",
       lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 7, expiresAt: 12345 }), release },
-      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page: makePage() }),
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(makePage())),
       recordLockReleaseFailure,
     })).resolves.toEqual({ status: "needs_admin_action", reason: "protected_flow", safeSummary: "MFA is required" });
 
@@ -604,7 +622,7 @@ describe("createScrapeTimeAutoLoginRunner", () => {
       keyResolver,
       lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn().mockResolvedValue(false) },
       cdpUrlForBankCode: vi.fn().mockReturnValue("http://127.0.0.1:9222"),
-      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page: makePage() }),
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(makePage())),
       recordLockReleaseFailure,
     });
 
@@ -625,12 +643,127 @@ describe("createScrapeTimeAutoLoginRunner", () => {
       keyResolver,
       lock: { acquire, release },
       cdpUrlForBankCode: vi.fn().mockReturnValue("http://127.0.0.1:9222"),
-      ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page }),
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(page)),
     });
 
     await expect(run({ data: { bankId: "popular", expiredEventId: "E1" } })).resolves.toEqual({ status: "succeeded" });
     expect(autoLogin).toHaveBeenCalledWith({ credential: { bankCode: "popular", username: "bank-user", password: "bank-password" }, page });
     expect(acquire).toHaveBeenCalledWith("popular", "E1");
     expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
+  });
+});
+
+describe("createScrapeTimeAutoLoginBrowserOpener", () => {
+  const CDP_URL = "http://127.0.0.1:9222";
+  const CLEANUP_TIMEOUT_MS = 2;
+  const PAGE_SETUP_TIMEOUT_MS = 2;
+  const POPULAR_LOGIN_URL = "https://ib.bpd.com.do/login";
+  function makeCdpPage() {
+    return {
+      url: vi.fn(() => "https://ib.bpd.com.do/login"),
+      goto: vi.fn(),
+      waitForSelector: vi.fn((selector: string) => selector === "#missing"
+        ? Promise.reject(Object.assign(new Error("not visible"), { name: "TimeoutError" })) : Promise.resolve({})),
+      fill: vi.fn(), click: vi.fn(), close: vi.fn().mockResolvedValue(undefined),
+    };
+  }
+  function makeBrowser(page: ReturnType<typeof makeCdpPage>) {
+    return { contexts: vi.fn(() => [{ newPage: vi.fn().mockResolvedValue(page) }]), newPage: vi.fn(), close: vi.fn().mockResolvedValue(undefined) };
+  }
+  type OpenerOptions = Omit<Parameters<typeof createScrapeTimeAutoLoginBrowserOpener>[0], "trustedLoginUrl">;
+  const open = (options: OpenerOptions) => createScrapeTimeAutoLoginBrowserOpener({ trustedLoginUrl: POPULAR_LOGIN_URL, ...options })("popular", CDP_URL);
+  async function openReadyBrowser(options: OpenerOptions) {
+    const result = await open(options);
+    if (result.status !== "ready") throw new Error("expected ready browser");
+    return result;
+  }
+  function cleanupCallCounts(page: ReturnType<typeof makeCdpPage>, browser: ReturnType<typeof makeBrowser>, release: ReturnType<typeof vi.fn>) {
+    return { page: page.close.mock.calls.length, browser: browser.close.mock.calls.length, browserSlot: release.mock.calls.length };
+  }
+  function makeDeferredPageSetup(stage: "newPage" | "goto") {
+    let resolveSetup: () => void = () => undefined;
+    const pendingSetup = new Promise<void>((resolve) => { resolveSetup = resolve; });
+    const page = makeCdpPage();
+    const browser = makeBrowser(page);
+    if (stage === "newPage") browser.contexts.mockReturnValue([{ newPage: vi.fn(() => pendingSetup.then(() => page)) }]); else page.goto.mockImplementation(() => pendingSetup);
+    return { page, browser, release: vi.fn().mockResolvedValue(undefined), resolveSetup };
+  }
+  it("cleans up the slot and browser after an immediate default-context page rejection", async () => {
+    const release = vi.fn().mockResolvedValue(undefined);
+    const browser = makeBrowser(makeCdpPage());
+    browser.contexts.mockReturnValue([{ newPage: vi.fn().mockRejectedValue(new Error("page creation failed")) }]);
+    await expect(open({ connect: vi.fn().mockResolvedValue(browser), acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }) })).rejects.toThrow("page creation failed");
+    expect({ browser: browser.close.mock.calls.length, browserSlot: release.mock.calls.length }).toEqual({ browser: 1, browserSlot: 1 });
+  });
+  it("cleans up the page, browser, and slot after trusted navigation rejects", async () => {
+    const release = vi.fn().mockResolvedValue(undefined);
+    const rawCloseDetail = "CDP ws://operator:secret@127.0.0.1:9222";
+    const failures = vi.fn().mockResolvedValue(undefined);
+    const page = makeCdpPage();
+    page.goto.mockRejectedValue(new Error("navigation failed"));
+    page.close.mockRejectedValue(new Error(rawCloseDetail));
+    const browser = makeBrowser(page);
+    await expect(open({ connect: vi.fn().mockResolvedValue(browser), acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }), cleanupTimeoutMs: CLEANUP_TIMEOUT_MS, recordCleanupFailure: failures })).rejects.toThrow("navigation failed");
+    expect(cleanupCallCounts(page, browser, release)).toEqual({ page: 1, browser: 1, browserSlot: 1 });
+    expect(failures).toHaveBeenCalledWith({ bankCode: "popular", failure: "page_close_failed" });
+    expect(JSON.stringify(failures.mock.calls)).not.toContain(rawCloseDetail);
+  });
+  const cleanupFailureCases = [
+    { description: "slot never settles", failure: "browser_slot_release_failed", resource: "slot", mode: "never settles" },
+    { description: "page never settles", failure: "page_close_failed", resource: "page", mode: "never settles" },
+    { description: "browser rejects", failure: "browser_close_failed", resource: "browser", mode: "rejects" },
+    { description: "browser never settles", failure: "browser_close_failed", resource: "browser", mode: "never settles" },
+  ] as const;
+  it.each(cleanupFailureCases)("records a safe $description cleanup failure", async ({ failure, resource, mode }) => {
+    const rawCdpDetail = "CDP ws://operator:secret@127.0.0.1:9222";
+    const failures = vi.fn().mockResolvedValue(undefined);
+    const never = () => new Promise<void>(() => undefined);
+    const page = { ...makeCdpPage(), close: vi.fn(resource === "page" ? never : () => Promise.resolve()) };
+    const browser = makeBrowser(page);
+    browser.close.mockImplementation(() => resource !== "browser" ? Promise.resolve() : mode === "rejects" ? Promise.reject(new Error(rawCdpDetail)) : never());
+    const release = vi.fn(resource === "slot" ? never : () => Promise.resolve());
+    const owned = await openReadyBrowser({ connect: vi.fn().mockResolvedValue(browser), acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }), cleanupTimeoutMs: CLEANUP_TIMEOUT_MS, recordCleanupFailure: failures });
+    await owned.close();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(failures).toHaveBeenCalledWith({ bankCode: "popular", failure });
+    expect(JSON.stringify(failures.mock.calls)).not.toContain(rawCdpDetail);
+  });
+
+  it("closes each owned resource once when close is called repeatedly", async () => {
+    const page = makeCdpPage();
+    const browser = makeBrowser(page);
+    const release = vi.fn().mockResolvedValue(undefined);
+    const owned = await openReadyBrowser({ connect: vi.fn().mockResolvedValue(browser), acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }) });
+    await owned.close();
+    await owned.close();
+
+    expect(cleanupCallCounts(page, browser, release)).toEqual({ page: 1, browser: 1, browserSlot: 1 });
+  });
+  const pageSetupTimeoutCases = [
+    { description: "newPage remains pending", stage: "newPage", expectedGotoCalls: 0, cleanupBeforeResolution: { page: 0, browser: 1, browserSlot: 1 } },
+    { description: "trusted goto remains pending", stage: "goto", expectedGotoCalls: 1, cleanupBeforeResolution: { page: 1, browser: 1, browserSlot: 1 } },
+  ] as const;
+  it.each(pageSetupTimeoutCases)("bounds page setup when $description past the timeout", async ({ stage, expectedGotoCalls, cleanupBeforeResolution }) => {
+    vi.useFakeTimers();
+    try {
+      const { page, browser, release, resolveSetup } = makeDeferredPageSetup(stage);
+      const failures = vi.fn().mockResolvedValue(undefined);
+      page.close.mockImplementation(() => new Promise<void>(() => undefined));
+      const opening = open({ connect: vi.fn().mockResolvedValue(browser),
+        acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }), pageSetupTimeoutMs: PAGE_SETUP_TIMEOUT_MS,
+        cleanupTimeoutMs: CLEANUP_TIMEOUT_MS, recordCleanupFailure: failures });
+      const rejected = expect(opening).rejects.toThrow("Timed out while preparing the trusted bank login page");
+      await vi.advanceTimersByTimeAsync(PAGE_SETUP_TIMEOUT_MS);
+      await rejected;
+      expect(cleanupCallCounts(page, browser, release)).toEqual(cleanupBeforeResolution);
+      resolveSetup();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cleanupCallCounts(page, browser, release)).toEqual({ page: 1, browser: 1, browserSlot: 1 });
+      expect(page.goto).toHaveBeenCalledTimes(expectedGotoCalls);
+      await vi.advanceTimersByTimeAsync(CLEANUP_TIMEOUT_MS);
+      expect(failures).toHaveBeenCalledWith({ bankCode: "popular", failure: "page_close_failed" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

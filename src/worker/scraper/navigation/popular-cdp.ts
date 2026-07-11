@@ -4,10 +4,15 @@ import {
 } from "../../../modules/bank-adapters/popular";
 import {
   assertCdpLoopback,
+  connectPlaywrightOverCdp,
   DEFAULT_CDP_URL,
   getSafeCdpErrorSummary,
+  openCdpPageInDefaultContext,
   SAFE_SUMMARY_BROWSER_CAPACITY_THROTTLED,
   type AcquireBrowserSlot,
+  type CdpBrowserLike as SharedCdpBrowserLike,
+  type CdpContextLike as SharedCdpContextLike,
+  type CdpPageLike as SharedCdpPageLike,
 } from "../browser-runtime";
 import type { IngestionScraper } from "../../queues";
 import type { ScrapeCollectionResult } from "../../scraper";
@@ -25,25 +30,14 @@ import {
 // the seam. This mirrors the PlaywrightPageLike pattern in src/worker/scraper/index.ts.
 // ---------------------------------------------------------------------------
 
-export interface CdpPageLike {
-  url(): string;
-  goto(url: string, options?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
+export interface CdpPageLike extends SharedCdpPageLike {
   waitForSelector(selector: string, options?: { timeout?: number; state?: string }): Promise<unknown>;
   waitForTimeout(ms: number): Promise<void>;
   evaluate<T>(fn: (arg?: unknown) => T, arg?: unknown): Promise<T>;
-  close(): Promise<void>;
 }
 
-export interface CdpContextLike {
-  newPage(): Promise<CdpPageLike>;
-}
-
-export interface CdpBrowserLike {
-  /** Existing contexts of the attached browser; contexts()[0] holds the human session. */
-  contexts(): CdpContextLike[];
-  newPage(): Promise<CdpPageLike>;
-  close(): Promise<void>;
-}
+export type CdpContextLike = SharedCdpContextLike<CdpPageLike>;
+export type CdpBrowserLike = SharedCdpBrowserLike<CdpPageLike>;
 
 // ---------------------------------------------------------------------------
 // extractResultsTableFromDocument — pure DOM extraction (exported for testing)
@@ -331,14 +325,7 @@ export function createPopularCdpScraper(options: PopularCdpScraperOptions = {}):
           };
         }
 
-        // The page MUST come from the browser's default context: that context
-        // holds the human's logged-in session cookies. browser.newPage() would
-        // create a fresh (incognito-like) context that the bank treats as an
-        // unauthenticated visitor.
-        const defaultContext = browser.contexts()[0];
-        cdpPage = defaultContext !== undefined
-          ? await defaultContext.newPage()
-          : await browser.newPage();
+        cdpPage = await openCdpPageInDefaultContext(browser);
         const portalPage = new CdpPopularPortalPage(cdpPage);
 
         const today = clock();
@@ -401,9 +388,4 @@ export function createPopularCdpScraper(options: PopularCdpScraperOptions = {}):
 // This keeps vitest and the Next.js build safe.
 // ---------------------------------------------------------------------------
 
-async function lazyPlaywrightConnect(cdpUrl: string): Promise<CdpBrowserLike> {
-  assertCdpLoopback(cdpUrl);
-  const { chromium } = await import("playwright-core");
-  // connectOverCDP returns a Browser — it is structurally compatible with CdpBrowserLike.
-  return chromium.connectOverCDP(cdpUrl) as Promise<CdpBrowserLike>;
-}
+const lazyPlaywrightConnect = connectPlaywrightOverCdp<CdpBrowserLike>;

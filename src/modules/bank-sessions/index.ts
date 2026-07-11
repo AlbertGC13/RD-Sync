@@ -6,7 +6,12 @@ import {
   type CdpBrowserLike,
   type CdpPageLike,
 } from "../../worker/scraper/navigation/popular-cdp";
-import { assertCdpLoopback, DEFAULT_CDP_URL } from "../../worker/scraper/browser-runtime";
+import {
+  assertCdpLoopback,
+  connectPlaywrightOverCdp,
+  DEFAULT_CDP_URL,
+  openCdpPageInDefaultContext,
+} from "../../worker/scraper/browser-runtime";
 
 // ---------------------------------------------------------------------------
 // Re-export the structural types the CDP adapter already declares so callers
@@ -122,12 +127,6 @@ export interface CdpSessionChecker {
   check(): Promise<BankSessionCheckResult>;
 }
 
-async function lazyPlaywrightConnect(cdpUrl: string): Promise<CdpBrowserLike> {
-  assertCdpLoopback(cdpUrl);
-  const { chromium } = await import("playwright-core");
-  return chromium.connectOverCDP(cdpUrl) as Promise<CdpBrowserLike>;
-}
-
 /**
  * Creates a session checker that attaches to an existing human-opened Brave
  * browser session via CDP and probes the Popular portal dashboard.
@@ -142,7 +141,7 @@ export function createCdpSessionChecker(
     cdpUrl = DEFAULT_CDP_URL,
     baseUrl = "https://ib.bpd.com.do",
     waitTimeoutMs = 15_000,
-    connect = lazyPlaywrightConnect,
+    connect = connectPlaywrightOverCdp<CdpBrowserLike>,
     clock = () => new Date(),
   } = options;
 
@@ -172,12 +171,7 @@ export function createCdpSessionChecker(
           };
         }
 
-        // Use the existing human session context — same pattern as createPopularCdpScraper.
-        const defaultContext = browser.contexts()[0];
-        cdpPage =
-          defaultContext !== undefined
-            ? await defaultContext.newPage()
-            : await browser.newPage();
+        cdpPage = await openCdpPageInDefaultContext(browser);
 
         const probePage = new CdpPopularPortalPage(cdpPage);
         return await checkPopularSessionHealth(probePage, { baseUrl, waitTimeoutMs, clock });
