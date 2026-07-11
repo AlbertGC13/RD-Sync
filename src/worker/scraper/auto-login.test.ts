@@ -20,20 +20,45 @@ const loginControls = [portalConfig.usernameSelector, portalConfig.passwordSelec
 const credential = { bankCode: "popular", username: "bank-user", password: "bank-password" };
 type TestBankAutoLoginPage = BankAutoLoginPage & { setUrl(nextUrl: string): void; show(selector: string): void };
 
-function makePage(options: { url?: string; visible?: readonly string[]; onFill?: (selector: string, value: string) => void; onClick?: () => void } = {}): TestBankAutoLoginPage {
+function makePage(options: { url?: string; visible?: readonly string[]; onFill?: (selector: string, value: string) => void | Promise<void>; onClick?: () => void | Promise<void> } = {}): TestBankAutoLoginPage {
   let url = options.url ?? "https://ib.bpd.com.do/login";
   const visible = new Set(options.visible ?? loginControls);
   return {
     async currentUrl() { return url; },
     async hasVisibleSelector(selector) { return visible.has(selector); },
-    async fill(selector, value) { options.onFill?.(selector, value); },
+    async fill(selector, value) { await options.onFill?.(selector, value); },
     async click() {
-      if (options.onClick) options.onClick();
+      if (options.onClick) await options.onClick();
       else url = "https://ib.bpd.com.do/dashboard";
     },
     setUrl(nextUrl: string) { url = nextUrl; },
     show(selector: string) { visible.add(selector); },
   };
+}
+
+type MutationPhase = "username" | "password" | "submit";
+
+function makeMutationBoundaryDriftPage(driftBefore: MutationPhase) {
+  let url = "https://ib.bpd.com.do/login";
+  let phase: MutationPhase = "username";
+  const mutations: string[] = [];
+  const visible = new Set(loginControls);
+  const page: BankAutoLoginPage = {
+    async currentUrl() { return url; },
+    async hasVisibleSelector(selector) {
+      if (phase === driftBefore && selector === portalConfig.usernameSelector) {
+        await Promise.resolve();
+        url = "https://evil.example/login";
+      }
+      return visible.has(selector as (typeof loginControls)[number]);
+    },
+    async fill(selector) {
+      mutations.push(selector);
+      phase = selector === portalConfig.usernameSelector ? "password" : "submit";
+    },
+    async click(selector) { mutations.push(selector); },
+  };
+  return { page, mutations };
 }
 
 function readyBrowser(page: BankAutoLoginPage) {
@@ -45,7 +70,7 @@ function readyBrowser(page: BankAutoLoginPage) {
 }
 
 describe("createBankAutoLoginStrategy", () => {
-  it("fills and submits only after the guard authorizes both boundaries", async () => {
+  it("fills and submits only after the guard authorizes all three mutation boundaries", async () => {
     const fill = vi.fn();
     const page = makePage({ onFill: fill });
     const click = vi.spyOn(page, "click");
@@ -135,6 +160,21 @@ describe("createBankAutoLoginStrategy", () => {
     expect(click).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["username", []],
+    ["password", [portalConfig.usernameSelector]],
+    ["submit", [portalConfig.usernameSelector, portalConfig.passwordSelector]],
+  ] as const)("blocks the %s mutation when navigation drifts during its boundary checks", async (phase, expectedMutations) => {
+    const { page, mutations } = makeMutationBoundaryDriftPage(phase);
+
+    await expect(createBankAutoLoginStrategy(portalConfig).autoLogin({ credential, page })).resolves.toMatchObject({
+      status: "needs_admin_action",
+      reason: "unauthorized_login_page",
+    });
+
+    expect(mutations).toEqual(expectedMutations);
+  });
+
   it("does not treat external or non-HTTPS dashboard redirects as success", async () => {
     const cases = ["https://evil.example/dashboard", "http://ib.bpd.com.do/dashboard", "https://user@ib.bpd.com.do/dashboard"];
 
@@ -191,6 +231,61 @@ describe("createBankAutoLoginStrategy", () => {
 
     await expect(strategy.autoLogin({ credential, page: mfaPage })).resolves.toMatchObject({ status: "needs_admin_action", reason: "protected_flow" });
     await expect(strategy.autoLogin({ credential, page: unknownPage })).resolves.toMatchObject({ status: "needs_admin_action", reason: "unknown_post_submit_state" });
+  });
+
+  it("blocks success when a protected challenge is exposed during the submit click", async () => {
+    const page = makePage({
+      onClick: async () => {
+        await Promise.resolve();
+        page.show(portalConfig.mfaIndicatorSelector);
+      },
+    });
+
+    await expect(createBankAutoLoginStrategy(portalConfig).autoLogin({ credential, page })).resolves.toMatchObject({
+      status: "needs_admin_action",
+      reason: "protected_flow",
+    });
+  });
+
+  it("re-checks protected state when a challenge appears during dashboard URL acquisition", async () => {
+    let clickCompleted = false;
+    let challengeVisible = false;
+    const page: BankAutoLoginPage = {
+      async currentUrl() {
+        if (!clickCompleted) return "https://ib.bpd.com.do/login";
+        challengeVisible = true;
+        return "https://ib.bpd.com.do/dashboard";
+      },
+      async hasVisibleSelector(selector) {
+        if (selector === portalConfig.mfaIndicatorSelector) return challengeVisible;
+        return loginControls.includes(selector as (typeof loginControls)[number]);
+      },
+      async fill() {},
+      async click() { clickCompleted = true; },
+    };
+
+    await expect(createBankAutoLoginStrategy(portalConfig).autoLogin({ credential, page })).resolves.toMatchObject({
+      status: "needs_admin_action",
+      reason: "protected_flow",
+    });
+  });
+
+  it("fails closed when a post-submit protected-state selector throws unexpectedly", async () => {
+    let clickCompleted = false;
+    const page: BankAutoLoginPage = {
+      async currentUrl() { return clickCompleted ? "https://ib.bpd.com.do/dashboard" : "https://ib.bpd.com.do/login"; },
+      async hasVisibleSelector(selector) {
+        if (clickCompleted && selector === portalConfig.mfaIndicatorSelector) throw new Error("selector diagnostics must not leak");
+        return loginControls.includes(selector as (typeof loginControls)[number]);
+      },
+      async fill() {},
+      async click() { clickCompleted = true; },
+    };
+
+    await expect(createBankAutoLoginStrategy(portalConfig).autoLogin({ credential, page })).resolves.toMatchObject({
+      status: "needs_admin_action",
+      reason: "portal_state_unavailable",
+    });
   });
 });
 

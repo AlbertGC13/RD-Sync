@@ -1,4 +1,4 @@
-import { LOGIN_MUTATION_GUARD_ERROR_SUMMARIES, LoginMutationGuard, LoginMutationGuardError, type BankPortalConfig, type LoginMutationPage } from "./login-mutation-guard";
+import { LoginMutationGuard, LoginMutationGuardError, type BankPortalConfig, type LoginMutationPage } from "./login-mutation-guard";
 import {
   assertCdpLoopback,
   connectPlaywrightOverCdp,
@@ -489,22 +489,22 @@ export function createBankAutoLoginStrategy(
       if (guardResult.outcome) return guardResult.outcome;
       const { guard } = guardResult;
 
-      const beforeUsernameFill = await runGuard(() => guard.beforeFill(page));
+      const beforeUsernameFill = await runGuard(() => guard.assertMutationAuthorized(page));
       if (beforeUsernameFill) return beforeUsernameFill;
       const usernameFill = await runBrowserMutation(() => page.fill(portalConfig.usernameSelector, credential.username));
       if (usernameFill) return usernameFill;
 
-      const beforePasswordFill = await runGuard(() => guard.beforeFill(page));
+      const beforePasswordFill = await runGuard(() => guard.assertMutationAuthorized(page));
       if (beforePasswordFill) return beforePasswordFill;
       const passwordFill = await runBrowserMutation(() => page.fill(portalConfig.passwordSelector, credential.password));
       if (passwordFill) return passwordFill;
 
-      const beforeSubmit = await runGuard(() => guard.beforeSubmit(page));
+      const beforeSubmit = await runGuard(() => guard.assertMutationAuthorized(page));
       if (beforeSubmit) return beforeSubmit;
 
       const submit = await runBrowserMutation(() => page.click(portalConfig.submitSelector));
       if (submit) return submit;
-      return detectPostSubmitOutcome(page, portalConfig);
+      return detectPostSubmitOutcome(page, portalConfig, guard);
     },
   };
 }
@@ -520,15 +520,12 @@ function createGuard(portalConfig: BankPortalConfig): GuardResult {
   }
 }
 
-async function detectPostSubmitOutcome(page: BankAutoLoginPage, config: BankPortalConfig): Promise<BankAutoLoginOutcome> {
-  const guardedState = await runGuard(async () => {
-    if (await page.hasVisibleSelector(config.mfaIndicatorSelector)) {
-      throw new LoginMutationGuardError("protected_flow", LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.PROTECTED_FLOW);
-    }
-    if (await page.hasVisibleSelector(config.incompatibleFlowSelector)) {
-      throw new LoginMutationGuardError("incompatible_flow", LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.INCOMPATIBLE_FLOW);
-    }
-  });
+async function detectPostSubmitOutcome(
+  page: BankAutoLoginPage,
+  config: BankPortalConfig,
+  guard: LoginMutationGuard,
+): Promise<BankAutoLoginOutcome> {
+  const guardedState = await runGuard(() => guard.assertNoProtectedOrIncompatibleState(page));
   if (guardedState) return guardedState;
 
   try {
@@ -542,7 +539,11 @@ async function detectPostSubmitOutcome(page: BankAutoLoginPage, config: BankPort
       !hasUserInfo(currentUrl) &&
       config.dashboardPathIndicator &&
       hasDashboardPathBoundary(currentUrl.pathname, config.dashboardPathIndicator)
-    ) return { status: "succeeded" };
+    ) {
+      const finalGuardedState = await runGuard(() => guard.assertNoProtectedOrIncompatibleState(page));
+      if (finalGuardedState) return finalGuardedState;
+      return { status: "succeeded" };
+    }
   } catch {
     return needsAdminAction("portal_state_unavailable");
   }
