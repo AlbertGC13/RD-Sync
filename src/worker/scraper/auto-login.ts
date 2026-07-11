@@ -41,25 +41,6 @@ export interface ScrapeTimeAutoLoginBrowserOpenerOptions {
   pageSetupTimeoutMs?: number;
   visibleSelectorTimeoutMs?: number;
 }
-
-/**
- * Production composition port: bank-specific values are resolved only from
- * trusted worker configuration, never from an attached browser page.
- */
-export interface ScrapeTimeAutoLoginBrowserOpenerForBanksOptions
-  extends Omit<ScrapeTimeAutoLoginBrowserOpenerOptions, "trustedLoginUrl" | "ensureBrowserRuntime"> {
-  trustedLoginUrls: Readonly<Record<string, string>>;
-  ensureBrowserRuntimeForBank?(bankCode: string): ScrapeTimeAutoLoginBrowserOpenerOptions["ensureBrowserRuntime"];
-}
-
-/**
- * Pure production composition seam. Only explicitly trusted bank URLs can
- * reach browser capacity, runtime readiness, or CDP connection.
- */
-export interface ProductionScrapeTimeAutoLoginBrowserOpenerOptions
-  extends Omit<ScrapeTimeAutoLoginBrowserOpenerForBanksOptions, "trustedLoginUrls" | "ensureBrowserRuntimeForBank"> {
-  ensureBrowserRuntime?(bankCode: string, cdpUrl: string): Promise<EnsureCdpBrowserResult>;
-}
 export type BankAutoLoginAdminActionReason =
   | "unsupported_bank"
   | "credential_bank_mismatch"
@@ -156,9 +137,6 @@ const DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS = 500;
 const DEFAULT_BROWSER_CLEANUP_TIMEOUT_MS = 1_000;
 const DEFAULT_BROWSER_PAGE_SETUP_TIMEOUT_MS = 15_000;
 const PAGE_SETUP_TIMEOUT_ERROR = "Timed out while preparing the trusted bank login page";
-const PRODUCTION_TRUSTED_AUTO_LOGIN_URLS: Readonly<Record<string, string>> = {
-  popular: "https://ib.bpd.com.do/login",
-};
 type BrowserCleanupFailure = "browser_slot_release_failed" | "page_close_failed" | "browser_close_failed";
 
 export function createScrapeTimeAutoLoginBrowserOpener(options: ScrapeTimeAutoLoginBrowserOpenerOptions): ScrapeTimeAutoLoginRunnerDependencies["ensureBrowser"] {
@@ -202,36 +180,6 @@ export function createScrapeTimeAutoLoginBrowserOpener(options: ScrapeTimeAutoLo
       throw error;
     }
   };
-}
-
-export function createScrapeTimeAutoLoginBrowserOpenerForBanks(
-  options: ScrapeTimeAutoLoginBrowserOpenerForBanksOptions,
-): ScrapeTimeAutoLoginRunnerDependencies["ensureBrowser"] {
-  const { trustedLoginUrls, ensureBrowserRuntimeForBank, ...openerOptions } = options;
-
-  return async (bankCode, cdpUrl) => {
-    const trustedLoginUrl = trustedLoginUrls[bankCode];
-    if (!hasNonBlankString(trustedLoginUrl)) throw new Error("Trusted bank login URL is unavailable");
-
-    return createScrapeTimeAutoLoginBrowserOpener({
-      ...openerOptions,
-      trustedLoginUrl,
-      ensureBrowserRuntime: ensureBrowserRuntimeForBank?.(bankCode),
-    })(bankCode, cdpUrl);
-  };
-}
-
-export function createProductionScrapeTimeAutoLoginBrowserOpener(
-  options: ProductionScrapeTimeAutoLoginBrowserOpenerOptions,
-): ScrapeTimeAutoLoginRunnerDependencies["ensureBrowser"] {
-  const { ensureBrowserRuntime, ...openerOptions } = options;
-  return createScrapeTimeAutoLoginBrowserOpenerForBanks({
-    ...openerOptions,
-    trustedLoginUrls: PRODUCTION_TRUSTED_AUTO_LOGIN_URLS,
-    ensureBrowserRuntimeForBank: ensureBrowserRuntime
-      ? (bankCode) => (cdpUrl) => ensureBrowserRuntime(bankCode, cdpUrl)
-      : undefined,
-  });
 }
 type OpenTrustedLoginPageOptions = { browser: AutoLoginCdpBrowserLike; trustedLoginUrl: string; timeoutMs: number; cleanupTimeoutMs: number; onPageCloseFailure(): Promise<void> };
 

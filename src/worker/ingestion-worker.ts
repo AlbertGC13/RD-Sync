@@ -39,8 +39,8 @@ import { resolveCredentialKey } from "../modules/bank-credentials/key-resolver";
 import { createAuditEvent } from "../modules/audit";
 import { BANK_AUTOLOGIN_ACTIONS, BANK_CREDENTIAL_ACTIONS } from "../modules/audit/bank-actions";
 import { getPrismaClient } from "../modules/persistence/prisma-client";
-import { createAcquireBrowserSlotFromEnv, createEnsureBrowserForBank, resolveBankBrowserEnv } from "./scraper/browser-runtime";
-import { createProductionScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, type BankAutoLoginStrategy } from "./scraper/auto-login";
+import { resolveBankBrowserEnv } from "./scraper/browser-runtime";
+import { createScrapeTimeAutoLoginRunner, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginStrategy } from "./scraper/auto-login";
 import { resolveDefaultScraper } from "../app/api/scrape-runs/consumer-defaults";
 import { defaultScrapeRunRepository } from "../app/api/scrape-runs/defaults";
 import { defaultTransactionRepository } from "../app/api/transactions/defaults";
@@ -84,28 +84,6 @@ function isScrapeTimeAutoLoginStrategy(strategy: unknown): strategy is BankAutoL
   return typeof candidate.autoLogin === "function";
 }
 
-const ensureAutoLoginBrowser = createProductionScrapeTimeAutoLoginBrowserOpener({
-  async ensureBrowserRuntime(bankCode, cdpUrl) {
-    const bankCdpUrlKey = `RD_SYNC_BANK_${bankCode.toUpperCase()}_CDP_URL`;
-    const ensureBrowser = createEnsureBrowserForBank(bankCode, {
-      ...process.env,
-      [bankCdpUrlKey]: cdpUrl,
-    });
-    return ensureBrowser?.() ?? { ok: true, launched: false };
-  },
-  acquireBrowserSlot: createAcquireBrowserSlotFromEnv(process.env),
-  async recordCleanupFailure({ bankCode, failure }) {
-    await defaultAuditSink.record(createAuditEvent({
-      actorId: "system:auto-login",
-      actorRole: null,
-      action: BANK_AUTOLOGIN_ACTIONS.FAILED,
-      target: "bank_auto_login_browser",
-      targetId: null,
-      metadata: { bankCode, failure },
-    }));
-  },
-});
-
 const runScrapeTimeAutoLogin = createScrapeTimeAutoLoginRunner({
   adapterRegistry: {
     get(bankCode) {
@@ -122,7 +100,7 @@ const runScrapeTimeAutoLogin = createScrapeTimeAutoLoginRunner({
   keyResolver: resolveCredentialKey,
   lock: defaultAutoLoginLock,
   cdpUrlForBankCode: (bankCode) => resolveBankBrowserEnv(bankCode, process.env).cdpUrl || undefined,
-  ensureBrowser: ensureAutoLoginBrowser,
+  ensureBrowser: unavailableScrapeTimeAutoLoginBrowserOpener,
   async recordLockReleaseFailure({ bankCode, expiredEventId }) {
     await defaultAuditSink.record(createAuditEvent({
       actorId: "system:auto-login",

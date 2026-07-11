@@ -1,5 +1,5 @@
 export interface BankPortalConfig {
-  // Trusted portal metadata used by the mutation guard; it never authorizes a page by itself.
+  // Foundation only: no production scraper caller yet; reserved metadata is non-authorizing.
   bankCode?: string;
   baseUrl: string;
   loginPathAllowlist: readonly string[];

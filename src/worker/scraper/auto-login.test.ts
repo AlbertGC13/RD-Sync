@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { encryptCredentialField } from "../../modules/bank-credentials/crypto";
-import { createBankAutoLoginStrategy, createProductionScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginTrigger, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
+import { createBankAutoLoginStrategy, createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginTrigger, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
 import type { BankPortalConfig } from "./login-mutation-guard";
 
 const portalConfig: BankPortalConfig = {
@@ -688,7 +688,7 @@ describe("createScrapeTimeAutoLoginRunner", () => {
     expect(baseDeps.lock.acquire).not.toHaveBeenCalled();
   });
 
-  it("uses the unavailable browser opener as a safe terminal admin action", async () => {
+  it("uses the production default unavailable browser opener as a safe terminal admin action", async () => {
     const release = vi.fn().mockResolvedValue(true);
     const run = createScrapeTimeAutoLoginRunner({
       adapterRegistry: { get: vi.fn().mockReturnValue({ bankCode: "popular", createAutoLoginStrategy: vi.fn() }) },
@@ -783,47 +783,6 @@ describe("createScrapeTimeAutoLoginBrowserOpener", () => {
     if (stage === "newPage") browser.contexts.mockReturnValue([{ newPage: vi.fn(() => pendingSetup.then(() => page)) }]); else page.goto.mockImplementation(() => pendingSetup);
     return { page, browser, release: vi.fn().mockResolvedValue(undefined), resolveSetup };
   }
-  describe("createProductionScrapeTimeAutoLoginBrowserOpener", () => {
-    it("uses the Popular-only trusted login mapping with the shared connector, readiness check, and capacity slot", async () => {
-      const page = makeCdpPage();
-      const browser = makeBrowser(page);
-      const connect = vi.fn().mockResolvedValue(browser);
-      const ensureBrowserRuntime = vi.fn().mockResolvedValue({ ok: true, launched: false });
-      const acquireBrowserSlot = vi.fn().mockResolvedValue({ kind: "acquired", release: vi.fn().mockResolvedValue(undefined) });
-      const openForBank = createProductionScrapeTimeAutoLoginBrowserOpener({
-        connect,
-        ensureBrowserRuntime,
-        acquireBrowserSlot,
-      });
-
-      const opened = await openForBank("popular", CDP_URL);
-      if (opened.status !== "ready") throw new Error("expected ready browser");
-      await opened.close();
-
-      expect(ensureBrowserRuntime).toHaveBeenCalledWith("popular", CDP_URL);
-      expect(connect).toHaveBeenCalledWith(CDP_URL);
-      expect(acquireBrowserSlot).toHaveBeenCalledOnce();
-      expect(page.goto).toHaveBeenCalledWith(POPULAR_LOGIN_URL);
-    });
-
-    it.each(["bhd", ""])("rejects missing Popular-only trusted login mapping for %s before readiness, capacity, or connect", async (bankCode) => {
-      const connect = vi.fn();
-      const ensureBrowserRuntime = vi.fn();
-      const acquireBrowserSlot = vi.fn();
-      const openForBank = createProductionScrapeTimeAutoLoginBrowserOpener({
-        connect,
-        ensureBrowserRuntime,
-        acquireBrowserSlot,
-      });
-
-      const rejection = openForBank(bankCode, "http://127.0.0.1:9222?diagnostic=secret");
-      await expect(rejection).rejects.toThrow("Trusted bank login URL is unavailable");
-      await expect(rejection).rejects.not.toThrow("diagnostic=secret");
-      expect(ensureBrowserRuntime).not.toHaveBeenCalled();
-      expect(acquireBrowserSlot).not.toHaveBeenCalled();
-      expect(connect).not.toHaveBeenCalled();
-    });
-  });
   it("cleans up the slot and browser after an immediate default-context page rejection", async () => {
     const release = vi.fn().mockResolvedValue(undefined);
     const browser = makeBrowser(makeCdpPage());
