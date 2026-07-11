@@ -25,9 +25,9 @@ function makePage(url: string, visibleSelectors: readonly string[] = []): LoginM
 }
 
 async function guardedSubmit(guard: LoginMutationGuard, page: LoginMutationPage, fill: () => void | Promise<void>, submit: () => void): Promise<void> {
-  await guard.beforeFill(page);
+  await guard.assertMutationAuthorized(page);
   await fill();
-  await guard.beforeSubmit(page);
+  await guard.assertMutationAuthorized(page);
   submit();
 }
 
@@ -42,7 +42,7 @@ describe("LoginMutationGuard", () => {
   ])("%s", async (_caseName, url) => {
     const guard = new LoginMutationGuard(portalConfig);
 
-    await expect(guard.beforeFill(makePage(url, allLoginControlSelectors))).rejects.toMatchObject({
+    await expect(guard.assertMutationAuthorized(makePage(url, allLoginControlSelectors))).rejects.toMatchObject({
       outcome: "needs_admin_action",
       safeSummary: LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.UNAUTHORIZED_LOGIN_PAGE,
     });
@@ -50,7 +50,7 @@ describe("LoginMutationGuard", () => {
 
   it("rejects malformed URLs with a typed fixed safe error", async () => {
     const guard = new LoginMutationGuard(portalConfig);
-    const rejection = guard.beforeFill(makePage("not a url with secret=password", allLoginControlSelectors));
+    const rejection = guard.assertMutationAuthorized(makePage("not a url with secret=password", allLoginControlSelectors));
 
     await expect(rejection).rejects.toBeInstanceOf(LoginMutationGuardError);
     await expect(rejection).rejects.toMatchObject({ message: LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.MALFORMED_PORTAL_URL, reason: "malformed_url", safeSummary: LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.MALFORMED_PORTAL_URL });
@@ -88,6 +88,31 @@ describe("LoginMutationGuard", () => {
     expect(submit).toHaveBeenCalledOnce();
   });
 
+  it("checks controls and protected states before reading the authorized URL at the mutation boundary", async () => {
+    const events: string[] = [];
+    const page: LoginMutationPage = {
+      async currentUrl() {
+        events.push("url");
+        return "https://ib.bpd.com.do/login";
+      },
+      async hasVisibleSelector(selector) {
+        events.push(`selector:${selector}`);
+        return allLoginControlSelectors.includes(selector as (typeof allLoginControlSelectors)[number]);
+      },
+    };
+
+    await expect(new LoginMutationGuard(portalConfig).assertMutationAuthorized(page)).resolves.toBeUndefined();
+
+    expect(events).toEqual([
+      "selector:#username",
+      "selector:#password",
+      "selector:button[type='submit']",
+      "selector:[data-mfa]",
+      "selector:[data-corporate-token]",
+      "url",
+    ]);
+  });
+
   it("awaits async fill before submit re-checks and catches navigation drift", async () => {
     let currentUrl = "https://ib.bpd.com.do/login";
     const events: string[] = [];
@@ -118,7 +143,7 @@ describe("LoginMutationGuard", () => {
     ["incompatible pre-submit flows", ["[data-corporate-token]"], "incompatible_flow", LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.INCOMPATIBLE_FLOW],
     ["MFA-protected pages", ["[data-mfa]"], "protected_flow", LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.PROTECTED_FLOW],
   ] as const)("blocks %s before caller mutations run", async (_caseName, selectors, reason, safeSummary) => {
-    const page = makePage("https://ib.bpd.com.do/login", selectors);
+    const page = makePage("https://ib.bpd.com.do/login", [...allLoginControlSelectors, ...selectors]);
     const guard = new LoginMutationGuard(portalConfig);
     const fill = vi.fn();
     const submit = vi.fn();
@@ -178,26 +203,26 @@ describe("LoginMutationGuard", () => {
     expect(submit).not.toHaveBeenCalled();
   });
 
-  it("validates the login page when assertCompatiblePreSubmit is called directly", async () => {
+  it("rejects an unauthorized login page through the canonical mutation authorization API", async () => {
     const guard = new LoginMutationGuard(portalConfig);
 
-    await expect(guard.assertCompatiblePreSubmit(makePage("https://evil.com/login"))).rejects.toMatchObject({
+    await expect(guard.assertMutationAuthorized(makePage("https://evil.com/login", allLoginControlSelectors))).rejects.toMatchObject({
       safeSummary: LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.UNAUTHORIZED_LOGIN_PAGE,
     });
   });
 
-  it("validates required pre-submit controls when assertCompatiblePreSubmit is called directly", async () => {
+  it("rejects missing required controls through the canonical mutation authorization API", async () => {
     const page = makePage("https://ib.bpd.com.do/login", credentialControlSelectors);
     const guard = new LoginMutationGuard(portalConfig);
 
-    await expect(guard.assertCompatiblePreSubmit(page)).rejects.toMatchObject({
+    await expect(guard.assertMutationAuthorized(page)).rejects.toMatchObject({
       safeSummary: LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.MISSING_REQUIRED_LOGIN_CONTROL,
     });
   });
 
   it("uses typed errors with fixed safe summaries", async () => {
     const guard = new LoginMutationGuard(portalConfig);
-    const rejection = guard.beforeSubmit(makePage("https://evil.com/login"));
+    const rejection = guard.assertMutationAuthorized(makePage("https://evil.com/login", allLoginControlSelectors));
 
     await expect(rejection).rejects.toBeInstanceOf(LoginMutationGuardError);
     await expect(rejection).rejects.toMatchObject({
@@ -208,7 +233,7 @@ describe("LoginMutationGuard", () => {
   it.each([
     ["currentUrl", {
       async currentUrl(): Promise<string> { throw new Error("browser leaked https://evil.example/login?password=secret"); },
-      async hasVisibleSelector(): Promise<boolean> { return true; },
+      async hasVisibleSelector(selector: string): Promise<boolean> { return allLoginControlSelectors.includes(selector as (typeof allLoginControlSelectors)[number]); },
     }],
     ["hasVisibleSelector", {
       async currentUrl(): Promise<string> { return "https://ib.bpd.com.do/login"; },
@@ -216,7 +241,7 @@ describe("LoginMutationGuard", () => {
     }],
   ] as const)("translates %s failures to a fixed safe guard error", async (_operation, page) => {
     const guard = new LoginMutationGuard(portalConfig);
-    const rejection = guard.beforeFill(page);
+    const rejection = guard.assertMutationAuthorized(page);
 
     await expect(rejection).rejects.toBeInstanceOf(LoginMutationGuardError);
     await expect(rejection).rejects.toMatchObject({

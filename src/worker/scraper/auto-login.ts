@@ -1,4 +1,4 @@
-import { LOGIN_MUTATION_GUARD_ERROR_SUMMARIES, LoginMutationGuard, LoginMutationGuardError, type BankPortalConfig, type LoginMutationPage } from "./login-mutation-guard";
+import { LoginMutationGuard, LoginMutationGuardError, type BankPortalConfig, type LoginMutationPage } from "./login-mutation-guard";
 import {
   assertCdpLoopback,
   connectPlaywrightOverCdp,
@@ -40,6 +40,25 @@ export interface ScrapeTimeAutoLoginBrowserOpenerOptions {
   cleanupTimeoutMs?: number;
   pageSetupTimeoutMs?: number;
   visibleSelectorTimeoutMs?: number;
+}
+
+/**
+ * Production composition port: bank-specific values are resolved only from
+ * trusted worker configuration, never from an attached browser page.
+ */
+export interface ScrapeTimeAutoLoginBrowserOpenerForBanksOptions
+  extends Omit<ScrapeTimeAutoLoginBrowserOpenerOptions, "trustedLoginUrl" | "ensureBrowserRuntime"> {
+  trustedLoginUrls: Readonly<Record<string, string>>;
+  ensureBrowserRuntimeForBank?(bankCode: string): ScrapeTimeAutoLoginBrowserOpenerOptions["ensureBrowserRuntime"];
+}
+
+/**
+ * Pure production composition seam. Only explicitly trusted bank URLs can
+ * reach browser capacity, runtime readiness, or CDP connection.
+ */
+export interface ProductionScrapeTimeAutoLoginBrowserOpenerOptions
+  extends Omit<ScrapeTimeAutoLoginBrowserOpenerForBanksOptions, "trustedLoginUrls" | "ensureBrowserRuntimeForBank"> {
+  ensureBrowserRuntime?(bankCode: string, cdpUrl: string): Promise<EnsureCdpBrowserResult>;
 }
 export type BankAutoLoginAdminActionReason =
   | "unsupported_bank"
@@ -137,6 +156,9 @@ const DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS = 500;
 const DEFAULT_BROWSER_CLEANUP_TIMEOUT_MS = 1_000;
 const DEFAULT_BROWSER_PAGE_SETUP_TIMEOUT_MS = 15_000;
 const PAGE_SETUP_TIMEOUT_ERROR = "Timed out while preparing the trusted bank login page";
+const PRODUCTION_TRUSTED_AUTO_LOGIN_URLS: Readonly<Record<string, string>> = {
+  popular: "https://ib.bpd.com.do/login",
+};
 type BrowserCleanupFailure = "browser_slot_release_failed" | "page_close_failed" | "browser_close_failed";
 
 export function createScrapeTimeAutoLoginBrowserOpener(options: ScrapeTimeAutoLoginBrowserOpenerOptions): ScrapeTimeAutoLoginRunnerDependencies["ensureBrowser"] {
@@ -180,6 +202,36 @@ export function createScrapeTimeAutoLoginBrowserOpener(options: ScrapeTimeAutoLo
       throw error;
     }
   };
+}
+
+export function createScrapeTimeAutoLoginBrowserOpenerForBanks(
+  options: ScrapeTimeAutoLoginBrowserOpenerForBanksOptions,
+): ScrapeTimeAutoLoginRunnerDependencies["ensureBrowser"] {
+  const { trustedLoginUrls, ensureBrowserRuntimeForBank, ...openerOptions } = options;
+
+  return async (bankCode, cdpUrl) => {
+    const trustedLoginUrl = trustedLoginUrls[bankCode];
+    if (!hasNonBlankString(trustedLoginUrl)) throw new Error("Trusted bank login URL is unavailable");
+
+    return createScrapeTimeAutoLoginBrowserOpener({
+      ...openerOptions,
+      trustedLoginUrl,
+      ensureBrowserRuntime: ensureBrowserRuntimeForBank?.(bankCode),
+    })(bankCode, cdpUrl);
+  };
+}
+
+export function createProductionScrapeTimeAutoLoginBrowserOpener(
+  options: ProductionScrapeTimeAutoLoginBrowserOpenerOptions,
+): ScrapeTimeAutoLoginRunnerDependencies["ensureBrowser"] {
+  const { ensureBrowserRuntime, ...openerOptions } = options;
+  return createScrapeTimeAutoLoginBrowserOpenerForBanks({
+    ...openerOptions,
+    trustedLoginUrls: PRODUCTION_TRUSTED_AUTO_LOGIN_URLS,
+    ensureBrowserRuntimeForBank: ensureBrowserRuntime
+      ? (bankCode) => (cdpUrl) => ensureBrowserRuntime(bankCode, cdpUrl)
+      : undefined,
+  });
 }
 type OpenTrustedLoginPageOptions = { browser: AutoLoginCdpBrowserLike; trustedLoginUrl: string; timeoutMs: number; cleanupTimeoutMs: number; onPageCloseFailure(): Promise<void> };
 
@@ -489,22 +541,22 @@ export function createBankAutoLoginStrategy(
       if (guardResult.outcome) return guardResult.outcome;
       const { guard } = guardResult;
 
-      const beforeUsernameFill = await runGuard(() => guard.beforeFill(page));
+      const beforeUsernameFill = await runGuard(() => guard.assertMutationAuthorized(page));
       if (beforeUsernameFill) return beforeUsernameFill;
       const usernameFill = await runBrowserMutation(() => page.fill(portalConfig.usernameSelector, credential.username));
       if (usernameFill) return usernameFill;
 
-      const beforePasswordFill = await runGuard(() => guard.beforeFill(page));
+      const beforePasswordFill = await runGuard(() => guard.assertMutationAuthorized(page));
       if (beforePasswordFill) return beforePasswordFill;
       const passwordFill = await runBrowserMutation(() => page.fill(portalConfig.passwordSelector, credential.password));
       if (passwordFill) return passwordFill;
 
-      const beforeSubmit = await runGuard(() => guard.beforeSubmit(page));
+      const beforeSubmit = await runGuard(() => guard.assertMutationAuthorized(page));
       if (beforeSubmit) return beforeSubmit;
 
       const submit = await runBrowserMutation(() => page.click(portalConfig.submitSelector));
       if (submit) return submit;
-      return detectPostSubmitOutcome(page, portalConfig);
+      return detectPostSubmitOutcome(page, portalConfig, guard);
     },
   };
 }
@@ -520,15 +572,12 @@ function createGuard(portalConfig: BankPortalConfig): GuardResult {
   }
 }
 
-async function detectPostSubmitOutcome(page: BankAutoLoginPage, config: BankPortalConfig): Promise<BankAutoLoginOutcome> {
-  const guardedState = await runGuard(async () => {
-    if (await page.hasVisibleSelector(config.mfaIndicatorSelector)) {
-      throw new LoginMutationGuardError("protected_flow", LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.PROTECTED_FLOW);
-    }
-    if (await page.hasVisibleSelector(config.incompatibleFlowSelector)) {
-      throw new LoginMutationGuardError("incompatible_flow", LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.INCOMPATIBLE_FLOW);
-    }
-  });
+async function detectPostSubmitOutcome(
+  page: BankAutoLoginPage,
+  config: BankPortalConfig,
+  guard: LoginMutationGuard,
+): Promise<BankAutoLoginOutcome> {
+  const guardedState = await runGuard(() => guard.assertNoProtectedOrIncompatibleState(page));
   if (guardedState) return guardedState;
 
   try {
@@ -542,7 +591,11 @@ async function detectPostSubmitOutcome(page: BankAutoLoginPage, config: BankPort
       !hasUserInfo(currentUrl) &&
       config.dashboardPathIndicator &&
       hasDashboardPathBoundary(currentUrl.pathname, config.dashboardPathIndicator)
-    ) return { status: "succeeded" };
+    ) {
+      const finalGuardedState = await runGuard(() => guard.assertNoProtectedOrIncompatibleState(page));
+      if (finalGuardedState) return finalGuardedState;
+      return { status: "succeeded" };
+    }
   } catch {
     return needsAdminAction("portal_state_unavailable");
   }

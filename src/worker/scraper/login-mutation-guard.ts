@@ -1,5 +1,5 @@
 export interface BankPortalConfig {
-  // Foundation only: no production scraper caller yet; reserved metadata is non-authorizing.
+  // Trusted portal metadata used by the mutation guard; it never authorizes a page by itself.
   bankCode?: string;
   baseUrl: string;
   loginPathAllowlist: readonly string[];
@@ -94,31 +94,35 @@ export class LoginMutationGuard {
     }
   }
 
-  async beforeFill(page: LoginMutationPage): Promise<void> {
-    await this.assertSafeLoginState(page);
+  /**
+   * The sole authorization boundary for credential mutations. The URL is read
+   * last so a redirect during any asynchronous selector check cannot reach a
+   * fill or submit operation.
+   */
+  async assertMutationAuthorized(page: LoginMutationPage): Promise<void> {
     await this.assertRequiredControls(page, [this.config.usernameSelector, this.config.passwordSelector, this.config.submitSelector]);
-  }
-
-  async beforeSubmit(page: LoginMutationPage): Promise<void> {
-    await this.assertCompatiblePreSubmit(page);
-  }
-
-  async assertCompatiblePreSubmit(page: LoginMutationPage): Promise<void> {
-    await this.assertSafeLoginState(page);
-    await this.assertRequiredControls(page, [this.config.usernameSelector, this.config.passwordSelector, this.config.submitSelector]);
-  }
-
-  private async assertSafeLoginState(page: LoginMutationPage): Promise<void> {
+    await this.assertNoProtectedOrIncompatibleState(page);
     await this.assertAuthorizedLoginUrl(page);
+  }
 
-    if (await this.hasVisibleSelector(page, this.config.mfaIndicatorSelector)) {
+  /**
+   * Guard-owned protected/incompatible state check for both pre-mutation and
+   * post-submit observations. Callers must not duplicate this policy.
+   */
+  async assertNoProtectedOrIncompatibleState(page: LoginMutationPage): Promise<void> {
+    const [hasMfaIndicator, hasIncompatibleFlow] = await Promise.all([
+      this.hasVisibleSelector(page, this.config.mfaIndicatorSelector),
+      this.hasVisibleSelector(page, this.config.incompatibleFlowSelector),
+    ]);
+
+    if (hasMfaIndicator) {
       throw new LoginMutationGuardError(
         "protected_flow",
         LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.PROTECTED_FLOW,
       );
     }
 
-    if (await this.hasVisibleSelector(page, this.config.incompatibleFlowSelector)) {
+    if (hasIncompatibleFlow) {
       throw new LoginMutationGuardError(
         "incompatible_flow",
         LOGIN_MUTATION_GUARD_ERROR_SUMMARIES.INCOMPATIBLE_FLOW,
