@@ -78,28 +78,31 @@ export function getSafeCdpErrorSummary(error: unknown): string {
     : SAFE_SUMMARY_MALFORMED_CDP_URL;
 }
 
-// ---------------------------------------------------------------------------
-// Shared CDP adapter seam
-// ---------------------------------------------------------------------------
-
 export interface CdpPageLike {
-  url(): string; goto(url: string, options?: { waitUntil?: string; timeout?: number }): Promise<unknown>; close(): Promise<void>;
+  url(): string;
+  goto(url: string, options?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
+  close(): Promise<void>;
 }
-export interface CdpContextLike<Page extends CdpPageLike = CdpPageLike> { newPage(): Promise<Page>; }
+export interface CdpContextLike<Page extends CdpPageLike = CdpPageLike> {
+  newPage(): Promise<Page>;
+}
 export interface CdpBrowserLike<Page extends CdpPageLike = CdpPageLike> {
-  /** Existing contexts of the attached browser; contexts()[0] holds the human session. */
-  contexts(): CdpContextLike<Page>[]; newPage(): Promise<Page>; close(): Promise<void>;
+  contexts(): CdpContextLike<Page>[];
+  newPage(): Promise<Page>;
+  close(): Promise<void>;
 }
-/** Lazily attaches Playwright so browser code stays safe to import in test/build paths. */
 export async function connectPlaywrightOverCdp<Browser extends CdpBrowserLike>(cdpUrl: string): Promise<Browser> {
-  assertCdpLoopback(cdpUrl); const { chromium } = await import("playwright-core");
+  assertCdpLoopback(cdpUrl);
+
+  const { chromium } = await import("playwright-core");
   return chromium.connectOverCDP(cdpUrl) as unknown as Promise<Browser>;
 }
-/** Opens a fresh page in the attached human session when one exists. */
 export async function openCdpPageInDefaultContext<Page extends CdpPageLike>(browser: CdpBrowserLike<Page>): Promise<Page> {
-  const defaultContext = browser.contexts()[0]; return defaultContext ? defaultContext.newPage() : browser.newPage();
-}
+  const defaultContext = browser.contexts()[0];
+  if (defaultContext) return defaultContext.newPage();
 
+  return browser.newPage();
+}
 // ---------------------------------------------------------------------------
 // Runtime types
 // ---------------------------------------------------------------------------

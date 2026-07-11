@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { encryptCredentialField } from "../../modules/bank-credentials/crypto";
-import { createBankAutoLoginStrategy, createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginProductionOpener, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginTrigger, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
+import { createBankAutoLoginStrategy, createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginTrigger, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
 import type { BankPortalConfig } from "./login-mutation-guard";
 
 const portalConfig: BankPortalConfig = {
@@ -677,6 +677,9 @@ describe("createScrapeTimeAutoLoginBrowserOpener", () => {
     if (result.status !== "ready") throw new Error("expected ready browser");
     return result;
   }
+  function cleanupCallCounts(page: ReturnType<typeof makeCdpPage>, browser: ReturnType<typeof makeBrowser>, release: ReturnType<typeof vi.fn>) {
+    return { page: page.close.mock.calls.length, browser: browser.close.mock.calls.length, browserSlot: release.mock.calls.length };
+  }
   function makeDeferredPageSetup(stage: "newPage" | "goto") {
     let resolveSetup: () => void = () => undefined;
     const pendingSetup = new Promise<void>((resolve) => { resolveSetup = resolve; });
@@ -685,52 +688,33 @@ describe("createScrapeTimeAutoLoginBrowserOpener", () => {
     if (stage === "newPage") browser.contexts.mockReturnValue([{ newPage: vi.fn(() => pendingSetup.then(() => page)) }]); else page.goto.mockImplementation(() => pendingSetup);
     return { page, browser, release: vi.fn().mockResolvedValue(undefined), resolveSetup };
   }
-  it("maps Popular's trusted URL and validates the supplied CDP endpoint", async () => {
-    const page = makeCdpPage();
-    const runtime = vi.fn().mockResolvedValue({ ok: true, launched: false });
-    const result = await createScrapeTimeAutoLoginProductionOpener({
-      connect: vi.fn().mockResolvedValue(makeBrowser(page)), ensureBrowserRuntimeForCdpUrl: runtime,
-      trustedLoginUrlForBank: (bankCode) => bankCode === "popular" ? POPULAR_LOGIN_URL : undefined,
-    })("popular", CDP_URL);
-    if (result.status !== "ready") throw new Error("expected ready browser");
-    await result.close();
-    expect(runtime).toHaveBeenCalledWith(CDP_URL);
-    expect(page.goto).toHaveBeenCalledWith(POPULAR_LOGIN_URL);
-  });
-  it("fails closed without a trusted URL", async () => {
-    const connect = vi.fn();
-    const production = createScrapeTimeAutoLoginProductionOpener({ connect, trustedLoginUrlForBank: () => undefined, ensureBrowserRuntimeForCdpUrl: vi.fn() });
-    await expect(production("untrusted", CDP_URL)).rejects.toThrow("Bank login page is not configured");
-    expect(connect).not.toHaveBeenCalled();
-  });
-  it("does not connect after a safe runtime readiness failure", async () => {
-    const connect = vi.fn();
-    const runtime = vi.fn().mockResolvedValue({ ok: false, launched: false, safeErrorSummary: "Bank browser did not become ready in time" });
-    await expect(createScrapeTimeAutoLoginProductionOpener({ connect, trustedLoginUrlForBank: () => POPULAR_LOGIN_URL, ensureBrowserRuntimeForCdpUrl: runtime })("popular", CDP_URL)).rejects.toThrow("Bank browser did not become ready in time");
-    expect(connect).not.toHaveBeenCalled();
-    expect(runtime).toHaveBeenCalledWith(CDP_URL);
-  });
   it("cleans up the slot and browser after an immediate default-context page rejection", async () => {
     const release = vi.fn().mockResolvedValue(undefined);
     const browser = makeBrowser(makeCdpPage());
     browser.contexts.mockReturnValue([{ newPage: vi.fn().mockRejectedValue(new Error("page creation failed")) }]);
     await expect(open({ connect: vi.fn().mockResolvedValue(browser), acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }) })).rejects.toThrow("page creation failed");
-    expect([browser.close, release].map((fn) => fn.mock.calls.length)).toEqual([1, 1]);
+    expect({ browser: browser.close.mock.calls.length, browserSlot: release.mock.calls.length }).toEqual({ browser: 1, browserSlot: 1 });
   });
   it("cleans up the page, browser, and slot after trusted navigation rejects", async () => {
     const release = vi.fn().mockResolvedValue(undefined);
+    const rawCloseDetail = "CDP ws://operator:secret@127.0.0.1:9222";
+    const failures = vi.fn().mockResolvedValue(undefined);
     const page = makeCdpPage();
     page.goto.mockRejectedValue(new Error("navigation failed"));
+    page.close.mockRejectedValue(new Error(rawCloseDetail));
     const browser = makeBrowser(page);
-    await expect(open({ connect: vi.fn().mockResolvedValue(browser), acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }) })).rejects.toThrow("navigation failed");
-    expect([page.close, browser.close, release].map((fn) => fn.mock.calls.length)).toEqual([1, 1, 1]);
+    await expect(open({ connect: vi.fn().mockResolvedValue(browser), acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }), cleanupTimeoutMs: CLEANUP_TIMEOUT_MS, recordCleanupFailure: failures })).rejects.toThrow("navigation failed");
+    expect(cleanupCallCounts(page, browser, release)).toEqual({ page: 1, browser: 1, browserSlot: 1 });
+    expect(failures).toHaveBeenCalledWith({ bankCode: "popular", failure: "page_close_failed" });
+    expect(JSON.stringify(failures.mock.calls)).not.toContain(rawCloseDetail);
   });
-  it.each([
-    ["slot never settles", "browser_slot_release_failed", "slot", "never settles"],
-    ["page never settles", "page_close_failed", "page", "never settles"],
-    ["browser rejects", "browser_close_failed", "browser", "rejects"],
-    ["browser never settles", "browser_close_failed", "browser", "never settles"],
-  ] as const)("records a safe %s cleanup failure", async (_, failure, resource, mode) => {
+  const cleanupFailureCases = [
+    { description: "slot never settles", failure: "browser_slot_release_failed", resource: "slot", mode: "never settles" },
+    { description: "page never settles", failure: "page_close_failed", resource: "page", mode: "never settles" },
+    { description: "browser rejects", failure: "browser_close_failed", resource: "browser", mode: "rejects" },
+    { description: "browser never settles", failure: "browser_close_failed", resource: "browser", mode: "never settles" },
+  ] as const;
+  it.each(cleanupFailureCases)("records a safe $description cleanup failure", async ({ failure, resource, mode }) => {
     const rawCdpDetail = "CDP ws://operator:secret@127.0.0.1:9222";
     const failures = vi.fn().mockResolvedValue(undefined);
     const never = () => new Promise<void>(() => undefined);
@@ -738,27 +722,46 @@ describe("createScrapeTimeAutoLoginBrowserOpener", () => {
     const browser = makeBrowser(page);
     browser.close.mockImplementation(() => resource !== "browser" ? Promise.resolve() : mode === "rejects" ? Promise.reject(new Error(rawCdpDetail)) : never());
     const release = vi.fn(resource === "slot" ? never : () => Promise.resolve());
-    await (await openReadyBrowser({ connect: vi.fn().mockResolvedValue(browser), acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }), cleanupTimeoutMs: CLEANUP_TIMEOUT_MS, recordCleanupFailure: failures })).close();
+    const owned = await openReadyBrowser({ connect: vi.fn().mockResolvedValue(browser), acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }), cleanupTimeoutMs: CLEANUP_TIMEOUT_MS, recordCleanupFailure: failures });
+    await owned.close();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(failures).toHaveBeenCalledWith({ bankCode: "popular", failure });
     expect(JSON.stringify(failures.mock.calls)).not.toContain(rawCdpDetail);
   });
-  it.each([
-    ["newPage remains pending", "newPage", 0, [0, 1, 1]], ["trusted goto remains pending", "goto", 1, [1, 1, 1]],
-  ] as const)("bounds page setup when %s past the timeout", async (_, stage, expectedGotoCalls, cleanupBeforeResolution) => {
+
+  it("closes each owned resource once when close is called repeatedly", async () => {
+    const page = makeCdpPage();
+    const browser = makeBrowser(page);
+    const release = vi.fn().mockResolvedValue(undefined);
+    const owned = await openReadyBrowser({ connect: vi.fn().mockResolvedValue(browser), acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }) });
+    await owned.close();
+    await owned.close();
+
+    expect(cleanupCallCounts(page, browser, release)).toEqual({ page: 1, browser: 1, browserSlot: 1 });
+  });
+  const pageSetupTimeoutCases = [
+    { description: "newPage remains pending", stage: "newPage", expectedGotoCalls: 0, cleanupBeforeResolution: { page: 0, browser: 1, browserSlot: 1 } },
+    { description: "trusted goto remains pending", stage: "goto", expectedGotoCalls: 1, cleanupBeforeResolution: { page: 1, browser: 1, browserSlot: 1 } },
+  ] as const;
+  it.each(pageSetupTimeoutCases)("bounds page setup when $description past the timeout", async ({ stage, expectedGotoCalls, cleanupBeforeResolution }) => {
     vi.useFakeTimers();
     try {
       const { page, browser, release, resolveSetup } = makeDeferredPageSetup(stage);
+      const failures = vi.fn().mockResolvedValue(undefined);
+      page.close.mockImplementation(() => new Promise<void>(() => undefined));
       const opening = open({ connect: vi.fn().mockResolvedValue(browser),
-        acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }), pageSetupTimeoutMs: PAGE_SETUP_TIMEOUT_MS });
+        acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }), pageSetupTimeoutMs: PAGE_SETUP_TIMEOUT_MS,
+        cleanupTimeoutMs: CLEANUP_TIMEOUT_MS, recordCleanupFailure: failures });
       const rejected = expect(opening).rejects.toThrow("Timed out while preparing the trusted bank login page");
       await vi.advanceTimersByTimeAsync(PAGE_SETUP_TIMEOUT_MS);
       await rejected;
-      expect([page.close, browser.close, release].map((cleanup) => cleanup.mock.calls.length)).toEqual(cleanupBeforeResolution);
+      expect(cleanupCallCounts(page, browser, release)).toEqual(cleanupBeforeResolution);
       resolveSetup();
       await vi.advanceTimersByTimeAsync(0);
-      expect([page.close, browser.close, release].map((cleanup) => cleanup.mock.calls.length)).toEqual([1, 1, 1]);
+      expect(cleanupCallCounts(page, browser, release)).toEqual({ page: 1, browser: 1, browserSlot: 1 });
       expect(page.goto).toHaveBeenCalledTimes(expectedGotoCalls);
+      await vi.advanceTimersByTimeAsync(CLEANUP_TIMEOUT_MS);
+      expect(failures).toHaveBeenCalledWith({ bankCode: "popular", failure: "page_close_failed" });
     } finally {
       vi.useRealTimers();
     }

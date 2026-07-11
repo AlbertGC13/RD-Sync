@@ -36,15 +36,10 @@ export interface ScrapeTimeAutoLoginBrowserOpenerOptions {
   connect?: (cdpUrl: string) => Promise<AutoLoginCdpBrowserLike>;
   ensureBrowserRuntime?: (cdpUrl: string) => Promise<EnsureCdpBrowserResult>;
   acquireBrowserSlot?: AcquireBrowserSlot;
-  recordCleanupFailure?(metadata: { bankCode: string; failure: "browser_slot_release_failed" | "page_close_failed" | "browser_close_failed" }): void | Promise<void>;
+  recordCleanupFailure?(metadata: { bankCode: string; failure: BrowserCleanupFailure }): void | Promise<void>;
   cleanupTimeoutMs?: number;
   pageSetupTimeoutMs?: number;
   visibleSelectorTimeoutMs?: number;
-}
-type EnsureBrowserRuntime = NonNullable<ScrapeTimeAutoLoginBrowserOpenerOptions["ensureBrowserRuntime"]>;
-export interface ScrapeTimeAutoLoginProductionOpenerOptions extends Omit<ScrapeTimeAutoLoginBrowserOpenerOptions, "ensureBrowserRuntime" | "trustedLoginUrl"> {
-  ensureBrowserRuntimeForCdpUrl(cdpUrl: string): ReturnType<EnsureBrowserRuntime>;
-  trustedLoginUrlForBank(bankCode: string): string | undefined;
 }
 export type BankAutoLoginAdminActionReason =
   | "unsupported_bank"
@@ -142,10 +137,14 @@ const DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS = 500;
 const DEFAULT_BROWSER_CLEANUP_TIMEOUT_MS = 1_000;
 const DEFAULT_BROWSER_PAGE_SETUP_TIMEOUT_MS = 15_000;
 const PAGE_SETUP_TIMEOUT_ERROR = "Timed out while preparing the trusted bank login page";
+type BrowserCleanupFailure = "browser_slot_release_failed" | "page_close_failed" | "browser_close_failed";
+
 export function createScrapeTimeAutoLoginBrowserOpener(options: ScrapeTimeAutoLoginBrowserOpenerOptions): ScrapeTimeAutoLoginRunnerDependencies["ensureBrowser"] {
   const {
-    trustedLoginUrl, connect = connectPlaywrightOverCdp<AutoLoginCdpBrowserLike>, ensureBrowserRuntime, acquireBrowserSlot,
-    recordCleanupFailure,
+    trustedLoginUrl,
+    connect = connectPlaywrightOverCdp<AutoLoginCdpBrowserLike>,
+    ensureBrowserRuntime,
+    acquireBrowserSlot, recordCleanupFailure,
     cleanupTimeoutMs = DEFAULT_BROWSER_CLEANUP_TIMEOUT_MS,
     pageSetupTimeoutMs = DEFAULT_BROWSER_PAGE_SETUP_TIMEOUT_MS,
     visibleSelectorTimeoutMs = DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS,
@@ -154,15 +153,27 @@ export function createScrapeTimeAutoLoginBrowserOpener(options: ScrapeTimeAutoLo
     assertCdpLoopback(cdpUrl);
     const browserSlot = await acquireBrowserSlot?.();
     if (browserSlot?.kind === "throttled") return { status: "throttled" };
+    const acquiredBrowserSlot = browserSlot?.kind === "acquired" ? browserSlot : null;
     let browser: AutoLoginCdpBrowserLike | null = null;
     let page: AutoLoginCdpPageLike | null = null;
-    const closeResources = () => closeAutoLoginBrowserResources({ bankCode, page, browser,
-      browserSlot: browserSlot?.kind === "acquired" ? browserSlot : null, recordCleanupFailure, cleanupTimeoutMs });
+    let closeOwnedResources: Promise<void> | undefined;
+    const closeResources = () => {
+      closeOwnedResources ??= closeAutoLoginBrowserResources({ bankCode, page, browser,
+        browserSlot: acquiredBrowserSlot, recordCleanupFailure, cleanupTimeoutMs });
+      return closeOwnedResources;
+    };
     try {
       const browserCheck = await ensureBrowserRuntime?.(cdpUrl);
       if (browserCheck && !browserCheck.ok) throw new Error(browserCheck.safeErrorSummary);
       browser = await connect(cdpUrl);
-      page = await openTrustedLoginPage(browser, trustedLoginUrl, pageSetupTimeoutMs);
+      page = await openTrustedLoginPage({
+        browser,
+        trustedLoginUrl,
+        timeoutMs: pageSetupTimeoutMs,
+        cleanupTimeoutMs,
+        onPageCloseFailure: () => recordBrowserCleanupFailure(recordCleanupFailure, bankCode, "page_close_failed"),
+      });
+
       return { status: "ready", page: new CdpBankAutoLoginPage(page, visibleSelectorTimeoutMs), close: closeResources };
     } catch (error) {
       await closeResources();
@@ -170,31 +181,36 @@ export function createScrapeTimeAutoLoginBrowserOpener(options: ScrapeTimeAutoLo
     }
   };
 }
-export function createScrapeTimeAutoLoginProductionOpener(options: ScrapeTimeAutoLoginProductionOpenerOptions): ScrapeTimeAutoLoginRunnerDependencies["ensureBrowser"] {
-  const { ensureBrowserRuntimeForCdpUrl, trustedLoginUrlForBank, ...openerOptions } = options;
-  return async (bankCode, cdpUrl) => {
-    const trustedLoginUrl = trustedLoginUrlForBank(bankCode);
-    if (!trustedLoginUrl) throw new Error("Bank login page is not configured");
-    return createScrapeTimeAutoLoginBrowserOpener({ ...openerOptions, trustedLoginUrl,
-      ensureBrowserRuntime: ensureBrowserRuntimeForCdpUrl })(bankCode, cdpUrl);
-  };
-}
-async function openTrustedLoginPage(browser: AutoLoginCdpBrowserLike, trustedLoginUrl: string, timeoutMs: number): Promise<AutoLoginCdpPageLike> {
-  let openedPage: AutoLoginCdpPageLike | null = null;
-  let closedPage: Promise<void> | undefined;
-  let timedOut = false;
-  const closeOpenedPage = () => {
-    if (!openedPage) return;
-    closedPage ??= Promise.resolve().then(() => openedPage!.close()).catch(() => undefined);
-    return closedPage;
+type OpenTrustedLoginPageOptions = { browser: AutoLoginCdpBrowserLike; trustedLoginUrl: string; timeoutMs: number; cleanupTimeoutMs: number; onPageCloseFailure(): Promise<void> };
+
+async function openTrustedLoginPage(options: OpenTrustedLoginPageOptions): Promise<AutoLoginCdpPageLike> {
+  const { browser, trustedLoginUrl, timeoutMs, cleanupTimeoutMs, onPageCloseFailure } = options;
+  let setupPage: AutoLoginCdpPageLike | null = null;
+  let setupOwnsPage = true;
+  let pageCleanup: Promise<void> | undefined;
+  let setupAbandoned = false;
+  const closeSetupPage = (): Promise<void> => {
+    if (!setupPage || !setupOwnsPage) return Promise.resolve();
+    pageCleanup ??= runBoundedCleanup(() => setupPage!.close(), cleanupTimeoutMs, onPageCloseFailure);
+    return pageCleanup;
   };
   const setup = openCdpPageInDefaultContext(browser).then(async (page) => {
-    openedPage = page;
-    if (timedOut) {
-      void closeOpenedPage();
+    setupPage = page;
+    if (setupAbandoned) {
+      await closeSetupPage();
       throw new Error(PAGE_SETUP_TIMEOUT_ERROR);
     }
-    await page.goto(trustedLoginUrl);
+    try {
+      await page.goto(trustedLoginUrl);
+    } catch (error) {
+      await closeSetupPage();
+      throw error;
+    }
+    if (setupAbandoned) {
+      await closeSetupPage();
+      throw new Error(PAGE_SETUP_TIMEOUT_ERROR);
+    }
+    setupOwnsPage = false;
     return page;
   });
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -203,14 +219,15 @@ async function openTrustedLoginPage(browser: AutoLoginCdpBrowserLike, trustedLog
       setup,
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
-          timedOut = true;
+          setupAbandoned = true;
           reject(new Error(PAGE_SETUP_TIMEOUT_ERROR));
         }, timeoutMs);
       }),
     ]);
   } catch (error) {
-    void closeOpenedPage();
-    void setup.then(closeOpenedPage).catch(() => undefined);
+    setupAbandoned = true;
+    void closeSetupPage();
+    void setup.catch(() => undefined);
     throw error;
   } finally {
     if (timeout) clearTimeout(timeout);
@@ -241,10 +258,14 @@ async function closeAutoLoginBrowserResources(options: {
 }): Promise<void> {
   const { bankCode, page, browser, browserSlot, recordCleanupFailure, cleanupTimeoutMs } = options;
   // Free capacity before bounded CDP teardown; Popular owns its separate scraper lifecycle.
-  if (browserSlot) await runBoundedCleanup(() => browserSlot.release(), cleanupTimeoutMs, () => recordBrowserCleanupFailure(recordCleanupFailure, bankCode, "browser_slot_release_failed"));
-  if (page) await runBoundedCleanup(() => page.close(), cleanupTimeoutMs, () => recordBrowserCleanupFailure(recordCleanupFailure, bankCode, "page_close_failed"));
-  if (browser) await runBoundedCleanup(() => browser.close(), cleanupTimeoutMs, () => recordBrowserCleanupFailure(recordCleanupFailure, bankCode, "browser_close_failed"));
+  if (browserSlot) await runBoundedCleanup(() => browserSlot.release(), cleanupTimeoutMs, () =>
+    recordBrowserCleanupFailure(recordCleanupFailure, bankCode, "browser_slot_release_failed"));
+  if (page) await runBoundedCleanup(() => page.close(), cleanupTimeoutMs, () =>
+    recordBrowserCleanupFailure(recordCleanupFailure, bankCode, "page_close_failed"));
+  if (browser) await runBoundedCleanup(() => browser.close(), cleanupTimeoutMs, () =>
+    recordBrowserCleanupFailure(recordCleanupFailure, bankCode, "browser_close_failed"));
 }
+
 async function runBoundedCleanup(cleanup: () => Promise<void>, timeoutMs: number, onFailure: () => Promise<void>): Promise<void> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const cleanupResult = Promise.resolve().then(cleanup).then(() => "completed" as const, () => "failed" as const);
@@ -254,8 +275,12 @@ async function runBoundedCleanup(cleanup: () => Promise<void>, timeoutMs: number
   if (result !== "completed") void Promise.resolve().then(onFailure).catch(() => undefined);
 }
 function isExpectedSelectorTimeout(error: unknown): boolean { return error instanceof Error && error.name === "TimeoutError"; }
-async function recordBrowserCleanupFailure(recordCleanupFailure: ScrapeTimeAutoLoginBrowserOpenerOptions["recordCleanupFailure"] | undefined,
-  bankCode: string, failure: "browser_slot_release_failed" | "page_close_failed" | "browser_close_failed"): Promise<void> {
+
+async function recordBrowserCleanupFailure(
+  recordCleanupFailure: ScrapeTimeAutoLoginBrowserOpenerOptions["recordCleanupFailure"] | undefined,
+  bankCode: string,
+  failure: BrowserCleanupFailure,
+): Promise<void> {
   return Promise.resolve(recordCleanupFailure?.({ bankCode, failure })).then(() => undefined);
 }
 export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerDependencies) {
