@@ -1,17 +1,12 @@
 /**
- * Bank adapter registry — the canonical routing surface keyed by `bankCode`
- * (`Bank.code`, the immutable domain code), replacing the Popular-hardcoded
- * `resolveDefaultScraper`/`run-now`/`bank-sessions` resolution.
+ * Bank adapter registry — runtime composition keyed by `bankCode`
+ * (`Bank.code`, the immutable domain code). It registers each bank's scraper
+ * factory and injectable auto-login strategy for server-side resolution.
  *
  * `Bank.id` (cuid) remains the internal DB PK for existing relations
  * (`ScrapeRun`); `Bank.code` is the canonical adapter/job/API/credential
  * identity. Adapters are registered by `bankCode` and resolved by `bankCode`.
  *
- * PR1 scope: interface + factory + a Popular adapter instance. The full design
- * interface also exposes `portalConfig` and `createSessionChecker`; those are
- * intentionally added in PR2/PR5 when per-bank browser isolation and the
- * Banreservas/BHD read-only scrapers land, so PR1 stays a focused,
- * no-behavior-change routing refactor.
  */
 
 import type { IngestionScraper } from "../../worker/queues";
@@ -26,33 +21,30 @@ import {
   type EnsureBrowserSeam,
 } from "../../worker/scraper/browser-runtime";
 import {
+  createBankAutoLoginStrategy,
+  type BankAutoLoginStrategy as RuntimeBankAutoLoginStrategy,
+} from "../../worker/scraper/auto-login";
+import {
   createPopularBankAdapter,
   parsePopularTransactionRows,
   popularBankCode,
   popularPortalFixture,
 } from "./popular";
+import { popularPortalConfig } from "./popular-portal";
 
-/**
- * Placeholder for the auto-login strategy contract. PR4 fleshes this out into
- * the state machine + `LoginMutationGuard` + Redis `AutoLoginLock` wiring.
- * In PR1 every adapter's `createAutoLoginStrategy()` is a not-implemented stub
- * — there is NO auto-login surface in PR1.
- */
-export interface BankAutoLoginStrategy {
-  readonly bankCode: string;
-}
+export type BankAutoLoginStrategy = RuntimeBankAutoLoginStrategy;
 
 /**
  * A bank adapter. Each bank exposes its canonical `bankCode` plus the
  * factories the runtime needs. `createScraper` produces the read-only
- * `IngestionScraper`; `createAutoLoginStrategy` is stubbed in PR1.
+ * `IngestionScraper`; `createAutoLoginStrategy` is injected at server wiring.
  */
 export interface BankAdapter {
   /** Canonical immutable domain code (`Bank.code`), e.g. `popular`. */
   readonly bankCode: string;
   /** Builds the read-only ingestion scraper for this bank. */
   createScraper(): IngestionScraper;
-  /** PR1 stub — throws not-implemented. PR4 implements the real strategy. */
+  /** Builds the bank-specific credential-mutation strategy. */
   createAutoLoginStrategy(): BankAutoLoginStrategy;
 }
 
@@ -223,12 +215,19 @@ export function createPopularScraperFromEnv(
 
 const popularAdapter: BankAdapter = createPopularBankAdapter({
   createScraper: () => createPopularScraperFromEnv(),
+  createAutoLoginStrategy: () => createBankAutoLoginStrategy(popularPortalConfig, {
+    supportedBankCodes: [popularBankCode],
+  }),
 });
 
+// This composition makes the Popular strategy usable when a caller supplies
+// its page seam; registry construction does not execute it. Production
+// execution remains dormant: the opener is unavailable by default and
+// auto-launch is default-off. Event-source activation is deferred to PR4.5g/4.6.
+
 /**
- * Default bank adapter registry. PR1 registers only Popular; Banreservas and
- * BHD adapters are added in PR5. Routing and run-now validation resolve
- * through this instance so an explicit unknown `bankCode` fails closed.
+ * Default bank adapter registry. Routing and run-now validation resolve through
+ * this instance so an explicit unknown `bankCode` fails closed.
  */
 export const bankAdapterRegistry: BankAdapterRegistry = createBankAdapterRegistry([
   popularAdapter,

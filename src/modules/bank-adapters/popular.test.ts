@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import type { IngestionScraper } from "../../worker/queues";
 import {
-  createPopularAutoLoginStrategy,
   createPopularBankAdapter,
   parsePopularTransactionRows,
   popularBankCode,
@@ -89,9 +88,16 @@ describe("createPopularBankAdapter", () => {
   const stubScraper: IngestionScraper = {
     collect: async () => ({ status: "collected", movements: [] }),
   };
+  const stubAutoLoginStrategy = {
+    bankCode: "popular",
+    autoLogin: async () => ({ status: "succeeded" as const }),
+  };
 
   it("exposes Popular as a BankAdapter keyed by the canonical bankCode", () => {
-    const adapter = createPopularBankAdapter({ createScraper: () => stubScraper });
+    const adapter = createPopularBankAdapter({
+      createScraper: () => stubScraper,
+      createAutoLoginStrategy: () => stubAutoLoginStrategy,
+    });
 
     expect(adapter.bankCode).toBe("popular");
   });
@@ -103,6 +109,7 @@ describe("createPopularBankAdapter", () => {
         called += 1;
         return stubScraper;
       },
+      createAutoLoginStrategy: () => stubAutoLoginStrategy,
     });
 
     const scraper = adapter.createScraper();
@@ -110,15 +117,12 @@ describe("createPopularBankAdapter", () => {
     expect(called).toBe(1);
   });
 
-  it("createAutoLoginStrategy is a not-implemented stub in PR1 (no auto-login surface yet)", () => {
-    const adapter = createPopularBankAdapter({ createScraper: () => stubScraper });
+  it("delegates auto-login strategy construction to the injected server factory", () => {
+    const adapter = createPopularBankAdapter({
+      createScraper: () => stubScraper,
+      createAutoLoginStrategy: () => stubAutoLoginStrategy,
+    });
 
-    expect(() => adapter.createAutoLoginStrategy()).toThrow(/not implemented/i);
-  });
-});
-
-describe("createPopularAutoLoginStrategy", () => {
-  it("throws a not-implemented error directly (PR1 has no auto-login)", () => {
-    expect(() => createPopularAutoLoginStrategy()).toThrow(/not implemented/i);
+    expect(adapter.createAutoLoginStrategy()).toBe(stubAutoLoginStrategy);
   });
 });

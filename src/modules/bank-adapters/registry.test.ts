@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { IngestionScraper } from "../../worker/queues";
 import {
@@ -7,6 +7,7 @@ import {
   createBankAdapterRegistry,
   type BankAdapter,
 } from "./registry";
+import { popularPortalConfig } from "./popular-portal";
 
 const stubScraper: IngestionScraper = {
   collect: async () => ({ status: "collected", movements: [] }),
@@ -19,6 +20,32 @@ function fakeAdapter(bankCode: string): BankAdapter {
     createAutoLoginStrategy: () => {
       throw new Error("not implemented");
     },
+  };
+}
+
+function makePopularLoginPage(unsafeSelector?: string) {
+  let url: string = popularPortalConfig.baseUrl;
+  const visible = new Set<string>([
+    popularPortalConfig.usernameSelector,
+    popularPortalConfig.passwordSelector,
+    popularPortalConfig.submitSelector,
+  ]);
+  if (unsafeSelector) visible.add(unsafeSelector);
+
+  const fill = vi.fn();
+  const click = vi.fn(async () => {
+    url = `${popularPortalConfig.baseUrl}${popularPortalConfig.dashboardPathIndicator}`;
+  });
+
+  return {
+    page: {
+      currentUrl: async () => url,
+      hasVisibleSelector: async (selector: string) => visible.has(selector),
+      fill,
+      click,
+    },
+    fill,
+    click,
   };
 }
 
@@ -91,7 +118,7 @@ describe("createBankAdapterRegistry — CDP endpoint uniqueness guard (MEDIUM-2)
   });
 });
 
-describe("bankAdapterRegistry — default instance (Popular registered in PR1)", () => {
+describe("bankAdapterRegistry — default instance", () => {
   it("resolves the Popular adapter by its canonical bankCode", () => {
     const adapter = bankAdapterRegistry.get("popular");
 
@@ -99,7 +126,7 @@ describe("bankAdapterRegistry — default instance (Popular registered in PR1)",
     expect(adapter?.bankCode).toBe("popular");
   });
 
-  it("exposes only Popular as supported in PR1 (Banreservas/BHD land in PR5)", () => {
+  it("exposes only the currently registered Popular adapter", () => {
     expect(bankAdapterRegistry.supportedBankCodes()).toEqual(["popular"]);
   });
 
@@ -125,5 +152,40 @@ describe("buildPopularCdpScraperOptionsFromEnv — production backpressure wirin
     });
 
     expect(typeof options?.acquireBrowserSlot).toBe("function");
+  });
+
+});
+
+describe("bankAdapterRegistry — Popular auto-login strategy", () => {
+  it("uses configured selectors and outcomes in an offline fixture, not as independent live-surface proof", async () => {
+    const strategy = bankAdapterRegistry.get("popular")!.createAutoLoginStrategy();
+    const { page, fill, click } = makePopularLoginPage();
+
+    await expect(strategy.autoLogin({
+      credential: { bankCode: "popular", username: "bank-user", password: "bank-password" },
+      page,
+    })).resolves.toEqual({ status: "succeeded" });
+
+    expect(fill.mock.calls).toEqual([
+      [popularPortalConfig.usernameSelector, "bank-user"],
+      [popularPortalConfig.passwordSelector, "bank-password"],
+    ]);
+    expect(click).toHaveBeenCalledWith(popularPortalConfig.submitSelector);
+  });
+
+  it.each([
+    ["token challenge", popularPortalConfig.mfaIndicatorSelector, "protected_flow"],
+    ["modal", popularPortalConfig.incompatibleFlowSelector, "incompatible_flow"],
+  ] as const)("fails closed for a visible Popular %s without submitting credentials", async (_name, unsafeSelector, reason) => {
+    const strategy = bankAdapterRegistry.get("popular")!.createAutoLoginStrategy();
+    const { page, fill, click } = makePopularLoginPage(unsafeSelector);
+
+    await expect(strategy.autoLogin({
+      credential: { bankCode: "popular", username: "bank-user", password: "bank-password" },
+      page,
+    })).resolves.toMatchObject({ status: "needs_admin_action", reason });
+
+    expect(fill).not.toHaveBeenCalled();
+    expect(click).not.toHaveBeenCalled();
   });
 });
