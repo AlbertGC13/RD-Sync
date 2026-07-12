@@ -5,6 +5,7 @@ import {
   DEFAULT_RUN_NOW_BANK_CODE,
   SUPPORTED_RUN_NOW_BANK_CODES,
   isSupportedRunNowBankCode,
+  scrapeRunStatusLabel,
 } from "./banks";
 
 describe("SUPPORTED_RUN_NOW_BANK_CODES — canonical bankCode whitelist", () => {
@@ -31,5 +32,12 @@ describe("SUPPORTED_RUN_NOW_BANK_CODES — registry parity (derived from registr
     expect([...SUPPORTED_RUN_NOW_BANK_CODES]).toEqual([
       ...bankAdapterRegistry.supportedBankCodes(),
     ]);
+  });
+});
+
+describe("scrapeRunStatusLabel", () => {
+  it("labels throttled runs as deferred instead of requiring admin action", () => {
+    expect(scrapeRunStatusLabel("throttled")).toBe("Pospuesta temporalmente");
+    expect(scrapeRunStatusLabel("needs_admin_action")).toBe("Necesita acción administrativa");
   });
 });

@@ -614,7 +614,7 @@ describe("ingestion processor — scrape-time auto-login trigger", () => {
     expect(transactions.received).toEqual([]);
   });
 
-  it("maps throttled auto-login to safe admin action without collecting", async () => {
+  it("persists throttled auto-login as deferred without collecting or alerting admins", async () => {
     const scrapeRuns = new FakeScrapeRunRepository();
     const transactions = new FakeTransactionRepository({ inserted: 0, skipped: 0 });
     const adminAlerts = new FakeAdminAlertSink();
@@ -636,33 +636,36 @@ describe("ingestion processor — scrape-time auto-login trigger", () => {
 
     const result = await processor({ data: { ...jobData, expiredEventId: "expired-throttled" } });
 
-    expect(result).toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+    expect(result).toEqual({ status: "throttled", inserted: 0, skipped: 0 });
     expect(collect).not.toHaveBeenCalled();
     expect(scrapeRuns.transitions).toEqual([
       { runId: "run-1", status: "running" },
       {
         runId: "run-1",
-        status: "needs_admin_action",
+        status: "throttled",
         safeErrorSummary: "Bank browser capacity is temporarily unavailable",
       },
     ]);
     expect(transactions.received).toEqual([]);
-    expect(adminAlerts.events).toEqual([
-      {
-        runId: "run-1",
-        bankId: "popular",
-        status: "needs_admin_action",
-        safeErrorSummary: "Bank browser capacity is temporarily unavailable",
-      },
-    ]);
+    expect(adminAlerts.events).toEqual([]);
     const events = await auditSink.list();
-    expect(events.find((e) => e.action === "scrape_run.needs_admin_action")).toMatchObject({
+    expect(events.find((e) => e.action === "scrape_run.throttled")).toMatchObject({
       targetId: "run-1",
       metadata: {
         bankId: "popular",
         safeErrorSummary: "Bank browser capacity is temporarily unavailable",
       },
     });
+    expect(events.find((e) => e.action === "bank_autologin.skipped")).toMatchObject({
+      actorId: "system:auto-login",
+      actorRole: null,
+      target: "scrape_run",
+      targetId: "run-1",
+      metadata: { bankCode: "popular", reason: "throttled" },
+    });
+    const canonicalThrottledEvent = events.find((e) => e.action === "bank_autologin.skipped");
+    expect(JSON.stringify(canonicalThrottledEvent?.metadata)).not.toContain("capacity");
+    expect(events.find((e) => e.action === "scrape_run.needs_admin_action")).toBeUndefined();
   });
 
   it("maps thrown auto-login to safe admin action without leaking raw errors or collecting", async () => {
@@ -764,6 +767,10 @@ class FakeScrapeRunRepository {
 
   async markNeedsAdminAction(runId: string, safeErrorSummary: string): Promise<void> {
     this.transitions.push({ runId, status: "needs_admin_action", safeErrorSummary });
+  }
+
+  async markThrottled(runId: string, safeErrorSummary: string): Promise<void> {
+    this.transitions.push({ runId, status: "throttled", safeErrorSummary });
   }
 
   async markFailed(runId: string, safeErrorSummary: string): Promise<void> {

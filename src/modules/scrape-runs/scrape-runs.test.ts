@@ -6,6 +6,7 @@ import {
   toDashboardScrapeRun,
 } from "./index";
 import type { ScrapeRunRecord } from "./index";
+import { runScrapeRunRepositoryContract } from "../persistence/contracts/scrape-run-repository.contract";
 
 const baseRun: ScrapeRunRecord = {
   id: "run-1",
@@ -220,4 +221,30 @@ describe("InMemoryScrapeRunRepository", () => {
       ["run-mfa", "needs_admin_action", "Bank session requires admin MFA action"],
     ]);
   });
+
+  it("persists browser throttling as a distinct deferred outcome", async () => {
+    const repository = new InMemoryScrapeRunRepository();
+
+    await repository.createQueued({ id: "run-throttled", bankId: "popular" });
+    await repository.markThrottled(
+      "run-throttled",
+      "Bank browser capacity is temporarily unavailable",
+      new Date("2026-06-08T12:05:00.000Z"),
+    );
+
+    expect(await repository.list({ status: "throttled" })).toMatchObject([
+      {
+        id: "run-throttled",
+        status: "throttled",
+        safeErrorSummary: "Bank browser capacity is temporarily unavailable",
+        endedAt: new Date("2026-06-08T12:05:00.000Z"),
+      },
+    ]);
+    expect(await repository.list({ status: "needs_admin_action" })).toEqual([]);
+  });
 });
+
+runScrapeRunRepositoryContract(async () => ({
+  repo: new InMemoryScrapeRunRepository(),
+  cleanup: async () => undefined,
+}));

@@ -19,6 +19,7 @@ import { Button } from "../ui/button";
 //   needs_admin -> admin-action result toast (12s) + refresh
 //   unverified  -> could-not-verify result toast (12s) + refresh (404/401/403 mid-poll)
 //   timeout     -> still-processing result toast (12s) + refresh (deadline / hung GET)
+//   throttled   -> deferred-result toast (12s) + refresh (browser capacity)
 //
 // Terminal results surface as a Sonner toast (longer 12s duration, larger
 // text) — NOT an inline banner. An inline banner shifted the Refresh button's
@@ -36,6 +37,8 @@ const USER_SAFE_REFRESH_IMPORTED_SINGULAR =
 const USER_SAFE_REFRESH_FAILED = "No se pudo completar la actualización. Intente nuevamente.";
 const USER_SAFE_REFRESH_NEEDS_ADMIN = "La sesión del banco requiere acción del administrador.";
 const USER_SAFE_REFRESH_TIMEOUT = "La corrida sigue procesándose. Actualice nuevamente en unos momentos.";
+const USER_SAFE_REFRESH_THROTTLED =
+  "La actualización se pospuso temporalmente por capacidad del sistema. Intente nuevamente en unos momentos.";
 const USER_SAFE_REFRESH_UNVERIFIED =
   "No se pudo verificar el resultado de la corrida. Actualice nuevamente en unos momentos.";
 const USER_SAFE_RUN_CONFLICT = "Ya hay una corrida en proceso. Espere a que termine.";
@@ -49,13 +52,13 @@ const USER_SAFE_NETWORK_ERROR =
 const DEFAULT_REFRESH_TIMEOUT_MS = 15_000;
 
 // Polling defaults. The client polls the single-run status endpoint until the
-// run reaches a terminal state (succeeded/failed/needs_admin_action) or the
+// run reaches a terminal state (succeeded/failed/needs_admin_action/throttled) or the
 // polling deadline elapses. Defaults are conservative — a scrape run can take
 // tens of seconds on the worker, so 60s gives it room without hanging forever.
 const DEFAULT_POLL_INTERVAL_MS = 1_500;
 const DEFAULT_POLL_TIMEOUT_MS = 60_000;
 
-// Terminal refresh results (succeeded / failed / needs_admin_action /
+// Terminal refresh results (succeeded / failed / needs_admin_action / throttled /
 // unverified / timeout) are important enough to stay visible longer than
 // Sonner's default toast. Centralized as a named, exported constant so every
 // terminal outcome shares one duration and tests can assert on it without
@@ -138,6 +141,7 @@ export type PollScrapeRunStatusOutcome =
   | { status: "succeeded"; insertedCount: number }
   | { status: "failed" }
   | { status: "needs_admin_action" }
+  | { status: "throttled" }
   | { status: "unverified" }
   | { status: "timeout" };
 
@@ -182,6 +186,8 @@ export function describePollOutcome(
       return { message: USER_SAFE_REFRESH_FAILED, tone: "error" };
     case "needs_admin_action":
       return { message: USER_SAFE_REFRESH_NEEDS_ADMIN, tone: "error" };
+    case "throttled":
+      return { message: USER_SAFE_REFRESH_THROTTLED, tone: "info" };
     case "unverified":
       return { message: USER_SAFE_REFRESH_UNVERIFIED, tone: "error" };
     case "timeout":
@@ -214,7 +220,7 @@ export interface PollScrapeRunStatusOptions {
 
 /**
  * Poll `GET /api/scrape-runs/[runId]` until the run reaches a terminal state
- * (`succeeded` / `failed` / `needs_admin_action`) or the deadline elapses.
+ * (`succeeded` / `failed` / `needs_admin_action` / `throttled`) or the deadline elapses.
  *
  * The first check is delayed by `pollIntervalMs` — the run was JUST created as
  * `queued`, so an immediate poll would almost certainly return `queued` and
@@ -332,6 +338,7 @@ export async function pollScrapeRunStatus({
       }
       if (runStatus === "failed") return { status: "failed" };
       if (runStatus === "needs_admin_action") return { status: "needs_admin_action" };
+      if (runStatus === "throttled") return { status: "throttled" };
       // queued / running / unknown — keep polling.
     } finally {
       // Always clear the timer once the fetch + body parse for this poll are
@@ -443,7 +450,7 @@ interface RefreshTransactionsOptions {
   bankId?: string;
   fetchImpl: typeof fetch;
   /**
-   * Fires only on terminal states (succeeded/failed/needs_admin_action) and
+   * Fires only on terminal states (succeeded/failed/needs_admin_action/throttled) and
    * on polling timeout — NOT on the initial 202. Renamed from `onSuccess`
    * because "success" now means "the worker finished", not "the run was
    * queued".
