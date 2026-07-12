@@ -1,6 +1,5 @@
 import type { BankMovement, TransactionDirection } from "../transactions";
-import type { IngestionScraper } from "../../worker/queues";
-import type { BankAdapter, BankAutoLoginStrategy } from "./registry";
+import type { BankAdapter } from "./registry";
 
 const POPULAR_BANK_ID = "popular";
 
@@ -169,33 +168,21 @@ function normalizeOptionalText(value: string | null | undefined): string | null 
 // ---------------------------------------------------------------------------
 // Bank adapter — exposes Popular as a `BankAdapter` keyed by `bankCode`.
 //
-// The domain module stays free of worker/runtime coupling: the heavyweight
-// scraper factory (env wiring, CDP attach) is INJECTED by the server wiring
-// layer (the registry in `registry.ts`). PR1 only wires routing; there is NO
-// auto-login surface, so `createAutoLoginStrategy` is a not-implemented stub.
+// The domain module stays free of worker/runtime coupling. Both factories are
+// injected by the server wiring layer, which owns CDP and login state machines.
 // ---------------------------------------------------------------------------
 
 /**
- * PR1 stub: Popular auto-login is not implemented yet. PR4 introduces the real
- * `BankAutoLoginStrategy` state machine, `LoginMutationGuard`, and Redis lock.
- * Calling this before PR4 is a programmer error, not a runtime scrape path.
- */
-export function createPopularAutoLoginStrategy(): BankAutoLoginStrategy {
-  throw new Error("Popular auto-login strategy is not implemented yet (PR4)");
-}
-
-/**
- * Builds the Popular `BankAdapter`. The `createScraper` factory is injected by
- * the server wiring layer so this domain module never imports the worker CDP
- * runtime (avoids a domain -> worker dependency and a circular import with
- * `popular-cdp.ts`, which imports this module's profile/parser).
+ * Builds the Popular `BankAdapter` from server-owned factories. This module
+ * deliberately imports no worker module, avoiding a domain-to-worker cycle.
  */
 export function createPopularBankAdapter(options: {
-  createScraper: () => IngestionScraper;
+  createScraper: BankAdapter["createScraper"];
+  createAutoLoginStrategy: BankAdapter["createAutoLoginStrategy"];
 }): BankAdapter {
   return {
     bankCode: popularBankCode,
     createScraper: options.createScraper,
-    createAutoLoginStrategy: createPopularAutoLoginStrategy,
+    createAutoLoginStrategy: options.createAutoLoginStrategy,
   };
 }
