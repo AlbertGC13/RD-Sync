@@ -167,6 +167,18 @@ model ScrapeRun {
   @@index([status])
 }
 
+// One unresolved expiry episode per bank code. It gives monitor replicas and
+// restarts a stable event/run identity without ever storing credential material.
+model BankSessionExpiryEpisode {
+  bankCode                     String   @id
+  expiredEventId               String   @unique
+  runId                        String   @unique
+  expiredAuditDeliveredAt      DateTime?
+  restoredAuditDeliveredAt     DateTime?
+  createdAt                    DateTime @default(now())
+  updatedAt                    DateTime @updatedAt
+}
+
 // Change 4: EncryptedSessionRef model DROPPED entirely.
 
 // Change 3: Remove actor User relation from AuditEvent; actorId/actorRole remain as plain String?.

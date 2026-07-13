@@ -1,6 +1,14 @@
 import type { AuditSink } from "../audit";
 import { createAuditEvent } from "../audit";
+import { BANK_SESSION_ACTIONS } from "../audit/bank-actions";
+import { randomUUID } from "node:crypto";
+
 import type { AdminAlertSink } from "../../worker/queues/index";
+import type {
+  BankSessionExpiryEpisode,
+  BankSessionExpiryEpisodeRepository,
+  CreateBankSessionExpiryEpisodeInput,
+} from "./expiry-episodes";
 import {
   CdpPopularPortalPage,
   type CdpBrowserLike,
@@ -202,7 +210,7 @@ export function createCdpSessionChecker(
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type ScheduleHandle = any;
 
-export interface BankSessionMonitorDeps {
+interface BankSessionMonitorBaseDeps {
   check: () => Promise<BankSessionCheckResult>;
   alertSink: Pick<AdminAlertSink, "notifySessionAttention">;
   auditSink?: Pick<AuditSink, "record">;
@@ -213,11 +221,33 @@ export interface BankSessionMonitorDeps {
   clearSchedule?: (handle: ScheduleHandle) => void;
 }
 
+export type BankSessionMonitorMode =
+  | { mode: "alert_only" }
+  | {
+    mode: "expiry_events";
+    bankCode: string;
+    episodes: BankSessionExpiryEpisodeRepository;
+    createExpiredEventId?: () => string;
+  };
+
+/** Valid monitor modes prevent partially-wired durable producers. */
+export interface BankSessionMonitorDeps extends BankSessionMonitorBaseDeps {
+  /** Omitted mode preserves the established alert-only monitor contract. */
+  monitorMode?: BankSessionMonitorMode;
+}
+
 export interface BankSessionMonitor {
   tick(): Promise<BankSessionCheckResult>;
   start(): void;
   stop(): void;
   lastResult(): BankSessionCheckResult | null;
+}
+
+/**
+ * Derive the stable durable identity for one expiry episode.
+ */
+export function createExpiredSessionRunId(bankCode: string, expiredEventId: string): string {
+  return `${bankCode}-expiry-${expiredEventId}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,12 +283,43 @@ export function createBankSessionMonitor(
     clock = () => new Date(),
     schedule = setInterval,
     clearSchedule = clearInterval,
+    monitorMode = { mode: "alert_only" },
   } = deps;
+  const expiryEpisodes = monitorMode.mode === "expiry_events" ? monitorMode.episodes : undefined;
+  const expiryBankCode = monitorMode.mode === "expiry_events" ? monitorMode.bankCode : undefined;
+  const createEpisodeId = monitorMode.mode === "expiry_events"
+    ? (monitorMode.createExpiredEventId ?? randomUUID)
+    : null;
 
-  let previous: BankSessionCheckResult | null = null;
+  let previousTransition: BankSessionCheckResult | null = null;
+  let lastObservedResult: BankSessionCheckResult | null = null;
+  let tickInFlight: Promise<BankSessionCheckResult> | null = null;
+  let recoveryEpisode: BankSessionExpiryEpisode | null = null;
+  let pendingExpiryCandidate: {
+    input: CreateBankSessionExpiryEpisodeInput;
+    observedResult: BankSessionCheckResult;
+  } | null = null;
   let handle: ScheduleHandle | null = null;
 
-  async function tick(): Promise<BankSessionCheckResult> {
+  async function reconcileRecoveryEpisode(observedEpisode: BankSessionExpiryEpisode): Promise<boolean> {
+    try {
+      const currentEpisode = await expiryEpisodes?.findByBankCode(observedEpisode.bankCode);
+      if (
+        currentEpisode
+        && currentEpisode.runId === observedEpisode.runId
+        && currentEpisode.expiredEventId === observedEpisode.expiredEventId
+      ) {
+        recoveryEpisode = currentEpisode;
+        return false;
+      }
+      recoveryEpisode = null;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function tickOnce(): Promise<BankSessionCheckResult> {
     let result: BankSessionCheckResult;
     try {
       result = await check();
@@ -271,10 +332,9 @@ export function createBankSessionMonitor(
       };
     }
 
-    const prevStatus = previous?.status ?? null;
+    lastObservedResult = result;
+    const prevStatus = previousTransition?.status ?? null;
     const nextStatus = result.status;
-
-    previous = result;
 
     // Determine if this is a transition that warrants alerting/auditing.
     // isNewBad fires only when coming FROM a non-bad (null or active) state,
@@ -284,13 +344,124 @@ export function createBankSessionMonitor(
     const isNewBad = nextStatus !== "active" && !wasBad;
     const isRecovery =
       nextStatus === "active" && prevStatus !== null && prevStatus !== "active";
+    let createdEpisode = false;
+    let expiryAuditAcknowledged = false;
+    let expiryNotificationResult: BankSessionCheckResult | null = null;
+    let transitionReady = true;
 
-    if (isNewBad || isRecovery) {
+    if ((nextStatus === "expired" || pendingExpiryCandidate) && expiryEpisodes && expiryBankCode && createEpisodeId) {
+      const candidate = pendingExpiryCandidate ?? {
+        input: (() => {
+          const expiredEventId = createEpisodeId();
+          return {
+            bankCode: expiryBankCode,
+            expiredEventId,
+            runId: createExpiredSessionRunId(expiryBankCode, expiredEventId),
+          };
+        })(),
+        observedResult: result,
+      };
+      pendingExpiryCandidate = candidate;
+      try {
+        const episodeResult = await expiryEpisodes.getOrCreate(candidate.input);
+        const durableEpisode = episodeResult.episode;
+        createdEpisode = episodeResult.created;
+        recoveryEpisode = durableEpisode;
+        expiryAuditAcknowledged = await deliverEpisodeAudit(auditSink, expiryEpisodes, durableEpisode, "expired", result);
+        transitionReady = expiryAuditAcknowledged;
+        if (createdEpisode) expiryNotificationResult = candidate.observedResult;
+        pendingExpiryCandidate = null;
+      } catch {
+        // A durable election outage must not fall back to process-local side effects.
+        transitionReady = false;
+      }
+    }
+
+    if (nextStatus === "active" && expiryEpisodes && expiryBankCode && !recoveryEpisode) {
+      try {
+        recoveryEpisode = await expiryEpisodes.findByBankCode(expiryBankCode);
+      } catch {
+        // The next active tick safely retries the durable lookup without advancing state.
+        transitionReady = false;
+      }
+    }
+
+    let recoveryClosed = nextStatus !== "active" || !recoveryEpisode;
+    let recoveryWon = false;
+    if (nextStatus === "active" && expiryEpisodes && recoveryEpisode) {
+      const observedEpisode = recoveryEpisode;
+      const expiryAuditAcknowledged = await deliverEpisodeAudit(
+        auditSink,
+        expiryEpisodes,
+        observedEpisode,
+        "expired",
+        result,
+      );
+      if (!expiryAuditAcknowledged) {
+        recoveryClosed = await reconcileRecoveryEpisode(observedEpisode);
+      } else {
+        const restorationAuditAcknowledged = await deliverEpisodeAudit(
+          auditSink,
+          expiryEpisodes,
+          observedEpisode,
+          "restored",
+          result,
+        );
+        if (restorationAuditAcknowledged) {
+          try {
+            const closeResult = await expiryEpisodes.close(observedEpisode);
+            recoveryWon = closeResult === "closed";
+            if (recoveryWon) {
+              recoveryEpisode = null;
+              recoveryClosed = true;
+            } else {
+              recoveryClosed = await reconcileRecoveryEpisode(observedEpisode);
+            }
+          } catch {
+            recoveryClosed = await reconcileRecoveryEpisode(observedEpisode);
+          }
+        } else {
+          recoveryClosed = await reconcileRecoveryEpisode(observedEpisode);
+        }
+      }
+    }
+
+    const usesDurableExpiryEpisodes = expiryEpisodes !== undefined && expiryBankCode !== undefined;
+    if (expiryNotificationResult) {
+      await emitAlert(alertSink, expiryNotificationResult);
+    }
+    if (
+      (!usesDurableExpiryEpisodes && isNewBad) ||
+      (nextStatus !== "expired" && isNewBad) ||
+      (isRecovery && !usesDurableExpiryEpisodes) ||
+      recoveryWon
+    ) {
       await emitAlert(alertSink, result);
+    }
+
+    if (
+      (!usesDurableExpiryEpisodes || nextStatus === "browser_unavailable") &&
+      (isNewBad || isRecovery)
+    ) {
       await emitAudit(auditSink, result);
     }
 
+    // A failed durable close keeps the local state on the expired episode so a
+    // later tick retries the exact observed identity instead of forgetting it.
+    if (transitionReady && (recoveryClosed || nextStatus !== "active")) {
+      previousTransition = result;
+    }
     return result;
+  }
+
+  async function tick(): Promise<BankSessionCheckResult> {
+    if (tickInFlight) return tickInFlight;
+    const current = tickOnce();
+    tickInFlight = current;
+    void current.finally(() => {
+      if (tickInFlight === current) tickInFlight = null;
+    });
+    return current;
   }
 
   return {
@@ -310,7 +481,7 @@ export function createBankSessionMonitor(
     },
 
     lastResult() {
-      return previous;
+      return lastObservedResult;
     },
   };
 }
@@ -342,10 +513,10 @@ async function emitAudit(
   try {
     const action =
       result.status === "active"
-        ? "bank_session.restored"
+        ? BANK_SESSION_ACTIONS.RESTORED
         : result.status === "expired"
-          ? "bank_session.expired"
-          : "bank_session.unavailable";
+          ? BANK_SESSION_ACTIONS.EXPIRED
+          : BANK_SESSION_ACTIONS.UNAVAILABLE;
 
     const event = createAuditEvent({
       actorId: AUDIT_ACTOR,
@@ -358,5 +529,36 @@ async function emitAudit(
     await auditSink.record(event);
   } catch {
     // Audit failures must never propagate.
+  }
+}
+
+async function deliverEpisodeAudit(
+  auditSink: Pick<AuditSink, "record"> | undefined,
+  episodes: BankSessionExpiryEpisodeRepository,
+  episode: BankSessionExpiryEpisode,
+  kind: "expired" | "restored",
+  result: BankSessionCheckResult,
+): Promise<boolean> {
+  try {
+    if (await episodes.isAuditDelivered(episode, kind)) return true;
+    if (!auditSink) return false;
+    const action = kind === "expired" ? BANK_SESSION_ACTIONS.EXPIRED : BANK_SESSION_ACTIONS.RESTORED;
+    await auditSink.record(createAuditEvent({
+      id: `bank-session-${action}:${episode.bankCode}:${episode.expiredEventId}`,
+      actorId: AUDIT_ACTOR,
+      actorRole: "system",
+      action,
+      target: "bank_session",
+      targetId: null,
+      metadata: {
+        bankCode: episode.bankCode,
+        expiredEventId: episode.expiredEventId,
+        checkedAt: result.checkedAt,
+      },
+    }));
+    const marked = await episodes.markAuditDelivered(episode, kind);
+    return marked || await episodes.isAuditDelivered(episode, kind);
+  } catch {
+    return false;
   }
 }
