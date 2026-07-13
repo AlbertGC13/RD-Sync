@@ -1,11 +1,12 @@
 import type { JobsOptions } from "bullmq";
 
 import { createAuditEvent, type AuditSink } from "../../modules/audit";
+import { BANK_AUTOLOGIN_ACTIONS } from "../../modules/audit/bank-actions";
 import { type BankMovement, type TransactionRecord, normalizeBankMovement } from "../../modules/transactions";
 import type { ScrapeTimeAutoLoginOutcome } from "../scraper/auto-login";
 import { redactDiagnosticText, type ScrapeCollectionResult } from "../scraper";
 
-export type ScrapeRunStatus = "queued" | "running" | "succeeded" | "failed" | "needs_admin_action";
+export type ScrapeRunStatus = "queued" | "running" | "succeeded" | "failed" | "needs_admin_action" | "throttled";
 
 export interface IngestionJobData {
   runId: string;
@@ -46,6 +47,7 @@ export interface ScrapeRunRepository {
   markRunning(runId: string, startedAt?: Date): Promise<void>;
   markSucceeded(runId: string, counts: { insertedCount: number; skippedCount: number }, endedAt?: Date): Promise<void>;
   markNeedsAdminAction(runId: string, safeErrorSummary: string, endedAt?: Date): Promise<void>;
+  markThrottled(runId: string, safeErrorSummary: string, endedAt?: Date): Promise<void>;
   markFailed(runId: string, safeErrorSummary: string, endedAt?: Date): Promise<void>;
 }
 
@@ -108,6 +110,7 @@ export interface QueueLike {
 
 const ingestionJobName = "bank-transaction-ingestion";
 const SYSTEM_INGESTION_ACTOR = "system:ingestion-worker";
+const SYSTEM_AUTOLOGIN_ACTOR = "system:auto-login";
 
 export function createIngestionProcessor(dependencies: IngestionProcessorDependencies) {
   const now = dependencies.now ?? (() => new Date());
@@ -135,8 +138,18 @@ export function createIngestionProcessor(dependencies: IngestionProcessorDepende
 
     try {
       const autoLoginOutcome = await runScrapeTimeAutoLoginIfNeeded(job, dependencies.runScrapeTimeAutoLogin);
-      if (autoLoginOutcome && shouldStopAfterAutoLogin(autoLoginOutcome)) {
+      if (autoLoginOutcome?.status === "needs_admin_action") {
         return markNeedsAdminActionTerminal(
+          dependencies,
+          job.data,
+          requestedBankCode,
+          autoLoginOutcome.safeSummary,
+          now,
+        );
+      }
+
+      if (autoLoginOutcome?.status === "throttled") {
+        return markThrottledDeferred(
           dependencies,
           job.data,
           requestedBankCode,
@@ -205,10 +218,6 @@ async function runScrapeTimeAutoLoginIfNeeded(
   }
 }
 
-function shouldStopAfterAutoLogin(outcome: ScrapeTimeAutoLoginOutcome): outcome is Extract<ScrapeTimeAutoLoginOutcome, { status: "needs_admin_action" | "throttled" }> {
-  return outcome.status === "needs_admin_action" || outcome.status === "throttled";
-}
-
 async function markNeedsAdminActionTerminal(
   dependencies: Pick<IngestionProcessorDependencies, "scrapeRuns" | "adminAlerts" | "auditSink">,
   jobData: IngestionJobData,
@@ -230,6 +239,29 @@ async function markNeedsAdminActionTerminal(
   });
 
   return { status: "needs_admin_action", inserted: 0, skipped: 0 };
+}
+
+async function markThrottledDeferred(
+  dependencies: Pick<IngestionProcessorDependencies, "scrapeRuns" | "auditSink">,
+  jobData: IngestionJobData,
+  requestedBankCode: string,
+  safeErrorSummary: string,
+  now: () => Date,
+): Promise<IngestionResult> {
+  await dependencies.scrapeRuns.markThrottled(jobData.runId, safeErrorSummary, now());
+  await emitAuditEvent(dependencies.auditSink, {
+    action: "scrape_run.throttled",
+    runId: jobData.runId,
+    bankId: requestedBankCode,
+    metadata: { safeErrorSummary },
+  });
+  await emitAutoLoginThrottledAuditEvent(
+    dependencies.auditSink,
+    jobData.runId,
+    requestedBankCode,
+  );
+
+  return { status: "throttled", inserted: 0, skipped: 0 };
 }
 
 export function createIngestionQueueOptions(runId: string): JobsOptions {
@@ -285,5 +317,27 @@ async function emitAuditEvent(
     );
   } catch {
     // Audit failures must never disrupt ingestion
+  }
+}
+
+async function emitAutoLoginThrottledAuditEvent(
+  auditSink: Pick<AuditSink, "record"> | undefined,
+  runId: string,
+  bankCode: string,
+): Promise<void> {
+  if (!auditSink) return;
+  try {
+    await auditSink.record(
+      createAuditEvent({
+        actorId: SYSTEM_AUTOLOGIN_ACTOR,
+        actorRole: null,
+        action: BANK_AUTOLOGIN_ACTIONS.SKIPPED,
+        target: "scrape_run",
+        targetId: runId,
+        metadata: { bankCode, reason: "throttled" },
+      }),
+    );
+  } catch {
+    // Audit failures must never disrupt ingestion.
   }
 }

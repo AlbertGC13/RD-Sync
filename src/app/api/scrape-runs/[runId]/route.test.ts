@@ -52,6 +52,35 @@ describe("GET /api/scrape-runs/[runId] — single-run status", () => {
     });
   });
 
+  it("exposes throttled as a terminal status without exposing its safe summary", async () => {
+    const repo = new InMemoryScrapeRunRepository();
+    await repo.createQueued({ id: "run-throttled", bankId: "popular" });
+    await repo.markThrottled(
+      "run-throttled",
+      "Bank browser capacity is temporarily unavailable token=secret",
+      new Date("2026-06-09T12:01:15.000Z"),
+    );
+    const handler = createGetScrapeRunStatusHandler({ scrapeRuns: repo });
+
+    const response = await handler(
+      new Request("https://rd-sync.test/api/scrape-runs/run-throttled", {
+        method: "GET",
+        headers: { "x-rd-sync-user-id": "viewer-1", "x-rd-sync-role": "viewer" },
+      }),
+      { params: Promise.resolve({ runId: "run-throttled" }) },
+    );
+
+    expect(await response.json()).toEqual({
+      run: {
+        id: "run-throttled",
+        bankId: "popular",
+        status: "throttled",
+        insertedCount: 0,
+        skippedCount: 0,
+      },
+    });
+  });
+
   it("also admits reviewer and admin roles", async () => {
     const repo = new InMemoryScrapeRunRepository();
     await seedSucceededRun(repo, "run-x");

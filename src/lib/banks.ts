@@ -98,6 +98,7 @@ const SCRAPE_RUN_STATUS_LABELS: Record<ScrapeRunStatus, string> = {
   succeeded: "Completada",
   failed: "Fallida",
   needs_admin_action: "Necesita acción administrativa",
+  throttled: "Pospuesta temporalmente",
 };
 
 export function scrapeRunStatusLabel(status: ScrapeRunStatus): string {

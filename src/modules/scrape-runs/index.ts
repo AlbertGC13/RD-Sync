@@ -158,6 +158,15 @@ export class InMemoryScrapeRunRepository implements WorkerScrapeRunRepository {
     });
   }
 
+  async markThrottled(runId: string, safeErrorSummary: string, endedAt = new Date()): Promise<void> {
+    this.update(runId, {
+      status: "throttled",
+      endedAt,
+      safeErrorSummary,
+      updatedAt: endedAt,
+    });
+  }
+
   async markFailed(runId: string, safeErrorSummary: string, endedAt = new Date()): Promise<void> {
     this.update(runId, {
       status: "failed",

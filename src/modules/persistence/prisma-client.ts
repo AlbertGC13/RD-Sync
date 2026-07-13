@@ -113,7 +113,7 @@ export function fromDbReviewState(
  * Map domain ScrapeRunStatus string to Prisma enum key.
  */
 export function toDbScrapeRunStatus(
-  status: "queued" | "running" | "succeeded" | "failed" | "needs_admin_action",
+  status: "queued" | "running" | "succeeded" | "failed" | "needs_admin_action" | "throttled",
 ): PrismaScrapeRunStatus {
   const map: Record<string, PrismaScrapeRunStatus> = {
     queued: ScrapeRunStatus.QUEUED,
@@ -121,6 +121,7 @@ export function toDbScrapeRunStatus(
     succeeded: ScrapeRunStatus.SUCCEEDED,
     failed: ScrapeRunStatus.FAILED,
     needs_admin_action: ScrapeRunStatus.NEEDS_ADMIN_ACTION,
+    throttled: ScrapeRunStatus.THROTTLED,
   };
   const result = map[status];
   if (result === undefined) throw new Error(`Unknown scrape run status: ${status}`);
@@ -132,16 +133,17 @@ export function toDbScrapeRunStatus(
  */
 export function fromDbScrapeRunStatus(
   status: PrismaScrapeRunStatus,
-): "queued" | "running" | "succeeded" | "failed" | "needs_admin_action" {
+): "queued" | "running" | "succeeded" | "failed" | "needs_admin_action" | "throttled" {
   const map: Record<
     string,
-    "queued" | "running" | "succeeded" | "failed" | "needs_admin_action"
+    "queued" | "running" | "succeeded" | "failed" | "needs_admin_action" | "throttled"
   > = {
     [ScrapeRunStatus.QUEUED]: "queued",
     [ScrapeRunStatus.RUNNING]: "running",
     [ScrapeRunStatus.SUCCEEDED]: "succeeded",
     [ScrapeRunStatus.FAILED]: "failed",
     [ScrapeRunStatus.NEEDS_ADMIN_ACTION]: "needs_admin_action",
+    [ScrapeRunStatus.THROTTLED]: "throttled",
   };
   const result = map[status];
   if (result === undefined) throw new Error(`Unknown DB scrape run status: ${status}`);

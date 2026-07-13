@@ -419,6 +419,12 @@ function statusToBadge(status: ScrapeRunStatus): {
         label: scrapeRunStatusLabel(status),
         icon: <AlertTriangle className="h-3 w-3" aria-hidden />,
       };
+    case "throttled":
+      return {
+        variant: "warning",
+        label: scrapeRunStatusLabel(status),
+        icon: <Clock className="h-3 w-3" aria-hidden />,
+      };
     case "running":
       return {
         variant: "secondary",

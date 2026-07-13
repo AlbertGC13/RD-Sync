@@ -195,6 +195,24 @@ describe("refreshTransactions — 202 polling contract", () => {
     expect(onRefresh).toHaveBeenCalledTimes(1);
   });
 
+  it("on throttled stops polling, shows the deferred-result toast, and refreshes", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    fetchImpl.mockResolvedValue(statusResponse("throttled"));
+    fetchImpl.mockResolvedValueOnce(post202Response("run-throttled"));
+
+    const onRefresh = vi.fn();
+
+    await refreshTransactions({ fetchImpl, onRefresh, sleep: instantSleep });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(toast.info).toHaveBeenCalledWith(
+      "La actualización se pospuso temporalmente por capacidad del sistema. Intente nuevamente en unos momentos.",
+      expect.objectContaining({ duration: REFRESH_RESULT_TOAST_DURATION_MS }),
+    );
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+
   it("on failed shows the failure toast and refreshes", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
     fetchImpl.mockResolvedValue(statusResponse("failed"));
@@ -692,7 +710,7 @@ describe("refreshTransactions — visible result messages", () => {
     );
   });
 
-  it("terminal failure states map to error tone (still safe Spanish, no leak)", async () => {
+  it("terminal states map to safe Spanish copy and an appropriate tone", async () => {
     // `describePollOutcome` is the single source of truth for tone, so
     // pin it directly for every non-succeeded terminal state.
     expect(describePollOutcome({ status: "failed" })).toEqual({
@@ -712,6 +730,11 @@ describe("refreshTransactions — visible result messages", () => {
       message:
         "La corrida sigue procesándose. Actualice nuevamente en unos momentos.",
       tone: "error",
+    });
+    expect(describePollOutcome({ status: "throttled" })).toEqual({
+      message:
+        "La actualización se pospuso temporalmente por capacidad del sistema. Intente nuevamente en unos momentos.",
+      tone: "info",
     });
   });
 

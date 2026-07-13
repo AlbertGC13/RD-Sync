@@ -120,6 +120,18 @@ describe("AdminScrapeRunsDashboard", () => {
     expect(html).not.toContain("password=");
   });
 
+  it("renders a throttled run with the explicit deferred warning badge", () => {
+    const html = renderToStaticMarkup(
+      <AdminScrapeRunsDashboard
+        principal={{ id: "admin-1", role: "admin" }}
+        runs={[{ ...runs[0], id: "run-throttled", status: "throttled" }]}
+      />,
+    );
+
+    expect(html).toContain("Pospuesta temporalmente");
+    expect(html).toContain("bg-warning");
+  });
+
   it("denies non-admin users with a Spanish denial page and without leaking run details", () => {
     const html = renderToStaticMarkup(
       <AdminScrapeRunsDashboard principal={{ id: "viewer-1", role: "viewer" }} runs={runs} />,

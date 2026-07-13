@@ -33,6 +33,7 @@ function resolveConsumerForEnv(options?: {
       markRunning: async () => {},
       markSucceeded: async () => {},
       markNeedsAdminAction: async () => {},
+      markThrottled: async () => {},
       markFailed: async () => {},
     },
     transactions: { upsertMany: async () => ({ inserted: 0, skipped: 0 }) },

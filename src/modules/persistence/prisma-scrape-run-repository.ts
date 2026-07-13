@@ -177,6 +177,19 @@ export class PrismaScrapeRunRepository {
     });
   }
 
+  async markThrottled(
+    runId: string,
+    safeErrorSummary: string,
+    endedAt = new Date(),
+  ): Promise<void> {
+    await this.updateOrThrow(runId, {
+      status: toDbScrapeRunStatus("throttled"),
+      endedAt,
+      safeErrorSummary,
+      updatedAt: endedAt,
+    });
+  }
+
   async markFailed(
     runId: string,
     safeErrorSummary: string,

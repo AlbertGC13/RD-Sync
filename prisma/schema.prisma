@@ -37,6 +37,7 @@ enum ScrapeRunStatus {
   SUCCEEDED          @map("succeeded")
   FAILED             @map("failed")
   NEEDS_ADMIN_ACTION @map("needs_admin_action")
+  THROTTLED          @map("throttled")
 }
 
 // BankSessionStatus is not referenced by any Prisma model field.

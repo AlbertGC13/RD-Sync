@@ -34,6 +34,10 @@ class FakeScrapeRunRepository {
     this.records.set(runId, { status: "needs_admin_action", safeErrorSummary });
   }
 
+  async markThrottled(runId: string, safeErrorSummary: string): Promise<void> {
+    this.records.set(runId, { status: "throttled", safeErrorSummary });
+  }
+
   async markFailed(runId: string, safeErrorSummary: string): Promise<void> {
     this.records.set(runId, { status: "failed", safeErrorSummary });
   }
