@@ -19,13 +19,14 @@
  * so the production/dev database is never touched during testing.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "../../generated/prisma/client";
 
 import { PrismaTransactionRepository } from "./prisma-transaction-repository";
 import { PrismaScrapeRunRepository } from "./prisma-scrape-run-repository";
 import { PrismaAuditSink } from "./prisma-audit-sink";
+import { PrismaBankSessionExpiryEpisodeRepository } from "./prisma-bank-session-expiry-episode-repository";
 
 import { runTransactionRepositoryContract } from "./contracts/transaction-repository.contract";
 import { runScrapeRunRepositoryContract } from "./contracts/scrape-run-repository.contract";
@@ -76,6 +77,7 @@ async function truncateTables(): Promise<void> {
   await prisma.auditEvent.deleteMany();
   await prisma.transaction.deleteMany();
   await prisma.scrapeRun.deleteMany();
+  await prisma.$executeRawUnsafe('DELETE FROM "BankSessionExpiryEpisode"');
   await prisma.bank.deleteMany();
   await prisma.userRole.deleteMany();
   await prisma.user.deleteMany();
@@ -104,15 +106,119 @@ describe.skipIf(!hasTestDb)("Prisma scrape-run repository (requires RD_SYNC_TEST
   }));
 });
 
+describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requires RD_SYNC_TEST_DATABASE_URL)", () => {
+  beforeEach(truncateTables);
+  afterEach(truncateTables);
+
+  it("persists create/conflict/read/audit acknowledgement/close with PostgreSQL", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const input = { bankCode: "popular", expiredEventId: "event-contract-1", runId: "popular-expiry-event-contract-1" };
+
+    await expect(repo.getOrCreate(input)).resolves.toMatchObject({ created: true, episode: input });
+    await expect(repo.getOrCreate({ ...input, expiredEventId: "ignored", runId: "ignored" }))
+      .resolves.toMatchObject({ created: false, episode: input });
+    await expect(repo.markAuditDelivered(input, "expired")).resolves.toBe(true);
+    await expect(repo.markAuditDelivered(input, "expired")).resolves.toBe(false);
+    await expect(repo.getOrCreate(input)).resolves.toMatchObject({
+      created: false,
+      episode: { ...input, expiredAuditDelivered: true },
+    });
+    await expect(repo.close(input)).resolves.toBe("closed");
+    await expect(repo.getOrCreate({ bankCode: "popular", expiredEventId: "event-contract-2", runId: "popular-expiry-event-contract-2" }))
+      .resolves.toMatchObject({ created: true });
+  });
+
+  it("allows a restarted active monitor to locate and identity-safely close the current episode", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const episode = { bankCode: "popular", expiredEventId: "event-restart", runId: "popular-expiry-event-restart" };
+
+    await repo.getOrCreate(episode);
+    await expect(repo.findByBankCode("popular")).resolves.toMatchObject(episode);
+    await expect(repo.close(episode)).resolves.toBe("closed");
+    await expect(repo.findByBankCode("popular")).resolves.toBeNull();
+  });
+
+  it("does not let a delayed stale close remove a replacement episode", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const firstEpisode = { bankCode: "popular", expiredEventId: "event-stale-e1", runId: "popular-expiry-event-stale-e1" };
+    const replacementEpisode = { bankCode: "popular", expiredEventId: "event-stale-e2", runId: "popular-expiry-event-stale-e2" };
+
+    await expect(repo.getOrCreate(firstEpisode)).resolves.toMatchObject({ created: true, episode: firstEpisode });
+    await expect(repo.close(firstEpisode)).resolves.toBe("closed");
+    await expect(repo.getOrCreate(replacementEpisode)).resolves.toMatchObject({ created: true, episode: replacementEpisode });
+    await expect(repo.close(firstEpisode)).resolves.toBe("missing_or_stale");
+    await expect(repo.findByBankCode("popular")).resolves.toEqual({
+      ...replacementEpisode,
+      expiredAuditDelivered: false,
+      restoredAuditDelivered: false,
+    });
+  });
+
+  it("linearizes concurrent episode creation, audit markers, and identity-safe close", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const first = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const second = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const firstCandidate = { bankCode: "popular", expiredEventId: "event-concurrent-a", runId: "popular-expiry-event-concurrent-a" };
+    const secondCandidate = { bankCode: "popular", expiredEventId: "event-concurrent-b", runId: "popular-expiry-event-concurrent-b" };
+    const created = await Promise.all([first.getOrCreate(firstCandidate), second.getOrCreate(secondCandidate)]);
+    expect(created.filter((result) => result.created)).toHaveLength(1);
+    const winner = created.find((result) => result.created)?.episode;
+    expect(winner).toBeDefined();
+    for (const result of created) {
+      expect(result.episode).toMatchObject(winner!);
+    }
+
+    const expiredMarkers = await Promise.all([
+      first.markAuditDelivered(winner!, "expired"),
+      second.markAuditDelivered(winner!, "expired"),
+    ]);
+    expect(expiredMarkers.filter(Boolean)).toHaveLength(1);
+    await expect(new PrismaBankSessionExpiryEpisodeRepository(prisma).isAuditDelivered(winner!, "expired")).resolves.toBe(true);
+
+    const restoredMarkers = await Promise.all([
+      first.markAuditDelivered(winner!, "restored"),
+      second.markAuditDelivered(winner!, "restored"),
+    ]);
+    expect(restoredMarkers.filter(Boolean)).toHaveLength(1);
+    const closes = await Promise.all([first.close(winner!), second.close(winner!)]);
+    expect(closes.filter((result) => result === "closed")).toHaveLength(1);
+  });
+
+});
+
 // ---------------------------------------------------------------------------
 // Prisma audit sink contract
 // ---------------------------------------------------------------------------
 
 describe.skipIf(!hasTestDb)("Prisma audit sink (requires RD_SYNC_TEST_DATABASE_URL)", () => {
+  beforeEach(truncateTables);
+  afterEach(truncateTables);
+
   runAuditRepositoryContract(async () => ({
     sink: new PrismaAuditSink(),
     cleanup: truncateTables,
   }));
+
+  it("stores one audit row for repeated deterministic delivery ids", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const sink = new PrismaAuditSink();
+    const event = {
+      id: "audit-delivery-contract-1",
+      actorId: "system:test",
+      actorRole: "system",
+      action: "bank_session.expired",
+      target: "bank_session",
+      targetId: null,
+      metadata: { sentinel: "opaque-audit-contract" },
+      createdAt: new Date("2026-07-12T00:00:00.000Z"),
+    };
+    await sink.record(event);
+    await sink.record(event);
+    await expect(prisma.auditEvent.count({ where: { id: event.id } })).resolves.toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------

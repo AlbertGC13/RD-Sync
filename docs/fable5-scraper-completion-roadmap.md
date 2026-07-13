@@ -115,17 +115,19 @@ Do **not** merge PR4.5 and PR4.6 into one PR to "solve" this — they touch diff
 
 1. **Purpose.** Give each expired-session episode a single stable identity (UUID) that persists from the expired transition until the session is restored, so locks and breaker attempts de-duplicate across runs, retries, and processes.
 2. **Exact scope.**
-   - `src/modules/bank-sessions/expired-event-store.ts`: `ExpiredEventStore` interface — `getOrAssign(bankCode): Promise<string>` (idempotent: returns existing id or assigns a fresh UUID) and `clear(bankCode)` (on restore). Redis-backed implementation (key `autologin:expired-event:{bankCode}`, no TTL or generous TTL — cleared explicitly on restore) + in-memory implementation for tests/dev.
-   - `src/modules/bank-sessions/index.ts`: extend `BankSessionCheckResult` handling in the monitor tick — on transition to `expired`, `getOrAssign`; on transition back to `active`, `clear` + audit `bank_session.restored`. Monitor keeps doing ONLY record/alert/schedule — absolutely no credential logic here (the monitor is not the trigger; design decision "ONE scrape-time trigger").
-3. **Out of scope.** The scrape-time trigger itself (PR4.5), any auto-login invocation, DB schema changes (Redis keys, not Prisma — see Open Questions Q2 for the fallback decision).
-4. **Files.** Create the store + tests; modify `src/modules/bank-sessions/index.ts` (monitor) and possibly `src/app/api/bank-sessions/defaults.ts` (wiring the store into the default monitor). Inspect: `src/modules/bank-auto-login-lock/defaults.ts` (reuse its fail-closed Redis client conventions — bounded retries, lazyConnect, no URL logging).
-5. **Contracts.** Event id format must satisfy the lock's `EVENT_ID_RE` (`^[a-zA-Z0-9-]{1,64}$`) — plain `crypto.randomUUID()` complies. `getOrAssign` must be atomic (`SET NX GET` or Lua) so two concurrent probes agree on one id.
-6. **Safety invariants.** Redis unavailable → `getOrAssign` rejects and callers treat it as "no event id" → auto-login skips to manual (fail closed); the id itself is non-sensitive but keys the lock — never accept caller-supplied ids from HTTP surfaces.
-7. **Test plan.** Idempotency (two `getOrAssign` → same id); restore clears; expired→active→expired yields a NEW id; concurrent assign race returns a single winner (fake Redis with scripted interleaving, following `redis-store.test.ts` shim style); monitor transition wiring: expired tick assigns + audits `bank_session.expired` with the eventId in metadata, restore tick clears + audits `bank_session.restored`.
-8. **Review risks.** Transition detection (the monitor currently just stores `lastResult` — the diff must define what counts as a transition when checks error or report `browser_unavailable`: unavailable is NOT restore and must NOT clear the id); cross-process agreement (worker and monitor may be different processes — Redis is the shared truth).
+   - `src/modules/bank-sessions/expiry-episodes.ts`: a durable per-bank PostgreSQL episode record with stable expiry/run identity, idempotent audit-delivery markers, and identity-safe close.
+   - No DB-to-queue publication, scrape-run claim, or consumer work belongs in this slice.
+3. **Out of scope.** The scrape-time trigger itself (PR4.5), any auto-login invocation, and producer startup. The API process remains dormant.
+4. **Files.** `src/modules/bank-sessions/index.ts`, `src/modules/persistence/prisma-bank-session-expiry-episode-repository.ts`, and PostgreSQL contract tests.
+5. **Contracts.** `getOrCreate` elects one durable expiry-episode creation winner; canonical expiry/restoration audits use deterministic episode IDs and are acknowledged durably before restoration close. The creation winner makes one best-effort expiry-notification attempt, while the identity-safe close winner makes one best-effort restoration-notification attempt. Notification delivery and retry are not durable or exactly-once.
+6. **Safety invariants.** Identity-safe close cannot remove a replacement episode. The episode identity is not caller-supplied.
+7. **Test plan.** In-memory replica and retry contracts plus PostgreSQL winner, audit acknowledgement, identity-safe close, and cleanup/repeatability coverage.
+8. **Review risks.** The monitor remains dormant until a dedicated lifecycle owner exists; publication is explicitly deferred. If PostgreSQL is unavailable and the process is lost before an episode is persisted, B1 cannot recover that observation; no publication or outbox mechanism is added to close this limit.
 9. **Dependencies.** None on 4.3/4.4 (parallelizable), but PR4.5 depends on it.
 10. **Estimate.** ~220–320 lines. Fits.
-11. **Acceptance.** Store contract green on in-memory + fake-Redis; monitor emits canonical session audit actions with stable ids; `browser_unavailable` does not clear an active event id.
+11. **Acceptance.** The completed B1 store contract is green on in-memory and PostgreSQL implementations; the monitor emits canonical session audit actions with stable ids; `browser_unavailable` does not clear an active event id. B2 publication/outbox/queue/consumer work remains explicitly deferred and unchecked.
+
+**B1 review-unit note.** B1 is an approved size exception because the durable episode schema, atomic election, canonical audit acknowledgement, identity-safe retry/close behavior, PostgreSQL isolation evidence, and dormant composition form one correctness boundary. Splitting those pieces would prevent a reviewer from validating the exactly-once audit guarantee end to end. Its actual impact is limited to durable audit source state; it does not publish, enqueue, claim, lease, or consume work. Notifications remain best-effort winner attempts. B2 owns every publication/outbox/queue/consumer concern and is excluded from B1.
 
 ### PR4.5 — Expired-session trigger wiring during bank sync runs
 
@@ -254,7 +256,7 @@ Three small slices that de-risk PR5 before the adapters land. Each ≤300 lines,
 
 ## 5. Global Risks
 
-1. **Redis as a correctness dependency.** Lock, and (per this plan) `expiredEventId`, live in Redis. The fail-closed posture (no Redis → manual-only) is correct but means a Redis outage silently disables session recovery — PR4.8b's `skipped`-rate visibility is the mitigation. Also: current lock keys are NOT Redis-Cluster-safe (documented in `defaults.ts` — `key` and `key:fence` need shared hash tags before any cluster migration).
+1. **Redis and PostgreSQL correctness boundaries.** Redis remains the auto-login lock backing store. Expiry episode identity and audit acknowledgement live in PostgreSQL, so monitor replicas do not rely on Redis or process memory for those facts. Current lock keys are NOT Redis-Cluster-safe (documented in `defaults.ts` — `key` and `key:fence` need shared hash tags before any cluster migration).
 2. **Design/code interface drift.** design.md's `BankAdapter` includes `portalConfig` + `createSessionChecker`; the shipped interface (`registry.ts`) has neither. PR4.7 must reconcile additively (optional field) — reviewers should reject any slice that rewrites the adapter interface broadly.
 3. **Monitor vs worker process split.** The session monitor and the ingestion worker may run in different processes; any state they share (event ids, breaker views) must go through Redis/DB, never module-level memory. This bit PR4.6/4.5 hardest.
 4. **Test overclaim recurrence.** PR4.2's 4R flagged partially no-op static tests. Every PR4.x reviewer should spot-check that new tests can fail.
@@ -267,7 +269,7 @@ Three small slices that de-risk PR5 before the adapters land. Each ≤300 lines,
 | # | Question | Options | Recommendation |
 |---|---|---|---|
 | Q1 | PR4.5/PR4.6 order | (a) reorder 4.6 first; (b) 4.5 inert-first | (a) — see §3 |
-| Q2 | `expiredEventId` persistence | (a) Redis key per bank; (b) Prisma column/table | (a): Redis already carries the lock and fails closed; a DB column adds a migration for state that is inherently ephemeral. Revisit if audit needs long-term event history (audit metadata already records ids). |
+| Q2 | `expiredEventId` persistence | (a) Redis key per bank; (b) Prisma episode table | Resolved as (b): PostgreSQL episode rows preserve identity and audit delivery acknowledgement. |
 | Q3 | Lock TTL default (5 min) + renewal cadence vs real login duration | keep 5 min / renew at half-life; or raise default | Keep 5 min, renew at ~50% TTL from the state machine; measure p95 login latency via PR4.8b before changing. |
 | Q4 | Fencing on Prisma breaker writes — models have no `fencingToken` column | (a) optimistic concurrency (conditional `updateMany` on expected count/window) + fencing token in audit metadata; (b) add column | (a): matches "state writes carry fencingToken/CAS" intent without schema churn; document in PR4.3. |
 | Q5 | Breaker-reset success copy | "Interruptor restablecido" vs product-approved alternative | Confirm with product before PR4.8a; keep fixed-string either way. |

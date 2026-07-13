@@ -272,36 +272,19 @@ describe("defaultSessionMonitor — globalThis sharing and single-start guard", 
     expect(monitorB).toBeNull();
   });
 
-  it("startDefaultSessionMonitorIfEnabled is idempotent across two module graphs (no double timer)", async () => {
+  it("keeps the monitor dormant across module graphs even when the legacy env flag is enabled", async () => {
     process.env.RD_SYNC_SESSION_MONITOR = "enabled";
 
-    // We cannot inject the scheduler into the module-level singleton created at
-    // import time, so we test the guard via the globalThis anchor: a second
-    // import after resetModules must return THE SAME monitor instance (already
-    // started), meaning start() is a no-op on the second call.
-
-    // Import graph A — monitor instance is created and stored on globalThis
     const { defaultSessionMonitor: monitorA } =
       await import("./bank-sessions/defaults");
 
-    expect(monitorA).not.toBeNull();
-
-    // Manually start once using the real start() — which uses setInterval
-    // We'll observe idempotency by calling start twice on the same instance
-    // (the BankSessionMonitor.start() is already idempotent via handle guard)
-    monitorA?.start();
-    monitorA?.start(); // second call must be a no-op
-
     vi.resetModules();
 
-    // Graph B must reuse the same monitor from globalThis
     const { defaultSessionMonitor: monitorB } =
       await import("./bank-sessions/defaults");
 
     expect(monitorB).toBe(monitorA);
-
-    // Clean up the timer started above
-    monitorA?.stop();
+    expect(monitorA).toBeNull();
   });
 });
 
