@@ -3,17 +3,15 @@ import { describe, expect, it, vi } from "vitest";
 import { InMemoryAuditSink, type AuditSink } from "../audit";
 import {
   InMemoryBankSessionExpiryEpisodeRepository,
+  parseEpisodePublicationState,
+  publishExpiryEpisode,
+  type BankSessionExpiryEpisode,
   type BankSessionExpiryEpisodeRepository,
 } from "./expiry-episodes";
 import { createBankSessionMonitor, type BankSessionMonitorDeps } from "./index";
 
-function createMonitor(
-  episodes: BankSessionExpiryEpisodeRepository,
-  statuses: Array<"expired" | "active">,
-  alerts: string[],
-  auditSink: Pick<AuditSink, "record"> = new InMemoryAuditSink(),
-  createExpiredEventId: () => string,
-) {
+interface MonitorOptions { episodes: BankSessionExpiryEpisodeRepository; statuses: Array<"expired" | "active">; alerts?: string[]; auditSink?: Pick<AuditSink, "record">; createExpiredEventId: () => string; publish?: (episode: BankSessionExpiryEpisode) => Promise<void>; }
+function createMonitor({ episodes, statuses, alerts = [], auditSink = new InMemoryAuditSink(), createExpiredEventId, publish }: MonitorOptions) {
   let index = 0;
   const deps: BankSessionMonitorDeps = {
     check: async () => {
@@ -33,6 +31,7 @@ function createMonitor(
       bankCode: "popular",
       episodes,
       createExpiredEventId,
+      publish,
     },
   };
   return createBankSessionMonitor(deps);
@@ -45,6 +44,55 @@ function auditIdentities(audit: InMemoryAuditSink) {
 }
 
 describe("Bank session expiry episodes", () => {
+  it("clears the pending candidate and closes a restored episode before publication retry", async () => {
+    // Arrange
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    const audit = new InMemoryAuditSink();
+    const publish = vi.fn().mockRejectedValueOnce(new Error("queue unavailable"));
+    const monitor = createMonitor({
+      episodes,
+      statuses: ["expired", "active"],
+      auditSink: audit,
+      createExpiredEventId: () => "event-a",
+      publish,
+    });
+
+    // Act
+    await monitor.tick();
+    await monitor.tick();
+
+    // Assert
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(await episodes.findByBankCode("popular")).toBeNull();
+    expect(await auditIdentities(audit)).toEqual([expect.objectContaining({ action: "bank_session.expired" }), expect.objectContaining({ action: "bank_session.restored" })]);
+  });
+
+  it("rejects malformed publication tuples and blank publication tokens", async () => {
+    const episode = { bankCode: "popular", expiredEventId: "event-tuple", runId: "popular-expiry-event-tuple" }; const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    for (const [state, token, failure] of [["pending", "token", null], ["publishing", " ", null], ["published", "token", new Date()], ["cancelled", null, new Date()]] as const) expect(() => parseEpisodePublicationState(state, token, failure)).toThrow("Invalid publication tuple");
+    await episodes.getOrCreate(episode);
+    await expect(publishExpiryEpisode(episodes, episode, " ", async () => undefined)).rejects.toThrow("Publication token must be nonblank");
+    await expect(episodes.claimPublication(episode, "\t")).rejects.toThrow("Publication token must be nonblank");
+    await episodes.claimPublication(episode, "token-a"); await episodes.cancelPublication(episode);
+    await expect(episodes.findByBankCode("popular")).resolves.toMatchObject({ publicationState: "cancelled", publicationClaimToken: null, publicationFailureReportedAt: null });
+  });
+
+  it("preserves enqueue and marker errors while reusing token A after acknowledgement loss", async () => {
+    const failureReportedAt = new Date("2026-07-13T00:00:00.000Z"); const episodes = new InMemoryBankSessionExpiryEpisodeRepository(() => failureReportedAt); const episode = { bankCode: "popular", expiredEventId: "event-ack-loss", runId: "popular-expiry-event-ack-loss" }; const acceptedPayloads: Array<{ bankCode: string; expiredEventId: string; runId: string; token: string }> = [];
+    const enqueueError = new Error("acknowledgement lost"); const markerError = new Error("marker unavailable");
+    await episodes.getOrCreate(episode); vi.spyOn(episodes, "markPublicationFailureReported").mockRejectedValueOnce(markerError);
+    let failure: unknown; try { await publishExpiryEpisode(episodes, episode, "token-a", async (job) => { acceptedPayloads.push(job); throw enqueueError; }); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(AggregateError); const aggregate = failure as AggregateError;
+    expect(aggregate.cause).toBe(enqueueError); expect(aggregate.errors).toEqual([enqueueError, markerError]);
+    vi.restoreAllMocks(); await episodes.markPublicationFailureReported(episode, "token-a"); const failed = await episodes.findByBankCode("popular");
+    const recovered = await publishExpiryEpisode(episodes, episode, "token-b", async (job) => { acceptedPayloads.push(job); });
+    expect(failed).toMatchObject({ publicationState: "publishing", publicationClaimToken: "token-a" });
+    expect(failed?.publicationFailureReportedAt).toEqual(failureReportedAt);
+    expect(recovered).toBe(true);
+    expect(acceptedPayloads).toEqual([{ ...episode, token: "token-a" }, { ...episode, token: "token-a" }]);
+    await expect(episodes.findByBankCode("popular")).resolves.toMatchObject({ publicationState: "published", publicationClaimToken: "token-a", publicationFailureReportedAt: null });
+  });
+
   it("fails closed during a two-replica durable-election outage, then elects one recovered winner", async () => {
     const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
     const alerts: string[] = [];
@@ -58,8 +106,8 @@ describe("Bank session expiry episodes", () => {
       }
       return originalGetOrCreate(input);
     });
-    const first = createMonitor(episodes, ["expired", "expired", "active"], alerts, audit, () => "candidate-a");
-    const second = createMonitor(episodes, ["expired", "expired", "active"], alerts, audit, () => "candidate-b");
+    const first = createMonitor({ episodes, statuses: ["expired", "expired", "active"], alerts, auditSink: audit, createExpiredEventId: () => "candidate-a" });
+    const second = createMonitor({ episodes, statuses: ["expired", "expired", "active"], alerts, auditSink: audit, createExpiredEventId: () => "candidate-b" });
 
     await Promise.all([first.tick(), second.tick()]);
     expect(alerts).toEqual([]);
@@ -84,7 +132,7 @@ describe("Bank session expiry episodes", () => {
     await expect(episodes.findByBankCode("popular")).resolves.toBeNull();
   });
 
-  it("retains one local candidate across an outage until active recovery can durably elect and close it", async () => {
+  it("does not revive an undurable candidate after the session is active", async () => {
     const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
     const audit = new InMemoryAuditSink();
     const alerts: string[] = [];
@@ -96,22 +144,13 @@ describe("Bank session expiry episodes", () => {
       if (!persistenceAvailable) throw new Error("durable repository unavailable");
       return originalGetOrCreate(input);
     });
-    const monitor = createMonitor(
-      episodes,
-      ["active", "expired", "active", "active"],
-      alerts,
-      audit,
-      () => "event-outage-recovery",
-    );
+    const monitor = createMonitor({ episodes, statuses: ["active", "expired", "active", "active"], alerts, auditSink: audit, createExpiredEventId: () => "event-outage-recovery" });
 
     await monitor.tick();
     await monitor.tick();
     await monitor.tick();
 
-    expect(attemptedCandidates).toEqual([
-      { bankCode: "popular", expiredEventId: "event-outage-recovery", runId: "popular-expiry-event-outage-recovery" },
-      { bankCode: "popular", expiredEventId: "event-outage-recovery", runId: "popular-expiry-event-outage-recovery" },
-    ]);
+    expect(attemptedCandidates).toEqual([{ bankCode: "popular", expiredEventId: "event-outage-recovery", runId: "popular-expiry-event-outage-recovery" }]);
     expect(alerts).toEqual([]);
     expect(await auditIdentities(audit)).toEqual([]);
     await expect(episodes.findByBankCode("popular")).resolves.toBeNull();
@@ -119,16 +158,9 @@ describe("Bank session expiry episodes", () => {
     persistenceAvailable = true;
     await monitor.tick();
 
-    expect(attemptedCandidates).toEqual([
-      { bankCode: "popular", expiredEventId: "event-outage-recovery", runId: "popular-expiry-event-outage-recovery" },
-      { bankCode: "popular", expiredEventId: "event-outage-recovery", runId: "popular-expiry-event-outage-recovery" },
-      { bankCode: "popular", expiredEventId: "event-outage-recovery", runId: "popular-expiry-event-outage-recovery" },
-    ]);
-    expect(alerts).toEqual(["expired", "active"]);
-    expect(await auditIdentities(audit)).toEqual([
-      { id: "bank-session-bank_session.expired:popular:event-outage-recovery", action: "bank_session.expired" },
-      { id: "bank-session-bank_session.restored:popular:event-outage-recovery", action: "bank_session.restored" },
-    ]);
+    expect(attemptedCandidates).toEqual([{ bankCode: "popular", expiredEventId: "event-outage-recovery", runId: "popular-expiry-event-outage-recovery" }]);
+    expect(alerts).toEqual([]);
+    expect(await auditIdentities(audit)).toEqual([]);
     await expect(episodes.findByBankCode("popular")).resolves.toBeNull();
   });
 
@@ -146,7 +178,7 @@ describe("Bank session expiry episodes", () => {
       },
     };
     const alerts: string[] = [];
-    const monitor = createMonitor(episodes, ["expired", "expired"], alerts, failingAudit, () => "event-audit-retry");
+    const monitor = createMonitor({ episodes, statuses: ["expired", "expired"], alerts, auditSink: failingAudit, createExpiredEventId: () => "event-audit-retry" });
 
     await monitor.tick();
     await monitor.tick();
@@ -178,7 +210,7 @@ describe("Bank session expiry episodes", () => {
       },
     };
     const alerts: string[] = [];
-    const restartedMonitor = createMonitor(episodes, ["active", "active"], alerts, failingAudit, () => "unused-candidate");
+    const restartedMonitor = createMonitor({ episodes, statuses: ["active", "active"], alerts, auditSink: failingAudit, createExpiredEventId: () => "unused-candidate" });
 
     await restartedMonitor.tick();
     await expect(episodes.findByBankCode("popular")).resolves.toEqual(episode);
@@ -208,7 +240,7 @@ describe("Bank session expiry episodes", () => {
       },
     };
     const alerts: string[] = [];
-    const monitor = createMonitor(episodes, ["expired", "active", "active"], alerts, failingAudit, () => "event-restoration-retry");
+    const monitor = createMonitor({ episodes, statuses: ["expired", "active", "active"], alerts, auditSink: failingAudit, createExpiredEventId: () => "event-restoration-retry" });
 
     await monitor.tick();
     await monitor.tick();
@@ -233,7 +265,7 @@ describe("Bank session expiry episodes", () => {
     const audit = new InMemoryAuditSink();
     const alerts: string[] = [];
     vi.spyOn(episodes, "close").mockRejectedValueOnce(new Error("close unavailable"));
-    const monitor = createMonitor(episodes, ["expired", "active", "active"], alerts, audit, () => "event-close-retry");
+    const monitor = createMonitor({ episodes, statuses: ["expired", "active", "active"], alerts, auditSink: audit, createExpiredEventId: () => "event-close-retry" });
 
     await monitor.tick();
     await monitor.tick();
@@ -252,10 +284,10 @@ describe("Bank session expiry episodes", () => {
     const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
     const audit = new InMemoryAuditSink();
     const alerts: string[] = [];
-    const expiredMonitor = createMonitor(episodes, ["expired"], alerts, audit, () => "event-restart");
+    const expiredMonitor = createMonitor({ episodes, statuses: ["expired"], alerts, auditSink: audit, createExpiredEventId: () => "event-restart" });
 
     await expiredMonitor.tick();
-    const restartedActiveMonitor = createMonitor(episodes, ["active"], alerts, audit, () => "unused-candidate");
+    const restartedActiveMonitor = createMonitor({ episodes, statuses: ["active"], alerts, auditSink: audit, createExpiredEventId: () => "unused-candidate" });
     await restartedActiveMonitor.tick();
 
     expect(alerts).toEqual(["expired", "active"]);
@@ -279,6 +311,10 @@ describe("Bank session expiry episodes", () => {
       findByBankCode: (bankCode) => base.findByBankCode(bankCode),
       isAuditDelivered: (episode, kind) => base.isAuditDelivered(episode, kind),
       markAuditDelivered: (episode, kind) => base.markAuditDelivered(episode, kind),
+      claimPublication: (episode, token) => base.claimPublication(episode, token),
+      markPublicationPublished: (episode, token) => base.markPublicationPublished(episode, token),
+      cancelPublication: (episode) => base.cancelPublication(episode),
+      markPublicationFailureReported: (episode, token) => base.markPublicationFailureReported(episode, token),
       close: async (episode) => {
         closeCalls.push(episode.expiredEventId);
         if (replaceOnFirstClose) {
@@ -291,7 +327,7 @@ describe("Bank session expiry episodes", () => {
       },
     };
     const audit = new InMemoryAuditSink();
-    const monitor = createMonitor(delayedReplica, ["active", "active"], [], audit, () => "unused-candidate");
+    const monitor = createMonitor({ episodes: delayedReplica, statuses: ["active", "active"], auditSink: audit, createExpiredEventId: () => "unused-candidate" });
 
     await monitor.tick();
     await expect(base.findByBankCode("popular")).resolves.toMatchObject(e2);

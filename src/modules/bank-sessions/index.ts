@@ -228,6 +228,7 @@ export type BankSessionMonitorMode =
     bankCode: string;
     episodes: BankSessionExpiryEpisodeRepository;
     createExpiredEventId?: () => string;
+    publish?(episode: BankSessionExpiryEpisode): Promise<void>;
   };
 
 /** Valid monitor modes prevent partially-wired durable producers. */
@@ -290,6 +291,7 @@ export function createBankSessionMonitor(
   const createEpisodeId = monitorMode.mode === "expiry_events"
     ? (monitorMode.createExpiredEventId ?? randomUUID)
     : null;
+  const publishEpisode = monitorMode.mode === "expiry_events" ? monitorMode.publish : undefined;
 
   let previousTransition: BankSessionCheckResult | null = null;
   let lastObservedResult: BankSessionCheckResult | null = null;
@@ -348,8 +350,9 @@ export function createBankSessionMonitor(
     let expiryAuditAcknowledged = false;
     let expiryNotificationResult: BankSessionCheckResult | null = null;
     let transitionReady = true;
+    if (nextStatus === "active") pendingExpiryCandidate = null;
 
-    if ((nextStatus === "expired" || pendingExpiryCandidate) && expiryEpisodes && expiryBankCode && createEpisodeId) {
+    if (nextStatus !== "active" && (nextStatus === "expired" || pendingExpiryCandidate) && expiryEpisodes && expiryBankCode && createEpisodeId) {
       const candidate = pendingExpiryCandidate ?? {
         input: (() => {
           const expiredEventId = createEpisodeId();
@@ -369,7 +372,10 @@ export function createBankSessionMonitor(
         recoveryEpisode = durableEpisode;
         expiryAuditAcknowledged = await deliverEpisodeAudit(auditSink, expiryEpisodes, durableEpisode, "expired", result);
         transitionReady = expiryAuditAcknowledged;
-        if (createdEpisode) expiryNotificationResult = candidate.observedResult;
+        if (createdEpisode) {
+          expiryNotificationResult = candidate.observedResult;
+        }
+        if (expiryAuditAcknowledged && (durableEpisode.publicationState === "pending" || durableEpisode.publicationState === "publishing")) await publishEpisode?.(durableEpisode);
         pendingExpiryCandidate = null;
       } catch {
         // A durable election outage must not fall back to process-local side effects.
@@ -409,6 +415,7 @@ export function createBankSessionMonitor(
         );
         if (restorationAuditAcknowledged) {
           try {
+            await expiryEpisodes.cancelPublication(observedEpisode);
             const closeResult = await expiryEpisodes.close(observedEpisode);
             recoveryWon = closeResult === "closed";
             if (recoveryWon) {

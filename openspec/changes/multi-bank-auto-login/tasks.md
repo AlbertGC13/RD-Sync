@@ -97,13 +97,12 @@ Gate: full gates + FRESH 4R review + Judgment Day before merge; PR3B1 <=400 line
 - [x] 4.4 Create `src/worker/scraper/auto-login.ts`: `BankAutoLoginStrategy` state machine + `LoginMutationGuard` (HTTPS + exact origin + login-path allowlist, re-check before fill AND submit, `assertCompatiblePreSubmit`).
 - [ ] 4.5 Wire scrape-time canonical trigger: expired->assert `adapter.bankCode===credential.bankCode`->`assertCdpLoopback`->acquire lock (or skip->manual)->ensureBrowser (or throttled)->login->detect(dashboard|mfa|unknown|redirect|incompatible)->success|needs_admin_action->owner release.
 - [x] 4.6 B1 completed: durable `BankSessionExpiryEpisode` identity, atomic winner election, canonical exactly-once expiry/restoration audits, identity-safe close/retry, and a production-dormant monitor. Winner notifications are best-effort attempts only, not durable or exactly-once delivery.
-- [ ] 4.6 B2 deferred: publication/outbox state, queue handoff, consumer revalidation, and all related concurrency proof remain unchecked in Slice B2; no B2 code belongs in this child.
 - [ ] 4.7 Enable Popular: register `createAutoLoginStrategy`, set `autoLoginEnabled=true` (gated); Popular portal-drift fixture (incompatible pre-submit asserts NO fill/submit + post-submit unknown).
 - [ ] 4.8 Admin endpoints: `PATCH .../auto-login` ("Auto-login desactivado"), `POST .../reset-breaker`, `PATCH .../adapter` ("Adaptador desactivado"); audit `bank_autologin.*`/`bank_breaker.*`/`bank_killswitch.*`/`bank_adapter.*`/`bank_credential.decrypt_use`; extend `bank-metrics.ts` with auto-login failure rate/latency/launch-failures/backlog + CONCRETE alert thresholds.
 - [ ] 4.9 Tests (TDD): lock acquire/owner-only-release/renew/stale-release-fails/fencing-CAS; distinct expired events distinct locks; concurrent same-event->only holder submits; breaker open (no half-open)/manual-reset/alert-rate-limit; LoginMutationGuard HTTPS/origin/allowlist/redirect-reject/incompatible-pre-submit; MFA stop; read-only block holds off login page; kill-switch disables auto-login not scraping; adapter toggle disables scraping safely; throttled run.
 - Gate: full gates + FRESH 4R review + Judgment Day before merge; <=400 lines.
 
-## Slice B1: Durable expiry episode source (current child PR)
+## Slice B1: Durable expiry episode source (completed predecessor child PR)
 
 - [x] B1.1 Persist one `BankSessionExpiryEpisode` per bank with `getOrCreate` winner election, durable audit acknowledgement, and identity-safe close.
 - [x] B1.2 Emit exactly one deterministic expiry audit and one deterministic restoration audit. The creation winner makes one best-effort expiry-notification attempt; the identity-safe close winner makes one best-effort restoration-notification attempt. Notification delivery and retry are neither durable nor exactly-once. Keep the monitor production-dormant. If PostgreSQL is unavailable and the process is lost before persistence, B1 cannot recover that observation.
@@ -111,15 +110,16 @@ Gate: full gates + FRESH 4R review + Judgment Day before merge; PR3B1 <=400 line
 - [x] B1.4 Isolate the PostgreSQL expiry-episode contract per test and run the complete contract file twice.
 - Gate: full gates; approved `size:exception` for this atomic B1 child because durable identity, election, audit acknowledgement, retry/close safety, PostgreSQL contracts, and documentation must be reviewed together. B2 publication/outbox/queue/consumer work is explicitly excluded and remains unchecked; target PR #35 head `feature/multi-bank-auto-login-pr4l-throttled-deferred`.
 
-## Slice B2: Deferred durable expiry publication (future child PR, ≤400 changed lines)
+## Slice B2a: Durable expiry publication (current child PR, ≤400 changed lines)
 
-- [ ] B2.1 Add the outbox state machine `pending -> publishing(token) -> published/cancelled` with compare-and-set transitions.
-- [ ] B2.2 Add deterministic real-PostgreSQL two-connection tests that hold one transaction mid-flight and force both interleavings: restoration wins so the publisher cannot enqueue; publication wins so restoration waits then closes.
+- [x] B2.1 Add the outbox state machine `pending -> publishing(token) -> published/cancelled` with compare-and-set transitions.
+- [x] B2.2 Add deterministic real-PostgreSQL two-connection tests that hold one transaction mid-flight and force both interleavings: restoration wins so the publisher cannot enqueue; publication wins so restoration waits then closes.
 - [ ] B2.3 Require consumer revalidation: each job carries `bankCode + expiredEventId + token`; the consumer rereads PostgreSQL and no-ops with audit `skipped` when the episode is closed/restored. PostgreSQL is authority; the queue is a hint.
 - [ ] B2.4 Deduplicate jobs deterministically by episode `runId`.
 - [ ] B2.5 Prove two-replica disabled/config-missing behavior: one episode, one expiry audit, and one restoration audit.
 - [ ] B2.6 Run fresh 4R and Judgment Day before review.
 - Gate: ≤400 changed lines; no B2 implementation in B1.
+- B2a owns B2.1-B2.2, including active-session pending-candidate clearing before restoration/retry; B2b applies the dedicated queue/consumer/worker, adds consumer authorization, and completes B2.3-B2.5.
 
 ## PR5: Banreservas/BHD read-only adapters + portal drift fixtures (NO auto-login)
 
