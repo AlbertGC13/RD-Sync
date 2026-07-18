@@ -375,7 +375,7 @@ export function createBankSessionMonitor(
         if (createdEpisode) {
           expiryNotificationResult = candidate.observedResult;
         }
-        if (expiryAuditAcknowledged && (durableEpisode.publicationState === "pending" || durableEpisode.publicationState === "publishing")) await publishEpisode?.(durableEpisode);
+        if (expiryAuditAcknowledged && (durableEpisode.publicationState === "pending" || durableEpisode.publicationState === "publishing" || durableEpisode.publicationState === "published")) await publishEpisode?.(durableEpisode);
         pendingExpiryCandidate = null;
       } catch {
         // A durable election outage must not fall back to process-local side effects.

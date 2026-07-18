@@ -28,9 +28,13 @@ import { PrismaTransactionRepository } from "./prisma-transaction-repository";
 import { PrismaScrapeRunRepository } from "./prisma-scrape-run-repository";
 import { PrismaAuditSink } from "./prisma-audit-sink";
 import { PrismaBankSessionExpiryEpisodeRepository } from "./prisma-bank-session-expiry-episode-repository";
-import { PUBLICATION_CLAIM_TIMEOUT_MS, publishExpiryEpisode } from "../bank-sessions/expiry-episodes";
+import { PUBLICATION_CLAIM_TIMEOUT_MS, publishExpiryEpisode, type ExpiryPublicationPublisher } from "../bank-sessions/expiry-episodes";
 import { createBankSessionMonitor } from "../bank-sessions";
 import { InMemoryAuditSink } from "../audit";
+
+function createPublisherStub(overrides: Partial<ExpiryPublicationPublisher> = {}): ExpiryPublicationPublisher {
+  return { schedule: async () => undefined, observe: async () => undefined, ...overrides };
+}
 
 import { runTransactionRepositoryContract } from "./contracts/transaction-repository.contract";
 import { runScrapeRunRepositoryContract } from "./contracts/scrape-run-repository.contract";
@@ -89,9 +93,31 @@ async function truncateTables(): Promise<void> {
   await prisma.role.deleteMany();
 }
 
-async function openPausedPostgresConnection() { if (!TEST_DB_URL) throw new Error("RD_SYNC_TEST_DATABASE_URL is required"); const pool = new Pool({ connectionString: TEST_DB_URL }); const client = await pool.connect(); await client.query("BEGIN"); const identity = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid"); return { client, pool, pid: identity.rows[0]!.pid }; }
-async function closePausedPostgresConnection(connection: Awaited<ReturnType<typeof openPausedPostgresConnection>>) { await connection.client.query("ROLLBACK").catch(() => undefined); connection.client.release(); await connection.pool.end(); }
-async function waitForLockWait(observer: Awaited<ReturnType<typeof openPausedPostgresConnection>>, holderPid: number): Promise<number> { for (let attempts = 0; attempts < MAX_POSTGRES_LOCK_WAIT_ATTEMPTS; attempts += 1) { const result = await observer.client.query<{ pid: number }>("SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%BankSessionExpiryEpisode%'", [holderPid]); if (result.rows[0]) return result.rows[0].pid; } throw new Error("repository query did not enter a PostgreSQL lock wait"); }
+async function openPausedPostgresConnection() {
+  if (!TEST_DB_URL) throw new Error("RD_SYNC_TEST_DATABASE_URL is required");
+  const pool = new Pool({ connectionString: TEST_DB_URL });
+  const client = await pool.connect();
+  await client.query("BEGIN");
+  const identity = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+  return { client, pool, pid: identity.rows[0]!.pid };
+}
+
+async function closePausedPostgresConnection(connection: Awaited<ReturnType<typeof openPausedPostgresConnection>>) {
+  await connection.client.query("ROLLBACK").catch(() => undefined);
+  connection.client.release();
+  await connection.pool.end();
+}
+
+async function waitForLockWait(observer: Awaited<ReturnType<typeof openPausedPostgresConnection>>, holderPid: number): Promise<number> {
+  for (let attempts = 0; attempts < MAX_POSTGRES_LOCK_WAIT_ATTEMPTS; attempts += 1) {
+    const result = await observer.client.query<{ pid: number }>(
+      "SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%BankSessionExpiryEpisode%'",
+      [holderPid],
+    );
+    if (result.rows[0]) return result.rows[0].pid;
+  }
+  throw new Error("repository query did not enter a PostgreSQL lock wait");
+}
 
 // ---------------------------------------------------------------------------
 // Prisma transaction repository contract
@@ -207,9 +233,9 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     await repo.getOrCreate(episode);
     for (const tuple of [["invalid", null, null], ["pending", "token", null], ["publishing", null, null], ["publishing", "\t", null], ["published", null, null], ["published", " ", null], ["published", "token", new Date()], ["cancelled", null, new Date()]] as const)
       await expect(prisma.$executeRaw`UPDATE "BankSessionExpiryEpisode" SET "publicationState" = ${tuple[0]}, "publicationClaimToken" = ${tuple[1]}, "publicationFailureReportedAt" = ${tuple[2]} WHERE "bankCode" = ${episode.bankCode}`).rejects.toThrow();
-    await expect(publishExpiryEpisode(repo, episode, "token-a", async (job) => { accepted.push(job); throw new Error("acknowledgement lost"); })).rejects.toThrow("acknowledgement lost");
+    await expect(publishExpiryEpisode(repo, episode, "token-a", createPublisherStub({ schedule: async (job) => { accepted.push(job); throw new Error("acknowledgement lost"); } }))).rejects.toThrow("acknowledgement lost");
     await expect(repo.findByBankCode(episode.bankCode)).resolves.toMatchObject({ publicationClaimToken: "token-a", publicationFailureReportedAt: expect.any(Date) });
-    await expect(publishExpiryEpisode(repo, episode, "token-b", async (job) => { accepted.push(job); })).resolves.toBe(true);
+    await expect(publishExpiryEpisode(repo, episode, "token-b", createPublisherStub({ schedule: async (job) => { accepted.push(job); } }))).resolves.toBe(true);
     expect(accepted).toEqual([{ ...episode, token: "token-a" }, { ...episode, token: "token-a" }]);
     await expect(repo.findByBankCode(episode.bankCode)).resolves.toMatchObject({ publicationState: "published", publicationClaimToken: "token-a", publicationFailureReportedAt: null });
 
@@ -220,9 +246,9 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     try {
       vi.setSystemTime(new Date(Date.now() + PUBLICATION_CLAIM_TIMEOUT_MS * 2));
       await prisma.$executeRaw`UPDATE "BankSessionExpiryEpisode" SET "updatedAt" = NOW() WHERE "bankCode" = ${crash.bankCode}`;
-      await expect(publishExpiryEpisode(repo, crash, "token-b", async (job) => { accepted.push(job); })).resolves.toBe(false);
+      await expect(publishExpiryEpisode(repo, crash, "token-b", createPublisherStub({ schedule: async (job) => { accepted.push(job); } }))).resolves.toBe(false);
       await prisma.$executeRaw`UPDATE "BankSessionExpiryEpisode" SET "updatedAt" = NOW() - (${PUBLICATION_CLAIM_TIMEOUT_MS + 1} * INTERVAL '1 millisecond') WHERE "bankCode" = ${crash.bankCode}`;
-      await expect(publishExpiryEpisode(repo, crash, "token-b", async (job) => { accepted.push(job); })).resolves.toBe(true);
+      await expect(publishExpiryEpisode(repo, crash, "token-b", createPublisherStub({ schedule: async (job) => { accepted.push(job); } }))).resolves.toBe(true);
     } finally { vi.useRealTimers(); }
     expect(accepted.at(-1)).toEqual({ ...crash, token: "token-a" });
     const cancellation = { bankCode: "banreservas", expiredEventId: "event-cancel", runId: "banreservas-expiry-event-cancel" };
@@ -235,20 +261,20 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     // Arrange
     const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
     const episode = { bankCode: "popular", expiredEventId: "event-restoration", runId: "popular-expiry-event-restoration" };
-    const enqueue = vi.fn();
+    const schedule = vi.fn();
     await repo.getOrCreate(episode);
     const holder = await openPausedPostgresConnection();
     try {
       await holder.client.query('UPDATE "BankSessionExpiryEpisode" SET "restoredAuditDeliveredAt" = NOW() WHERE "bankCode" = $1', [episode.bankCode]);
 
       // Act
-      const competitor = publishExpiryEpisode(repo, episode, "claim", enqueue);
+      const competitor = publishExpiryEpisode(repo, episode, "claim", createPublisherStub({ schedule }));
       expect(await waitForLockWait(holder, holder.pid)).not.toBe(holder.pid);
       await holder.client.query("COMMIT");
 
       // Assert
       await expect(competitor).resolves.toBe(false);
-      expect(enqueue).not.toHaveBeenCalled();
+      expect(schedule).not.toHaveBeenCalled();
     } finally {
       await closePausedPostgresConnection(holder);
     }

@@ -3,12 +3,19 @@ import { describe, expect, it, vi } from "vitest";
 import { InMemoryAuditSink, type AuditSink } from "../audit";
 import {
   InMemoryBankSessionExpiryEpisodeRepository,
+  PUBLICATION_CLAIM_TIMEOUT_MS,
   parseEpisodePublicationState,
   publishExpiryEpisode,
   type BankSessionExpiryEpisode,
   type BankSessionExpiryEpisodeRepository,
+  type ExpiryPublicationPublisher,
 } from "./expiry-episodes";
+import { observeExpiryPublicationJob, scheduleExpiryPublicationJob, type ExpiryPublicationEnvelope, type ExpiryPublicationQueue, type ExpiryPublicationSchedulingState } from "./expiry-publication";
 import { createBankSessionMonitor, type BankSessionMonitorDeps } from "./index";
+
+function createPublisherStub(overrides: Partial<ExpiryPublicationPublisher> = {}): ExpiryPublicationPublisher {
+  return { schedule: async () => undefined, observe: async () => undefined, ...overrides };
+}
 
 interface MonitorOptions { episodes: BankSessionExpiryEpisodeRepository; statuses: Array<"expired" | "active">; alerts?: string[]; auditSink?: Pick<AuditSink, "record">; createExpiredEventId: () => string; publish?: (episode: BankSessionExpiryEpisode) => Promise<void>; }
 function createMonitor({ episodes, statuses, alerts = [], auditSink = new InMemoryAuditSink(), createExpiredEventId, publish }: MonitorOptions) {
@@ -67,11 +74,93 @@ describe("Bank session expiry episodes", () => {
     expect(await auditIdentities(audit)).toEqual([expect.objectContaining({ action: "bank_session.expired" }), expect.objectContaining({ action: "bank_session.restored" })]);
   });
 
+  it("observes retained and evicted published jobs without scheduling another attempt", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    let state: ExpiryPublicationSchedulingState = "waiting";
+    let queued: ExpiryPublicationEnvelope | undefined;
+    const storedJob = { getState: vi.fn(async () => state) };
+    const getJob = vi.fn(async () => queued ? storedJob : undefined);
+    const add = vi.fn(async (_name: string, job: ExpiryPublicationEnvelope) => { queued = job; return storedJob; });
+    const queue: ExpiryPublicationQueue = { getJob, add };
+    const schedule = vi.fn((job: ExpiryPublicationEnvelope) => scheduleExpiryPublicationJob(queue, job));
+    const observe = vi.fn((job: ExpiryPublicationEnvelope) => observeExpiryPublicationJob(queue, job.runId));
+    const publish = vi.fn(async (episode: BankSessionExpiryEpisode) => {
+      await publishExpiryEpisode(episodes, episode, "token-a", { schedule, observe });
+    });
+    const monitor = createMonitor({ episodes, statuses: ["expired", "expired"], createExpiredEventId: () => "event-reconcile", publish });
+
+    await monitor.tick();
+    state = "failed";
+    await monitor.tick();
+    queued = undefined;
+    await monitor.tick();
+    await monitor.tick();
+
+    expect(publish).toHaveBeenCalledTimes(4);
+    expect(schedule).toHaveBeenCalledOnce();
+    expect(observe).toHaveBeenCalledTimes(3);
+    expect(add).toHaveBeenCalledOnce();
+    expect(getJob).toHaveBeenCalledTimes(4);
+    expect(storedJob.getState).toHaveBeenCalledTimes(2);
+    await expect(episodes.findByBankCode("popular")).resolves.toMatchObject({ publicationState: "published", publicationClaimToken: "token-a" });
+  });
+
+  it("contains a rejecting observe on an already-published episode and retries next cycle without scheduling", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    let observeRejectsOnce = true;
+    const schedule = vi.fn(async () => undefined);
+    const observe = vi.fn(async () => {
+      if (observeRejectsOnce) {
+        observeRejectsOnce = false;
+        throw new Error("queue unavailable");
+      }
+    });
+    const publish = vi.fn(async (episode: BankSessionExpiryEpisode) => {
+      await publishExpiryEpisode(episodes, episode, "token-a", { schedule, observe });
+    });
+    const monitor = createMonitor({ episodes, statuses: ["expired", "expired", "expired"], createExpiredEventId: () => "event-published-retry", publish });
+
+    await monitor.tick();
+    await expect(episodes.findByBankCode("popular")).resolves.toMatchObject({ publicationState: "published", publicationClaimToken: "token-a" });
+    expect(schedule).toHaveBeenCalledOnce();
+
+    await monitor.tick();
+    expect(observe).toHaveBeenCalledOnce();
+    await expect(episodes.findByBankCode("popular")).resolves.toMatchObject({ publicationState: "published", publicationClaimToken: "token-a" });
+
+    await monitor.tick();
+    expect(observe).toHaveBeenCalledTimes(2);
+    expect(schedule).toHaveBeenCalledOnce();
+    await expect(episodes.findByBankCode("popular")).resolves.toMatchObject({ publicationState: "published", publicationClaimToken: "token-a" });
+  });
+
+  it("settles stale publishing against a retained failed run without starting another attempt", async () => {
+    let now = new Date("2026-07-14T00:00:00.000Z");
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository(() => now);
+    const episode = { bankCode: "popular", expiredEventId: "event-stale", runId: "popular-expiry-event-stale" };
+    const failedJob = { getState: vi.fn().mockResolvedValue("failed" as const) };
+    const add = vi.fn();
+    const queue: ExpiryPublicationQueue = { getJob: vi.fn().mockResolvedValue(failedJob), add };
+    const schedule = vi.fn((job: ExpiryPublicationEnvelope) => scheduleExpiryPublicationJob(queue, job));
+    const observe = vi.fn((job: ExpiryPublicationEnvelope) => observeExpiryPublicationJob(queue, job.runId));
+
+    await episodes.getOrCreate(episode);
+    await episodes.claimPublication(episode, "token-a");
+    now = new Date(now.getTime() + PUBLICATION_CLAIM_TIMEOUT_MS + 1);
+
+    await expect(publishExpiryEpisode(episodes, episode, "token-b", { schedule, observe })).resolves.toBe(true);
+    expect(schedule).toHaveBeenCalledOnce();
+    expect(observe).not.toHaveBeenCalled();
+    expect(add).not.toHaveBeenCalled();
+    expect(failedJob.getState).toHaveBeenCalledOnce();
+    await expect(episodes.findByBankCode(episode.bankCode)).resolves.toMatchObject({ publicationState: "published", publicationClaimToken: "token-a" });
+  });
+
   it("rejects malformed publication tuples and blank publication tokens", async () => {
     const episode = { bankCode: "popular", expiredEventId: "event-tuple", runId: "popular-expiry-event-tuple" }; const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
     for (const [state, token, failure] of [["pending", "token", null], ["publishing", " ", null], ["published", "token", new Date()], ["cancelled", null, new Date()]] as const) expect(() => parseEpisodePublicationState(state, token, failure)).toThrow("Invalid publication tuple");
     await episodes.getOrCreate(episode);
-    await expect(publishExpiryEpisode(episodes, episode, " ", async () => undefined)).rejects.toThrow("Publication token must be nonblank");
+    await expect(publishExpiryEpisode(episodes, episode, " ", createPublisherStub())).rejects.toThrow("Publication token must be nonblank");
     await expect(episodes.claimPublication(episode, "\t")).rejects.toThrow("Publication token must be nonblank");
     await episodes.claimPublication(episode, "token-a"); await episodes.cancelPublication(episode);
     await expect(episodes.findByBankCode("popular")).resolves.toMatchObject({ publicationState: "cancelled", publicationClaimToken: null, publicationFailureReportedAt: null });
@@ -80,12 +169,13 @@ describe("Bank session expiry episodes", () => {
   it("preserves enqueue and marker errors while reusing token A after acknowledgement loss", async () => {
     const failureReportedAt = new Date("2026-07-13T00:00:00.000Z"); const episodes = new InMemoryBankSessionExpiryEpisodeRepository(() => failureReportedAt); const episode = { bankCode: "popular", expiredEventId: "event-ack-loss", runId: "popular-expiry-event-ack-loss" }; const acceptedPayloads: Array<{ bankCode: string; expiredEventId: string; runId: string; token: string }> = [];
     const enqueueError = new Error("acknowledgement lost"); const markerError = new Error("marker unavailable");
+    const publisher = createPublisherStub({ schedule: async (job: ExpiryPublicationEnvelope) => { acceptedPayloads.push(job); throw enqueueError; } });
     await episodes.getOrCreate(episode); vi.spyOn(episodes, "markPublicationFailureReported").mockRejectedValueOnce(markerError);
-    let failure: unknown; try { await publishExpiryEpisode(episodes, episode, "token-a", async (job) => { acceptedPayloads.push(job); throw enqueueError; }); } catch (error) { failure = error; }
+    let failure: unknown; try { await publishExpiryEpisode(episodes, episode, "token-a", publisher); } catch (error) { failure = error; }
     expect(failure).toBeInstanceOf(AggregateError); const aggregate = failure as AggregateError;
     expect(aggregate.cause).toBe(enqueueError); expect(aggregate.errors).toEqual([enqueueError, markerError]);
     vi.restoreAllMocks(); await episodes.markPublicationFailureReported(episode, "token-a"); const failed = await episodes.findByBankCode("popular");
-    const recovered = await publishExpiryEpisode(episodes, episode, "token-b", async (job) => { acceptedPayloads.push(job); });
+    const recovered = await publishExpiryEpisode(episodes, episode, "token-b", createPublisherStub({ schedule: async (job) => { acceptedPayloads.push(job); } }));
     expect(failed).toMatchObject({ publicationState: "publishing", publicationClaimToken: "token-a" });
     expect(failed?.publicationFailureReportedAt).toEqual(failureReportedAt);
     expect(recovered).toBe(true);

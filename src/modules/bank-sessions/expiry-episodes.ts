@@ -50,23 +50,50 @@ export interface BankSessionExpiryEpisodeRepository {
   markPublicationFailureReported(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">, token: string): Promise<boolean>;
   close(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<EpisodeCloseResult>;
 }
+
+export interface ExpiryPublicationEnvelope {
+  bankCode: string;
+  expiredEventId: string;
+  token: string;
+  runId: string;
+}
+
+/**
+ * `schedule` and `observe` are kept distinct because they apply to different
+ * episode states: `schedule` starts a NEW attempt for a freshly claimed
+ * "publishing" episode, while `observe` only re-checks an already-"published"
+ * episode's queue state without ever starting another attempt.
+ */
+export interface ExpiryPublicationPublisher {
+  schedule(job: ExpiryPublicationEnvelope): Promise<unknown>;
+  observe(job: ExpiryPublicationEnvelope): Promise<unknown>;
+}
+
 export async function publishExpiryEpisode(
   episodes: BankSessionExpiryEpisodeRepository,
   episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">,
   proposedToken: string,
-  enqueue: (job: { bankCode: string; expiredEventId: string; runId: string; token: string }) => Promise<void>,
+  publisher: ExpiryPublicationPublisher,
 ): Promise<boolean> {
   assertPublicationToken(proposedToken);
   const durable = await episodes.findByBankCode(episode.bankCode);
   if (!durable || durable.expiredEventId !== episode.expiredEventId || durable.runId !== episode.runId || durable.restoredAuditDelivered) return false;
   const token = durable.publicationClaimToken ?? proposedToken;
+  const publication = { bankCode: episode.bankCode, expiredEventId: episode.expiredEventId, runId: episode.runId, token };
+  if (durable.publicationState === "published") {
+    // Terminal queue failures observed here are intentionally left as durable
+    // "published" — the caller's outer containment retries observe() on the
+    // next cycle, pending PR4p's consumer/audit policy for this state.
+    await publisher.observe(publication);
+    return true;
+  }
   if (!await episodes.claimPublication(episode, token)) return false;
   try {
-    await enqueue({ bankCode: episode.bankCode, expiredEventId: episode.expiredEventId, runId: episode.runId, token });
-  } catch (enqueueError) {
+    await publisher.schedule(publication);
+  } catch (scheduleError) {
     try { await episodes.markPublicationFailureReported(episode, token); }
-    catch (markerError) { throw new AggregateError([enqueueError, markerError], "Failed to enqueue expiry episode", { cause: enqueueError }); }
-    throw enqueueError;
+    catch (markerError) { throw new AggregateError([scheduleError, markerError], "Failed to schedule expiry episode", { cause: scheduleError }); }
+    throw scheduleError;
   }
   return episodes.markPublicationPublished(episode, token);
 }

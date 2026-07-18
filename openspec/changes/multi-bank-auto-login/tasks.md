@@ -5,7 +5,7 @@
 ## Review Workload Forecast
 
 | Field | Value |
-|-------|-------|
+| ------- | ------- |
 | Estimated changed lines | ~2400-3000 across 6 PRs |
 | 400-line budget risk | High |
 | Chained PRs recommended | Yes |
@@ -23,7 +23,7 @@ Chain strategy: feature-branch-chain
 Tracker branch `feature/multi-bank-auto-login` (base = current/main per repo convention; draft no-merge tracker PR). Child PR #N targets PR #(N-1) branch so each diff shows only its work unit; only the tracker merges to main. Retarget/rebase if a child diff shows prior PRs.
 
 | Unit | Goal | PR | Base boundary |
-|------|------|----|------|
+| ------ | ------ | ---- | ------ |
 | 1 | BankAdapter + registry + Popular migration (no behavior change) | PR1 | tracker branch |
 | 2 | Per-bank browser/CDP isolation + loopback + backpressure + Popular portal config only | PR2 | PR1 branch |
 | 3 | Credential model + AES-GCM envelope + admin API + audit (no auto-login) | PR3 | PR2 branch |
@@ -69,6 +69,7 @@ Tracker branch `feature/multi-bank-auto-login` (base = current/main per repo con
 ### PR3B: Admin API + audit + repo
 
 **PR3B1 (foundation, complete):**
+
 - [x] 3.4 Modify `src/modules/audit/index.ts`: add `username/credential/plaintext/envelope` to `sensitiveKeys`.
 - [x] Create `src/modules/bank-credentials/key-resolver.ts`: AES-256 key resolver from `RD_SYNC_BANK_CREDENTIAL_KEY` env (base64/hex, 32 bytes, safe errors, no key material logging).
 - [x] Create `src/modules/bank-credentials/repository.ts`: Prisma access for `BankCredential` (find/upsert/metadata-only; no ciphertext in metadata reads).
@@ -76,11 +77,13 @@ Tracker branch `feature/multi-bank-auto-login` (base = current/main per repo con
 - [x] Tests: compact key-resolver + service coverage for base64/hex/safe errors, set/rotate/test outcomes, audit safety, and metadata delegation — 394 total changed lines in slice.
 
 **PR3B2A (admin route metadata slice):**
+
 - [x] 3.3a Create `src/app/api/bank-credentials/route.ts` + `defaults.ts`: GET metadata only; `requireRole(principal, ["admin"])` (no capability system exists — uses existing RBAC pattern); safe error masking (401/403/400/404/503); never returns plaintext, ciphertext, envelopes, key material, or audit internals.
 - [x] 3.5b-a Admin API tests (TDD): focused GET tests covering authz (401/403), metadata success, no secret fields, missing metadata (404), and safe error masking (503).
 - [x] 3.6 Create `src/modules/audit/bank-actions.ts`: canonical audit action constants for bank credential/auto-login/breaker/killswitch/adapter/session domains.
 
 **PR3B2B (admin route mutation/test slice):**
+
 - [x] 3.3b Add POST set/rotate route with `InMemoryRateLimiter` 10/min, `requireRole(principal, ["admin"])`, safe errors, credential mutation through `BankCredentialService.setOrRotate`, and Spanish success message: "Credenciales actualizadas".
 - [x] 3.3c Add action-based POST test path (`POST /api/bank-credentials` with `action: "test"`) with `InMemoryRateLimiter` 10/min, `requireRole(principal, ["admin"])`, dry decrypt via `validateStoredCredentialDecryption`, and no credential echo.
 - [x] 3.5b-b Add POST tests for authz, validation, rate limit (429), set/rotate/test success paths, service error masking (503), no plaintext/ciphertext/envelope echo, and credential service call contracts.
@@ -110,16 +113,19 @@ Gate: full gates + FRESH 4R review + Judgment Day before merge; PR3B1 <=400 line
 - [x] B1.4 Isolate the PostgreSQL expiry-episode contract per test and run the complete contract file twice.
 - Gate: full gates; approved `size:exception` for this atomic B1 child because durable identity, election, audit acknowledgement, retry/close safety, PostgreSQL contracts, and documentation must be reviewed together. B2 publication/outbox/queue/consumer work is explicitly excluded and remains unchecked; target PR #35 head `feature/multi-bank-auto-login-pr4l-throttled-deferred`.
 
-## Slice B2a: Durable expiry publication (current child PR, ≤400 changed lines)
+## Slice B2a: Durable expiry publication (completed predecessor child PR)
 
 - [x] B2.1 Add the outbox state machine `pending -> publishing(token) -> published/cancelled` with compare-and-set transitions.
 - [x] B2.2 Add deterministic real-PostgreSQL two-connection tests that hold one transaction mid-flight and force both interleavings: restoration wins so the publisher cannot enqueue; publication wins so restoration waits then closes.
-- [ ] B2.3 Require consumer revalidation: each job carries `bankCode + expiredEventId + token`; the consumer rereads PostgreSQL and no-ops with audit `skipped` when the episode is closed/restored. PostgreSQL is authority; the queue is a hint.
-- [ ] B2.4 Deduplicate jobs deterministically by episode `runId`.
+- [ ] B2.3 Consumer revalidation and attempt policy: each job carries `bankCode + expiredEventId + token + runId`; the consumer rereads PostgreSQL, treats the queue as a hint, and defines durable post-claim throttled/crash/manual behavior.
+- [x] B2.4 Scheduler provider: deduplicate jobs by exact episode `runId`; configure three total attempts (initial attempt plus two automatic retries) with exponential backoff (30s), retained failures (10), and bounded completed history (100); return observed normal/resolved-race/thrown-race BullMQ states, leaving terminal failures retained without manual retry. A published monitor tick observes the exact retained job or `missing`; it never creates a replacement attempt budget. After a successful `add`, an observation failure propagates as the observation error itself without entering duplicate-add recovery.
 - [ ] B2.5 Prove two-replica disabled/config-missing behavior: one episode, one expiry audit, and one restoration audit.
 - [ ] B2.6 Run fresh 4R and Judgment Day before review.
 - Gate: ≤400 changed lines; no B2 implementation in B1.
-- B2a owns B2.1-B2.2, including active-session pending-candidate clearing before restoration/retry; B2b applies the dedicated queue/consumer/worker, adds consumer authorization, and completes B2.3-B2.5.
+- B2a predecessor owns B2.1-B2.2, including active-session pending-candidate clearing before restoration/retry; its behavior remains unchanged.
+- PR4o is the current B2.4 scheduler-provider slice only: shared publication envelope, separate create/reconcile and published-state observation callbacks, and published-but-unconsumed monitor reconciliation. It does not claim consumer, restored, or terminal-failure recovery behavior.
+- PR4p owns B2.3: consumer revalidation, claim/attempt policy, post-claim throttled/crash durable state, manual outcomes, audits, and replay semantics.
+- PR4q owns runtime wiring and B2.5 two-replica proof. B2.6 remains the final fresh 4R and Judgment Day gate.
 
 ## PR5: Banreservas/BHD read-only adapters + portal drift fixtures (NO auto-login)
 
