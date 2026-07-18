@@ -8,6 +8,7 @@ export function parseEpisodePublicationState(value: string, token: string | null
   throw new Error("Invalid publication tuple");
 }
 function assertPublicationToken(token: string): void { if (!token.trim()) throw new Error("Publication token must be nonblank"); }
+export function assertConsumerClaimToken(token: string): void { if (!token.trim()) throw new Error("Consumer claim token must be nonblank"); }
 export interface BankSessionExpiryEpisode {
   bankCode: string;
   expiredEventId: string;
@@ -17,6 +18,7 @@ export interface BankSessionExpiryEpisode {
   publicationState: EpisodePublicationState;
   publicationClaimToken: string | null;
   publicationFailureReportedAt: Date | null;
+  consumerClaimToken: string | null;
   updatedAt: Date;
 }
 
@@ -48,6 +50,7 @@ export interface BankSessionExpiryEpisodeRepository {
   markPublicationPublished(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">, token: string): Promise<boolean>;
   cancelPublication(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<boolean>;
   markPublicationFailureReported(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">, token: string): Promise<boolean>;
+  claimConsumerAttempt(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
   close(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<EpisodeCloseResult>;
 }
 
@@ -112,6 +115,7 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
       publicationState: "pending",
       publicationClaimToken: null,
       publicationFailureReportedAt: null,
+      consumerClaimToken: null,
       updatedAt: this.clock(),
     };
     this.episodes.set(input.bankCode, episode);
@@ -139,6 +143,10 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
   }
   async markPublicationFailureReported(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">, token: string): Promise<boolean> {
     assertPublicationToken(token); return this.updatePublication(episode, (current) => current.publicationState === "publishing" && current.publicationClaimToken === token && current.publicationFailureReportedAt === null, (current) => ({ ...current, publicationFailureReportedAt: this.clock() }));
+  }
+  async claimConsumerAttempt(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
+    assertConsumerClaimToken(consumerClaimToken);
+    return this.updatePublication(envelope, (current) => !current.restoredAuditDelivered && current.publicationState === "published" && current.publicationClaimToken === envelope.token && current.consumerClaimToken === null, (current) => ({ ...current, consumerClaimToken }));
   }
 
   async findByBankCode(bankCode: string): Promise<BankSessionExpiryEpisode | null> {

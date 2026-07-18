@@ -7,10 +7,8 @@
  * To run against a test database:
  *
  *   1. Create a throwaway PostgreSQL database (NEVER use the dev DATABASE_URL).
- *   2. Apply the schema:
- *        RD_SYNC_TEST_DATABASE_URL="postgresql://..." pnpm prisma:migrate
- *      or push without migration history:
- *        RD_SYNC_TEST_DATABASE_URL="postgresql://..." pnpm db:push
+ *   2. Apply committed migrations:
+ *        DATABASE_URL="postgresql://..." pnpm prisma migrate deploy
  *   3. Run the Prisma contract tests:
  *        RD_SYNC_TEST_DATABASE_URL="postgresql://..." pnpm test --reporter=verbose
  *
@@ -46,6 +44,7 @@ import { RoleKey } from "../../generated/prisma/enums";
 const TEST_DB_URL = process.env.RD_SYNC_TEST_DATABASE_URL;
 const hasTestDb = Boolean(TEST_DB_URL);
 const MAX_POSTGRES_LOCK_WAIT_ATTEMPTS = 100;
+const POSTGRES_CHECK_VIOLATION = "23514";
 
 // ---------------------------------------------------------------------------
 // Shared test client — one pool for the entire test file.
@@ -144,6 +143,19 @@ describe.skipIf(!hasTestDb)("Prisma scrape-run repository (requires RD_SYNC_TEST
 describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requires RD_SYNC_TEST_DATABASE_URL)", () => {
   beforeEach(truncateTables);
   afterEach(truncateTables);
+
+  async function createUnclaimedEnvelope(repo: PrismaBankSessionExpiryEpisodeRepository, suffix: string) {
+    const episode = { bankCode: `claim-${suffix}`, expiredEventId: `event-${suffix}`, runId: `run-${suffix}` };
+    await repo.getOrCreate(episode);
+    return { ...episode, token: "publication-token" };
+  }
+
+  async function publishEnvelope(repo: PrismaBankSessionExpiryEpisodeRepository, suffix: string) {
+    const envelope = await createUnclaimedEnvelope(repo, suffix);
+    await repo.claimPublication(envelope, envelope.token);
+    await repo.markPublicationPublished(envelope, envelope.token);
+    return envelope;
+  }
 
   it("persists create/conflict/read/audit acknowledgement/close with PostgreSQL", async () => {
     if (!prisma) throw new Error("prisma not initialized");
@@ -313,6 +325,117 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
       expect(close).toHaveBeenCalledTimes(1);
       await expect(repo.findByBankCode(episode.bankCode)).resolves.toBeNull();
     } finally { await closePausedPostgresConnection(holder); }
+  });
+
+  it("claims only an independently created exact published envelope", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, "exact");
+
+    await expect(repo.claimConsumerAttempt(envelope, "consumer-winner")).resolves.toBe(true);
+    await expect(repo.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ consumerClaimToken: "consumer-winner" });
+  });
+
+  it("loses when the independently created row is not the envelope bank", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, "bank-mismatch");
+
+    await expect(repo.claimConsumerAttempt({ ...envelope, bankCode: "claim-other-bank" }, "consumer-loser")).resolves.toBe(false);
+  });
+
+  it("loses when the independently created row is missing", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await createUnclaimedEnvelope(repo, "missing-seed");
+
+    await expect(repo.claimConsumerAttempt({ ...envelope, bankCode: "claim-missing" }, "consumer-loser")).resolves.toBe(false);
+  });
+
+  it.each(["expiredEventId", "runId", "token"] as const)("loses when the independently created published envelope has a different %s", async (field) => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, `mismatch-${field}`);
+    const staleEnvelope = { ...envelope, [field]: `other-${field}` };
+
+    await expect(repo.claimConsumerAttempt(staleEnvelope, "consumer-loser")).resolves.toBe(false);
+  });
+
+  it("loses when the independently created published row was restored", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, "restored");
+    await repo.markAuditDelivered(envelope, "restored");
+
+    await expect(repo.claimConsumerAttempt(envelope, "consumer-loser")).resolves.toBe(false);
+  });
+
+  it.each(["pending", "publishing", "cancelled"] as const)("loses when the independently created row is %s", async (state) => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await createUnclaimedEnvelope(repo, `state-${state}`);
+    if (state !== "pending") await repo.claimPublication(envelope, envelope.token);
+    if (state === "cancelled") await repo.cancelPublication(envelope);
+
+    await expect(repo.claimConsumerAttempt(envelope, "consumer-loser")).resolves.toBe(false);
+  });
+
+  it("loses when the independently created published row already has a consumer claim", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, "existing-claim");
+    await repo.claimConsumerAttempt(envelope, "consumer-first");
+
+    await expect(repo.claimConsumerAttempt(envelope, "consumer-second")).resolves.toBe(false);
+  });
+
+  it.each(["", " ", "\t", "\n"])("rejects a %j consumer claim token before inspecting an independently created row", async (token) => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await createUnclaimedEnvelope(repo, `blank-${JSON.stringify(token)}`);
+
+    await expect(repo.claimConsumerAttempt(envelope, token)).rejects.toThrow("Consumer claim token must be nonblank");
+  });
+
+  it("enforces the named consumer-claim check for direct pg whitespace writes", async () => {
+    if (!prisma || !TEST_DB_URL) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await createUnclaimedEnvelope(repo, "check");
+    const pool = new Pool({ connectionString: TEST_DB_URL });
+    try {
+      for (const token of [" ", "\t", "\n"]) {
+        await expect(pool.query('UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = $1 WHERE "bankCode" = $2', [token, envelope.bankCode]))
+          .rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "BankSessionExpiryEpisode_consumerClaimToken_check" });
+      }
+      await expect(pool.query('UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = $1 WHERE "bankCode" = $2', ["consumer-valid", envelope.bankCode])).resolves.toMatchObject({ rowCount: 1 });
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it("blocks a Prisma contender behind a direct pg exact winner and leaves one durable claim", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, "overlap");
+    const holder = await openPausedPostgresConnection();
+    const observer = await openPausedPostgresConnection();
+    try {
+      // Mirror the repository CAS exactly; independent matrices pin every predicate.
+      const winner = await holder.client.query(
+        'UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = $1 WHERE "bankCode" = $2 AND "expiredEventId" = $3 AND "runId" = $4 AND "publicationClaimToken" = $5 AND "publicationState" = $6 AND "restoredAuditDeliveredAt" IS NULL AND "consumerClaimToken" IS NULL RETURNING "bankCode"',
+        ["consumer-winner", envelope.bankCode, envelope.expiredEventId, envelope.runId, envelope.token, "published"],
+      );
+      expect(winner.rowCount).toBe(1);
+      const contender = repo.claimConsumerAttempt(envelope, "consumer-contender");
+      expect(await waitForLockWait(observer, holder.pid)).not.toBe(holder.pid);
+      await holder.client.query("COMMIT");
+
+      await expect(contender).resolves.toBe(false);
+      await expect(repo.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ consumerClaimToken: "consumer-winner" });
+    } finally {
+      await closePausedPostgresConnection(observer);
+      await closePausedPostgresConnection(holder);
+    }
   });
 
 });

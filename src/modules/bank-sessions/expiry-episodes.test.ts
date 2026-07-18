@@ -51,6 +51,90 @@ function auditIdentities(audit: InMemoryAuditSink) {
 }
 
 describe("Bank session expiry episodes", () => {
+  const consumerClaimToken = "consumer-claim";
+
+  function consumerEnvelope(suffix: string) {
+    return { bankCode: `consumer-${suffix}`, expiredEventId: `event-${suffix}`, runId: `run-${suffix}`, token: "publication-token" };
+  }
+
+  async function createUnclaimedConsumerEnvelope(episodes: InMemoryBankSessionExpiryEpisodeRepository, suffix: string) {
+    const envelope = consumerEnvelope(suffix);
+    await episodes.getOrCreate(envelope);
+    return envelope;
+  }
+
+  async function createPublishedConsumerEnvelope(episodes: InMemoryBankSessionExpiryEpisodeRepository, suffix: string) {
+    const envelope = await createUnclaimedConsumerEnvelope(episodes, suffix);
+    await episodes.claimPublication(envelope, envelope.token);
+    await episodes.markPublicationPublished(envelope, envelope.token);
+    return envelope;
+  }
+
+  it("persists the exact winning consumer claim token for a published envelope", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    const envelope = await createPublishedConsumerEnvelope(episodes, "winner");
+
+    await expect(episodes.claimConsumerAttempt(envelope, consumerClaimToken)).resolves.toBe(true);
+    await expect(episodes.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ consumerClaimToken });
+  });
+
+  interface ConsumerClaimLossCase {
+    name: string;
+    expected: false;
+    prepare(episodes: InMemoryBankSessionExpiryEpisodeRepository): Promise<ReturnType<typeof consumerEnvelope>>;
+  }
+
+  const consumerClaimLossCases: readonly ConsumerClaimLossCase[] = [
+    { name: "the target row is missing", expected: false, prepare: async () => consumerEnvelope("missing") },
+    { name: "the bank code differs", expected: false, prepare: async (episodes) => ({ ...await createPublishedConsumerEnvelope(episodes, "bank"), bankCode: "consumer-other-bank" }) },
+    { name: "the expired event differs", expected: false, prepare: async (episodes) => ({ ...await createPublishedConsumerEnvelope(episodes, "event"), expiredEventId: "other-event" }) },
+    { name: "the run differs", expected: false, prepare: async (episodes) => ({ ...await createPublishedConsumerEnvelope(episodes, "run"), runId: "other-run" }) },
+    { name: "the publication token differs", expected: false, prepare: async (episodes) => ({ ...await createPublishedConsumerEnvelope(episodes, "token"), token: "other-token" }) },
+    {
+      name: "the published row was restored", expected: false, prepare: async (episodes) => {
+        const envelope = await createPublishedConsumerEnvelope(episodes, "restored");
+        await episodes.markAuditDelivered(envelope, "restored");
+        return envelope;
+      },
+    },
+    { name: "the row is pending", expected: false, prepare: async (episodes) => createUnclaimedConsumerEnvelope(episodes, "pending") },
+    {
+      name: "the row is publishing", expected: false, prepare: async (episodes) => {
+        const envelope = await createUnclaimedConsumerEnvelope(episodes, "publishing");
+        await episodes.claimPublication(envelope, envelope.token);
+        return envelope;
+      },
+    },
+    {
+      name: "the row is cancelled", expected: false, prepare: async (episodes) => {
+        const envelope = await createUnclaimedConsumerEnvelope(episodes, "cancelled");
+        await episodes.claimPublication(envelope, envelope.token);
+        await episodes.cancelPublication(envelope);
+        return envelope;
+      },
+    },
+    {
+      name: "the published row already has a consumer claim", expected: false, prepare: async (episodes) => {
+        const envelope = await createPublishedConsumerEnvelope(episodes, "claimed");
+        await episodes.claimConsumerAttempt(envelope, "first-claim");
+        return envelope;
+      },
+    },
+  ];
+
+  it.each(consumerClaimLossCases)("loses the consumer claim when $name", async ({ expected, prepare }) => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    const envelope = await prepare(episodes);
+
+    await expect(episodes.claimConsumerAttempt(envelope, consumerClaimToken)).resolves.toBe(expected);
+  });
+
+  it.each([["empty", ""], ["space", " "], ["tab", "\t"], ["newline", "\n"]] as const)("rejects a %s consumer claim token", async (_name, token) => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    const envelope = await createUnclaimedConsumerEnvelope(episodes, `invalid-${JSON.stringify(token)}`);
+
+    await expect(episodes.claimConsumerAttempt(envelope, token)).rejects.toThrow("Consumer claim token must be nonblank");
+  });
   it("clears the pending candidate and closes a restored episode before publication retry", async () => {
     // Arrange
     const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
@@ -405,6 +489,7 @@ describe("Bank session expiry episodes", () => {
       markPublicationPublished: (episode, token) => base.markPublicationPublished(episode, token),
       cancelPublication: (episode) => base.cancelPublication(episode),
       markPublicationFailureReported: (episode, token) => base.markPublicationFailureReported(episode, token),
+      claimConsumerAttempt: (envelope, token) => base.claimConsumerAttempt(envelope, token),
       close: async (episode) => {
         closeCalls.push(episode.expiredEventId);
         if (replaceOnFirstClose) {

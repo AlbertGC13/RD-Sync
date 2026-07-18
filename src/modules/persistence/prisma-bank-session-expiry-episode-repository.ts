@@ -1,10 +1,11 @@
 import type { PrismaClient } from "../../generated/prisma/client";
-import { PUBLICATION_CLAIM_TIMEOUT_MS, parseEpisodePublicationState } from "../bank-sessions/expiry-episodes";
+import { PUBLICATION_CLAIM_TIMEOUT_MS, assertConsumerClaimToken, parseEpisodePublicationState } from "../bank-sessions/expiry-episodes";
 import type {
   BankSessionExpiryEpisode,
   BankSessionExpiryEpisodeRepository,
   CreateBankSessionExpiryEpisodeInput,
   EpisodeCloseResult,
+  ExpiryPublicationEnvelope,
   GetOrCreateBankSessionExpiryEpisodeResult,
   SessionEpisodeAuditKind,
 } from "../bank-sessions/expiry-episodes";
@@ -18,6 +19,7 @@ type EpisodeRow = {
   publicationState: string;
   publicationClaimToken: string | null;
   publicationFailureReportedAt: Date | null;
+  consumerClaimToken: string | null;
   updatedAt: Date;
 };
 
@@ -31,6 +33,7 @@ function mapRow(row: EpisodeRow): BankSessionExpiryEpisode {
     publicationState: parseEpisodePublicationState(row.publicationState, row.publicationClaimToken, row.publicationFailureReportedAt),
     publicationClaimToken: row.publicationClaimToken,
     publicationFailureReportedAt: row.publicationFailureReportedAt,
+    consumerClaimToken: row.consumerClaimToken,
     updatedAt: row.updatedAt,
   };
 }
@@ -43,12 +46,12 @@ export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpi
       INSERT INTO "BankSessionExpiryEpisode" ("bankCode", "expiredEventId", "runId", "updatedAt")
       VALUES (${input.bankCode}, ${input.expiredEventId}, ${input.runId}, NOW())
       ON CONFLICT ("bankCode") DO NOTHING
-      RETURNING "bankCode", "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "updatedAt"
+      RETURNING "bankCode", "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "updatedAt"
     `;
     if (inserted[0]) return { episode: mapRow(inserted[0]), created: true };
 
     const existing = await this.prisma.$queryRaw<EpisodeRow[]>`
-      SELECT "bankCode", "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "updatedAt"
+      SELECT "bankCode", "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "updatedAt"
       FROM "BankSessionExpiryEpisode" WHERE "bankCode" = ${input.bankCode}
     `;
     if (!existing[0]) throw new Error("Bank session expiry episode was not available after insert conflict");
@@ -57,7 +60,7 @@ export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpi
 
   async findByBankCode(bankCode: string): Promise<BankSessionExpiryEpisode | null> {
     const rows = await this.prisma.$queryRaw<EpisodeRow[]>`
-      SELECT "bankCode", "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "updatedAt"
+      SELECT "bankCode", "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "updatedAt"
       FROM "BankSessionExpiryEpisode" WHERE "bankCode" = ${bankCode}
     `;
     return rows[0] ? mapRow(rows[0]) : null;
@@ -105,6 +108,18 @@ export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpi
       UPDATE "BankSessionExpiryEpisode" SET "publicationFailureReportedAt" = NOW(), "updatedAt" = NOW()
       WHERE "bankCode" = ${episode.bankCode} AND "expiredEventId" = ${episode.expiredEventId} AND "runId" = ${episode.runId}
         AND "publicationState" = 'publishing' AND "publicationClaimToken" = ${token} AND "publicationFailureReportedAt" IS NULL
+      RETURNING "bankCode"
+    `;
+    return updated.length === 1;
+  }
+
+  async claimConsumerAttempt(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
+    assertConsumerClaimToken(consumerClaimToken);
+    const updated = await this.prisma.$queryRaw<{ bankCode: string }[]>`
+      UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = ${consumerClaimToken}, "updatedAt" = NOW()
+      WHERE "bankCode" = ${envelope.bankCode} AND "expiredEventId" = ${envelope.expiredEventId} AND "runId" = ${envelope.runId}
+        AND "publicationClaimToken" = ${envelope.token} AND "publicationState" = 'published'
+        AND "restoredAuditDeliveredAt" IS NULL AND "consumerClaimToken" IS NULL
       RETURNING "bankCode"
     `;
     return updated.length === 1;
