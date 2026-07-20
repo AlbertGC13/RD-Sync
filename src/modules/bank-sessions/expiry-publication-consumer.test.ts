@@ -36,6 +36,7 @@ function durableEpisode(overrides: Partial<BankSessionExpiryEpisode> = {}): Bank
     publicationClaimToken: "token-1",
     publicationFailureReportedAt: null,
     consumerClaimToken: null,
+    consumerAttemptState: null,
     updatedAt: new Date("2026-07-17T00:00:00.000Z"),
     ...overrides,
   };

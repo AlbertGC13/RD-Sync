@@ -1,11 +1,23 @@
 export type SessionEpisodeAuditKind = "expired" | "restored";
 export type EpisodePublicationState = "pending" | "publishing" | "published" | "cancelled";
+export type ConsumerAttemptState = "reserved" | "mutation_started" | "manual_recovery_required" | "resolved";
+export const consumerAttemptTransitions = {
+  mutationStarted: { from: "reserved", to: "mutation_started", requiresUnrestored: true },
+  manualRecoveryRequired: { from: "mutation_started", to: "manual_recovery_required", requiresUnrestored: false },
+  manualRecoveryResolved: { from: "manual_recovery_required", to: "resolved", requiresUnrestored: false },
+} as const;
+export type ConsumerAttemptTransition = (typeof consumerAttemptTransitions)[keyof typeof consumerAttemptTransitions];
 export const PUBLICATION_CLAIM_TIMEOUT_MS = 30_000;
 
 export function parseEpisodePublicationState(value: string, token: string | null, failure: Date | null): EpisodePublicationState {
   const claimed = Boolean(token?.trim());
   if (((value === "pending" || value === "cancelled") && token === null && failure === null) || (value === "publishing" && claimed) || (value === "published" && claimed && failure === null)) return value as EpisodePublicationState;
   throw new Error("Invalid publication tuple");
+}
+export function parseConsumerAttemptState(value: string | null, token: string | null): ConsumerAttemptState | null {
+  if (value === null && token === null) return null;
+  if (token?.trim() && (value === "reserved" || value === "mutation_started" || value === "manual_recovery_required" || value === "resolved")) return value;
+  throw new Error("Invalid consumer attempt tuple");
 }
 function assertPublicationToken(token: string): void { if (!token.trim()) throw new Error("Publication token must be nonblank"); }
 export function assertConsumerClaimToken(token: string): void { if (!token.trim()) throw new Error("Consumer claim token must be nonblank"); }
@@ -19,10 +31,11 @@ export interface BankSessionExpiryEpisode {
   publicationClaimToken: string | null;
   publicationFailureReportedAt: Date | null;
   consumerClaimToken: string | null;
+  consumerAttemptState: ConsumerAttemptState | null;
   updatedAt: Date;
 }
 
-export type EpisodeCloseResult = "closed" | "missing_or_stale";
+export type EpisodeCloseResult = "closed" | "retained_for_recovery" | "missing_or_stale";
 
 export interface CreateBankSessionExpiryEpisodeInput {
   bankCode: string;
@@ -51,6 +64,13 @@ export interface BankSessionExpiryEpisodeRepository {
   cancelPublication(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<boolean>;
   markPublicationFailureReported(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">, token: string): Promise<boolean>;
   claimConsumerAttempt(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
+  /** Persists that a later worker phase may mutate credentials; it performs no mutation itself. */
+  markConsumerMutationStarted(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
+  /** Persists a manual-recovery requirement; it performs no operator notification or audit delivery. */
+  markConsumerManualRecoveryRequired(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
+  /** Persists an explicit operator resolution; it performs no operator action itself. */
+  markConsumerManualRecoveryResolved(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
+  /** The monitor retains mutation_started/manual_recovery_required evidence; resolved episodes close normally. */
   close(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<EpisodeCloseResult>;
 }
 
@@ -116,6 +136,7 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
       publicationClaimToken: null,
       publicationFailureReportedAt: null,
       consumerClaimToken: null,
+      consumerAttemptState: null,
       updatedAt: this.clock(),
     };
     this.episodes.set(input.bankCode, episode);
@@ -146,7 +167,16 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
   }
   async claimConsumerAttempt(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
     assertConsumerClaimToken(consumerClaimToken);
-    return this.updatePublication(envelope, (current) => !current.restoredAuditDelivered && current.publicationState === "published" && current.publicationClaimToken === envelope.token && current.consumerClaimToken === null, (current) => ({ ...current, consumerClaimToken }));
+    return this.updatePublication(envelope, (current) => !current.restoredAuditDelivered && current.publicationState === "published" && current.publicationClaimToken === envelope.token && current.consumerClaimToken === null && current.consumerAttemptState === null, (current) => ({ ...current, consumerClaimToken, consumerAttemptState: "reserved" }));
+  }
+  async markConsumerMutationStarted(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
+    return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.mutationStarted);
+  }
+  async markConsumerManualRecoveryRequired(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
+    return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.manualRecoveryRequired);
+  }
+  async markConsumerManualRecoveryResolved(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
+    return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.manualRecoveryResolved);
   }
 
   async findByBankCode(bankCode: string): Promise<BankSessionExpiryEpisode | null> {
@@ -169,7 +199,12 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
     const current = this.episodes.get(episode.bankCode);
     const field = `${kind}AuditDelivered` as const;
     if (!current || current.runId !== episode.runId || current[field]) return false;
-    this.episodes.set(episode.bankCode, { ...current, [field]: true });
+    const clearedReservation = kind === "restored" && current.consumerAttemptState === "reserved";
+    this.episodes.set(episode.bankCode, {
+      ...current,
+      [field]: true,
+      ...(clearedReservation ? { consumerClaimToken: null, consumerAttemptState: null } : {}),
+    });
     return true;
   }
 
@@ -178,6 +213,7 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
     if (!current || current.runId !== episode.runId || current.expiredEventId !== episode.expiredEventId) {
       return "missing_or_stale";
     }
+    if (current.consumerAttemptState && current.consumerAttemptState !== "resolved") return "retained_for_recovery";
     this.episodes.delete(episode.bankCode);
     return "closed";
   }
@@ -191,5 +227,20 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
     if (!current || current.expiredEventId !== episode.expiredEventId || current.runId !== episode.runId || !canUpdate(current)) return false;
     this.episodes.set(episode.bankCode, { ...update(current), updatedAt: this.clock() });
     return true;
+  }
+
+  private async transitionConsumerAttempt(
+    envelope: ExpiryPublicationEnvelope,
+    consumerClaimToken: string,
+    transition: ConsumerAttemptTransition,
+  ): Promise<boolean> {
+    assertConsumerClaimToken(consumerClaimToken);
+    return this.updatePublication(envelope, (current) =>
+      (!transition.requiresUnrestored || !current.restoredAuditDelivered)
+      && current.publicationState === "published"
+      && current.publicationClaimToken === envelope.token
+      && current.consumerClaimToken === consumerClaimToken
+      && current.consumerAttemptState === transition.from,
+    (current) => ({ ...current, consumerAttemptState: transition.to }));
   }
 }

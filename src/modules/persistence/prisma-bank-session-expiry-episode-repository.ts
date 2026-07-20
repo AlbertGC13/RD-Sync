@@ -1,5 +1,5 @@
 import type { PrismaClient } from "../../generated/prisma/client";
-import { PUBLICATION_CLAIM_TIMEOUT_MS, assertConsumerClaimToken, parseEpisodePublicationState } from "../bank-sessions/expiry-episodes";
+import { PUBLICATION_CLAIM_TIMEOUT_MS, assertConsumerClaimToken, consumerAttemptTransitions, parseConsumerAttemptState, parseEpisodePublicationState, type ConsumerAttemptTransition } from "../bank-sessions/expiry-episodes";
 import type {
   BankSessionExpiryEpisode,
   BankSessionExpiryEpisodeRepository,
@@ -20,6 +20,7 @@ type EpisodeRow = {
   publicationClaimToken: string | null;
   publicationFailureReportedAt: Date | null;
   consumerClaimToken: string | null;
+  consumerAttemptState: string | null;
   updatedAt: Date;
 };
 
@@ -34,6 +35,7 @@ function mapRow(row: EpisodeRow): BankSessionExpiryEpisode {
     publicationClaimToken: row.publicationClaimToken,
     publicationFailureReportedAt: row.publicationFailureReportedAt,
     consumerClaimToken: row.consumerClaimToken,
+    consumerAttemptState: parseConsumerAttemptState(row.consumerAttemptState, row.consumerClaimToken),
     updatedAt: row.updatedAt,
   };
 }
@@ -46,12 +48,12 @@ export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpi
       INSERT INTO "BankSessionExpiryEpisode" ("bankCode", "expiredEventId", "runId", "updatedAt")
       VALUES (${input.bankCode}, ${input.expiredEventId}, ${input.runId}, NOW())
       ON CONFLICT ("bankCode") DO NOTHING
-      RETURNING "bankCode", "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "updatedAt"
+      RETURNING "bankCode", "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "consumerAttemptState", "updatedAt"
     `;
     if (inserted[0]) return { episode: mapRow(inserted[0]), created: true };
 
     const existing = await this.prisma.$queryRaw<EpisodeRow[]>`
-      SELECT "bankCode", "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "updatedAt"
+      SELECT "bankCode", "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "consumerAttemptState", "updatedAt"
       FROM "BankSessionExpiryEpisode" WHERE "bankCode" = ${input.bankCode}
     `;
     if (!existing[0]) throw new Error("Bank session expiry episode was not available after insert conflict");
@@ -60,7 +62,7 @@ export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpi
 
   async findByBankCode(bankCode: string): Promise<BankSessionExpiryEpisode | null> {
     const rows = await this.prisma.$queryRaw<EpisodeRow[]>`
-      SELECT "bankCode", "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "updatedAt"
+      SELECT "bankCode", "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "consumerAttemptState", "updatedAt"
       FROM "BankSessionExpiryEpisode" WHERE "bankCode" = ${bankCode}
     `;
     return rows[0] ? mapRow(rows[0]) : null;
@@ -116,13 +118,22 @@ export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpi
   async claimConsumerAttempt(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
     assertConsumerClaimToken(consumerClaimToken);
     const updated = await this.prisma.$queryRaw<{ bankCode: string }[]>`
-      UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = ${consumerClaimToken}, "updatedAt" = NOW()
+      UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = ${consumerClaimToken}, "consumerAttemptState" = 'reserved', "updatedAt" = NOW()
       WHERE "bankCode" = ${envelope.bankCode} AND "expiredEventId" = ${envelope.expiredEventId} AND "runId" = ${envelope.runId}
         AND "publicationClaimToken" = ${envelope.token} AND "publicationState" = 'published'
-        AND "restoredAuditDeliveredAt" IS NULL AND "consumerClaimToken" IS NULL
+        AND "restoredAuditDeliveredAt" IS NULL AND "consumerClaimToken" IS NULL AND "consumerAttemptState" IS NULL
       RETURNING "bankCode"
     `;
     return updated.length === 1;
+  }
+  async markConsumerMutationStarted(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
+    return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.mutationStarted);
+  }
+  async markConsumerManualRecoveryRequired(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
+    return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.manualRecoveryRequired);
+  }
+  async markConsumerManualRecoveryResolved(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
+    return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.manualRecoveryResolved);
   }
   async isAuditDelivered(
     episode: Pick<BankSessionExpiryEpisode, "bankCode" | "runId">,
@@ -151,7 +162,10 @@ export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpi
           RETURNING "bankCode"
         `
       : await this.prisma.$queryRaw<{ bankCode: string }[]>`
-          UPDATE "BankSessionExpiryEpisode" SET "restoredAuditDeliveredAt" = NOW(), "updatedAt" = NOW()
+          UPDATE "BankSessionExpiryEpisode" SET "restoredAuditDeliveredAt" = NOW(),
+            "consumerClaimToken" = CASE WHEN "consumerAttemptState" = 'reserved' THEN NULL ELSE "consumerClaimToken" END,
+            "consumerAttemptState" = CASE WHEN "consumerAttemptState" = 'reserved' THEN NULL ELSE "consumerAttemptState" END,
+            "updatedAt" = NOW()
           WHERE "bankCode" = ${episode.bankCode} AND "runId" = ${episode.runId} AND "restoredAuditDeliveredAt" IS NULL
           RETURNING "bankCode"
         `;
@@ -161,9 +175,31 @@ export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpi
   async close(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<EpisodeCloseResult> {
     const deleted = await this.prisma.$executeRaw`
       DELETE FROM "BankSessionExpiryEpisode"
-      WHERE "bankCode" = ${episode.bankCode} AND "expiredEventId" = ${episode.expiredEventId} AND "runId" = ${episode.runId}
+      WHERE "bankCode" = ${episode.bankCode} AND "expiredEventId" = ${episode.expiredEventId} AND "runId" = ${episode.runId} AND ("consumerAttemptState" IS NULL OR "consumerAttemptState" = 'resolved')
     `;
-    return deleted === 1 ? "closed" : "missing_or_stale";
+    if (deleted === 1) return "closed";
+    const retained = await this.prisma.$queryRaw<{ bankCode: string }[]>`
+      SELECT "bankCode" FROM "BankSessionExpiryEpisode"
+      WHERE "bankCode" = ${episode.bankCode} AND "expiredEventId" = ${episode.expiredEventId} AND "runId" = ${episode.runId} AND "consumerAttemptState" IS NOT NULL AND "consumerAttemptState" <> 'resolved'
+    `;
+    return retained[0] ? "retained_for_recovery" : "missing_or_stale";
+  }
+
+  private async transitionConsumerAttempt(
+    envelope: ExpiryPublicationEnvelope,
+    consumerClaimToken: string,
+    transition: ConsumerAttemptTransition,
+  ): Promise<boolean> {
+    assertConsumerClaimToken(consumerClaimToken);
+    const updated = await this.prisma.$queryRaw<{ bankCode: string }[]>`
+      UPDATE "BankSessionExpiryEpisode" SET "consumerAttemptState" = ${transition.to}, "updatedAt" = NOW()
+      WHERE "bankCode" = ${envelope.bankCode} AND "expiredEventId" = ${envelope.expiredEventId} AND "runId" = ${envelope.runId}
+        AND "publicationClaimToken" = ${envelope.token} AND "publicationState" = 'published'
+        AND "consumerClaimToken" = ${consumerClaimToken} AND "consumerAttemptState" = ${transition.from}
+        AND (${transition.requiresUnrestored} = FALSE OR "restoredAuditDeliveredAt" IS NULL)
+      RETURNING "bankCode"
+    `;
+    return updated.length === 1;
   }
 
 }

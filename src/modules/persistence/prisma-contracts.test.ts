@@ -18,6 +18,8 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { Pool } from "pg";
 import { PrismaClient } from "../../generated/prisma/client";
@@ -45,6 +47,7 @@ const TEST_DB_URL = process.env.RD_SYNC_TEST_DATABASE_URL;
 const hasTestDb = Boolean(TEST_DB_URL);
 const MAX_POSTGRES_LOCK_WAIT_ATTEMPTS = 100;
 const POSTGRES_CHECK_VIOLATION = "23514";
+const recoveryMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260718014500_add_expiry_consumer_recovery_state/migration.sql", import.meta.url));
 
 // ---------------------------------------------------------------------------
 // Shared test client — one pool for the entire test file.
@@ -397,20 +400,53 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     await expect(repo.claimConsumerAttempt(envelope, token)).rejects.toThrow("Consumer claim token must be nonblank");
   });
 
-  it("enforces the named consumer-claim check for direct pg whitespace writes", async () => {
+  it("enforces the named NULL-safe consumer recovery tuple constraint", async () => {
     if (!prisma || !TEST_DB_URL) throw new Error("prisma not initialized");
     const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
     const envelope = await createUnclaimedEnvelope(repo, "check");
     const pool = new Pool({ connectionString: TEST_DB_URL });
     try {
-      for (const token of [" ", "\t", "\n"]) {
-        await expect(pool.query('UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = $1 WHERE "bankCode" = $2', [token, envelope.bankCode]))
-          .rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "BankSessionExpiryEpisode_consumerClaimToken_check" });
+      for (const [token, state, restored] of [[" ", "reserved", false], ["legacy-token", null, false], [null, "reserved", false], ["valid-token", "unknown", false], ["reserved-token", "reserved", true]] as const) {
+        await expect(pool.query('UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = $1, "consumerAttemptState" = $2, "restoredAuditDeliveredAt" = CASE WHEN $3 THEN NOW() ELSE NULL END WHERE "bankCode" = $4', [token, state, restored, envelope.bankCode]))
+          .rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "BankSessionExpiryEpisode_consumerAttempt_check" });
       }
-      await expect(pool.query('UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = $1 WHERE "bankCode" = $2', ["consumer-valid", envelope.bankCode])).resolves.toMatchObject({ rowCount: 1 });
+      for (const state of ["reserved", "mutation_started", "manual_recovery_required", "resolved"] as const) {
+        await expect(pool.query('UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = $1, "consumerAttemptState" = $2, "restoredAuditDeliveredAt" = NULL WHERE "bankCode" = $3', ["consumer-valid", state, envelope.bankCode])).resolves.toMatchObject({ rowCount: 1 });
+      }
+      for (const state of ["mutation_started", "manual_recovery_required", "resolved"] as const) {
+        await expect(pool.query('UPDATE "BankSessionExpiryEpisode" SET "consumerAttemptState" = $1, "restoredAuditDeliveredAt" = NOW() WHERE "bankCode" = $2', [state, envelope.bankCode])).resolves.toMatchObject({ rowCount: 1 });
+      }
     } finally {
       await pool.end();
     }
+  });
+
+  it("declares the committed recovery migration as one atomic transaction", async () => {
+    const migration = await readFile(recoveryMigrationPath, "utf8");
+    expect(migration.trimStart()).toMatch(/^BEGIN;/);
+    expect(migration.trimEnd()).toMatch(/COMMIT;$/);
+  });
+
+  it("backfills only unrestored legacy claims through the committed recovery migration", async () => {
+    if (!prisma || !TEST_DB_URL) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const restored = await createUnclaimedEnvelope(repo, "legacy-restored");
+    const active = await createUnclaimedEnvelope(repo, "legacy-active");
+    const pool = new Pool({ connectionString: TEST_DB_URL });
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query('ALTER TABLE "BankSessionExpiryEpisode" DROP CONSTRAINT "BankSessionExpiryEpisode_consumerAttempt_check", DROP COLUMN "consumerAttemptState", ADD CONSTRAINT "BankSessionExpiryEpisode_consumerClaimToken_check" CHECK ("consumerClaimToken" IS NULL OR "consumerClaimToken" ~ \'[^[:space:]]\')');
+      await client.query('UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = $1, "restoredAuditDeliveredAt" = NOW() WHERE "bankCode" = $2', ["legacy-restored-token", restored.bankCode]);
+      await client.query('UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = $1 WHERE "bankCode" = $2', ["legacy-active-token", active.bankCode]);
+      const migration = (await readFile(recoveryMigrationPath, "utf8")).replace(/^BEGIN;\s*/, "").replace(/\s*COMMIT;\s*$/, "");
+      await client.query(migration);
+      const rows = await client.query<{ bankCode: string; consumerClaimToken: string | null; consumerAttemptState: string | null }>('SELECT "bankCode", "consumerClaimToken", "consumerAttemptState" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = ANY($1)', [[restored.bankCode, active.bankCode]]);
+      expect(rows.rows).toEqual(expect.arrayContaining([
+        { bankCode: restored.bankCode, consumerClaimToken: null, consumerAttemptState: null },
+        { bankCode: active.bankCode, consumerClaimToken: "legacy-active-token", consumerAttemptState: "reserved" },
+      ]));
+    } finally { await client.query("ROLLBACK").catch(() => undefined); client.release(); await pool.end(); }
   });
 
   it("blocks a Prisma contender behind a direct pg exact winner and leaves one durable claim", async () => {
@@ -422,8 +458,8 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     try {
       // Mirror the repository CAS exactly; independent matrices pin every predicate.
       const winner = await holder.client.query(
-        'UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = $1 WHERE "bankCode" = $2 AND "expiredEventId" = $3 AND "runId" = $4 AND "publicationClaimToken" = $5 AND "publicationState" = $6 AND "restoredAuditDeliveredAt" IS NULL AND "consumerClaimToken" IS NULL RETURNING "bankCode"',
-        ["consumer-winner", envelope.bankCode, envelope.expiredEventId, envelope.runId, envelope.token, "published"],
+        'UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = $1, "consumerAttemptState" = $2 WHERE "bankCode" = $3 AND "expiredEventId" = $4 AND "runId" = $5 AND "publicationClaimToken" = $6 AND "publicationState" = $7 AND "restoredAuditDeliveredAt" IS NULL AND "consumerClaimToken" IS NULL AND "consumerAttemptState" IS NULL RETURNING "bankCode"',
+        ["consumer-winner", "reserved", envelope.bankCode, envelope.expiredEventId, envelope.runId, envelope.token, "published"],
       );
       expect(winner.rowCount).toBe(1);
       const contender = repo.claimConsumerAttempt(envelope, "consumer-contender");
@@ -436,6 +472,90 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
       await closePausedPostgresConnection(observer);
       await closePausedPostgresConnection(holder);
     }
+  });
+
+  it("enforces the consumer recovery tuple and independent transition predicates", async () => {
+    if (!prisma || !TEST_DB_URL) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, "recovery-matrix");
+    const pool = new Pool({ connectionString: TEST_DB_URL });
+    try {
+      await expect(pool.query('UPDATE "BankSessionExpiryEpisode" SET "consumerAttemptState" = $1 WHERE "bankCode" = $2', ["reserved", envelope.bankCode]))
+        .rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION });
+      await expect(repo.claimConsumerAttempt(envelope, "consumer-token")).resolves.toBe(true);
+      for (const staleEnvelope of [{ ...envelope, bankCode: "other-bank" }, { ...envelope, expiredEventId: "other-event" }, { ...envelope, runId: "other-run" }, { ...envelope, token: "wrong-token" }]) {
+        await expect(repo.markConsumerMutationStarted(staleEnvelope, "consumer-token")).resolves.toBe(false);
+      }
+      await expect(repo.markConsumerMutationStarted(envelope, "wrong-owner")).resolves.toBe(false);
+      await expect(repo.markConsumerManualRecoveryRequired(envelope, "consumer-token")).resolves.toBe(false);
+      await prisma.$executeRaw`UPDATE "BankSessionExpiryEpisode" SET "publicationState" = 'publishing' WHERE "bankCode" = ${envelope.bankCode}`;
+      await expect(repo.markConsumerMutationStarted(envelope, "consumer-token")).resolves.toBe(false);
+      await prisma.$executeRaw`UPDATE "BankSessionExpiryEpisode" SET "publicationState" = 'published' WHERE "bankCode" = ${envelope.bankCode}`;
+      await expect(repo.markConsumerMutationStarted(envelope, "consumer-token")).resolves.toBe(true);
+      await expect(repo.markConsumerManualRecoveryRequired(envelope, "wrong-owner")).resolves.toBe(false);
+      await expect(repo.markConsumerManualRecoveryRequired(envelope, "consumer-token")).resolves.toBe(true);
+      await expect(repo.markConsumerManualRecoveryResolved(envelope, "consumer-token")).resolves.toBe(true);
+      await expect(repo.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ consumerAttemptState: "resolved", consumerClaimToken: "consumer-token" });
+      for (const token of ["", " ", "\t", "\n"]) {
+        await expect(repo.markConsumerMutationStarted(envelope, token)).rejects.toThrow("Consumer claim token must be nonblank");
+        await expect(repo.markConsumerManualRecoveryRequired(envelope, token)).rejects.toThrow("Consumer claim token must be nonblank");
+        await expect(repo.markConsumerManualRecoveryResolved(envelope, token)).rejects.toThrow("Consumer claim token must be nonblank");
+      }
+      await expect(repo.markConsumerMutationStarted(envelope, "consumer-token")).resolves.toBe(false);
+      await expect(repo.markConsumerManualRecoveryRequired(envelope, "consumer-token")).resolves.toBe(false);
+      await expect(repo.markConsumerManualRecoveryResolved(envelope, "consumer-token")).resolves.toBe(false);
+      await expect(repo.close(envelope)).resolves.toBe("closed");
+    } finally { await pool.end(); }
+  });
+
+  it("linearizes restoration against reserved and mutation-started consumer transitions", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const reserved = await publishEnvelope(repo, "recovery-reserved-race");
+    await repo.claimConsumerAttempt(reserved, "reserved-token");
+    const reservedHolder = await openPausedPostgresConnection();
+    const reservedObserver = await openPausedPostgresConnection();
+    try {
+      await reservedHolder.client.query('SELECT "bankCode" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1 FOR UPDATE', [reserved.bankCode]);
+      const restoration = repo.markAuditDelivered(reserved, "restored");
+      expect(await waitForLockWait(reservedObserver, reservedHolder.pid)).not.toBe(reservedHolder.pid);
+      const contender = repo.markConsumerMutationStarted(reserved, "reserved-token");
+      await reservedHolder.client.query("COMMIT");
+      await expect(restoration).resolves.toBe(true);
+      await expect(contender).resolves.toBe(false);
+      await expect(repo.findByBankCode(reserved.bankCode)).resolves.toMatchObject({ consumerClaimToken: null, consumerAttemptState: null });
+      await expect(repo.close(reserved)).resolves.toBe("closed");
+    } finally { await closePausedPostgresConnection(reservedObserver); await closePausedPostgresConnection(reservedHolder); }
+
+    const started = await publishEnvelope(repo, "recovery-started-race");
+    await repo.claimConsumerAttempt(started, "started-token");
+    const startedHolder = await openPausedPostgresConnection();
+    const startedObserver = await openPausedPostgresConnection();
+    try {
+      await startedHolder.client.query('SELECT "bankCode" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1 FOR UPDATE', [started.bankCode]);
+      const mutationStarted = repo.markConsumerMutationStarted(started, "started-token");
+      expect(await waitForLockWait(startedObserver, startedHolder.pid)).not.toBe(startedHolder.pid);
+      const restoration = repo.markAuditDelivered(started, "restored");
+      await startedHolder.client.query("COMMIT");
+      await expect(mutationStarted).resolves.toBe(true);
+      await expect(restoration).resolves.toBe(true);
+      await expect(repo.close(started)).resolves.toBe("retained_for_recovery");
+      await expect(repo.findByBankCode(started.bankCode)).resolves.toMatchObject({ consumerClaimToken: "started-token", consumerAttemptState: "mutation_started" });
+    } finally { await closePausedPostgresConnection(startedObserver); await closePausedPostgresConnection(startedHolder); }
+  });
+
+  it("retains restored manual recovery evidence before resolving and closing", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, "restored-recovery");
+    await expect(repo.claimConsumerAttempt(envelope, "recovery-token")).resolves.toBe(true);
+    await expect(repo.markConsumerMutationStarted(envelope, "recovery-token")).resolves.toBe(true);
+    await expect(repo.markAuditDelivered(envelope, "restored")).resolves.toBe(true);
+    await expect(repo.markConsumerManualRecoveryRequired(envelope, "recovery-token")).resolves.toBe(true);
+    await expect(repo.close(envelope)).resolves.toBe("retained_for_recovery");
+    await expect(repo.markConsumerManualRecoveryResolved(envelope, "recovery-token")).resolves.toBe(true);
+    await expect(repo.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ restoredAuditDelivered: true, consumerClaimToken: "recovery-token", consumerAttemptState: "resolved" });
+    await expect(repo.close(envelope)).resolves.toBe("closed");
   });
 
 });

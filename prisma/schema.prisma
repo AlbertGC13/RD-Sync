@@ -179,6 +179,7 @@ model BankSessionExpiryEpisode {
   publicationClaimToken        String?
   publicationFailureReportedAt DateTime?
   consumerClaimToken           String?
+  consumerAttemptState         String?
   createdAt                    DateTime @default(now())
   updatedAt                    DateTime @updatedAt
 }
