@@ -28,6 +28,7 @@ import { PrismaTransactionRepository } from "./prisma-transaction-repository";
 import { PrismaScrapeRunRepository } from "./prisma-scrape-run-repository";
 import { PrismaAuditSink } from "./prisma-audit-sink";
 import { PrismaBankSessionExpiryEpisodeRepository } from "./prisma-bank-session-expiry-episode-repository";
+import { createSetAutoLoginEnabledAndAudit } from "../../app/api/bank-credentials/[bankCode]/auto-login/defaults";
 import { PUBLICATION_CLAIM_TIMEOUT_MS, publishExpiryEpisode, type ExpiryPublicationPublisher } from "../bank-sessions/expiry-episodes";
 import { createBankSessionMonitor } from "../bank-sessions";
 import { InMemoryAuditSink } from "../audit";
@@ -558,6 +559,26 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     await expect(repo.close(envelope)).resolves.toBe("closed");
   });
 
+});
+
+describe.skipIf(!hasTestDb)("Prisma atomic auto-login contract (requires RD_SYNC_TEST_DATABASE_URL)", () => {
+  beforeEach(truncateTables);
+  afterEach(truncateTables);
+
+  it("rolls back the config write when its in-transaction audit writer fails", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const bankCode = "atomic-auto-login-contract-rollback";
+    await prisma.bank.create({ data: { code: bankCode, name: "Atomic Auto Login Contract" } });
+    await prisma.bankAutoLoginConfig.create({ data: { bankCode, autoLoginEnabled: false } });
+    const command = createSetAutoLoginEnabledAndAudit({
+      prisma,
+      auditWriter: async () => { throw new Error("audit write failed"); },
+    });
+
+    await expect(command({ bankCode, enabled: true, adminId: "admin-atomic-contract" })).rejects.toThrow("audit write failed");
+    await expect(prisma.bankAutoLoginConfig.findUnique({ where: { bankCode } })).resolves.toMatchObject({ autoLoginEnabled: false });
+    await expect(prisma.auditEvent.count({ where: { targetId: bankCode } })).resolves.toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
