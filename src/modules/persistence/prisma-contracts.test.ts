@@ -28,6 +28,8 @@ import { PrismaTransactionRepository } from "./prisma-transaction-repository";
 import { PrismaScrapeRunRepository } from "./prisma-scrape-run-repository";
 import { PrismaAuditSink } from "./prisma-audit-sink";
 import { PrismaBankSessionExpiryEpisodeRepository } from "./prisma-bank-session-expiry-episode-repository";
+import { PrismaManualRecoveryResolutionAuditOutboxRepository } from "./prisma-manual-recovery-resolution-audit-outbox-repository";
+import { deliverManualRecoveryResolutionAudit } from "../bank-sessions/manual-recovery-resolution-audit-delivery";
 import { createSetAutoLoginEnabledAndAudit } from "../../app/api/bank-credentials/[bankCode]/auto-login/defaults";
 import { PUBLICATION_CLAIM_TIMEOUT_MS, publishExpiryEpisode, type ExpiryPublicationPublisher } from "../bank-sessions/expiry-episodes";
 import { createBankSessionMonitor } from "../bank-sessions";
@@ -51,6 +53,7 @@ const POSTGRES_CHECK_VIOLATION = "23514";
 const recoveryMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260718014500_add_expiry_consumer_recovery_state/migration.sql", import.meta.url));
 const schemaPath = fileURLToPath(new URL("../../../prisma/schema.prisma", import.meta.url));
 const manualRecoveryResolutionMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260728120000_add_manual_recovery_resolution_outbox/migration.sql", import.meta.url));
+const auditDeliveryMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260728190000_add_manual_recovery_audit_delivery_state/migration.sql", import.meta.url));
 
 // ---------------------------------------------------------------------------
 // Shared test client — one pool for the entire test file.
@@ -650,7 +653,7 @@ describe.skipIf(!hasTestDb)("Prisma manual recovery resolution schema (requires 
       await expect(pool.query('INSERT INTO "ManualRecoveryResolution" ("id", "expiredEventId", "bankCode", "runId", "outcome", "reason", "operatorId") VALUES ($1, $2, $3, $4, $5, $6, $7)', ["blank-operator-id", "blank-operator", "blank-bank", "blank-run", "safe_to_retry", "verified_no_mutation", " \t "]))
         .rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolution_operatorId_check" });
       await expect(pool.query('UPDATE "ManualRecoveryResolutionAuditOutbox" SET "state" = $1 WHERE "resolutionId" = $2', ["published", resolution.id]))
-        .rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolutionAuditOutbox_state_check" });
+        .rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolutionAuditOutbox_deliveryState_check" });
       await expect(pool.query('INSERT INTO "ManualRecoveryResolution" ("id", "expiredEventId", "bankCode", "runId", "outcome", "reason", "operatorId") VALUES ($1, $2, $3, $4, $5, $6, $7)', ["duplicate-resolution-id", "duplicate-resolution-event", "resolution-bank", "resolution-run", "safe_to_retry", "verified_no_mutation", "admin-resolution"]))
         .rejects.toMatchObject({ code: "23505", constraint: "ManualRecoveryResolution_bankCode_runId_key" });
       await expect(pool.query('INSERT INTO "ManualRecoveryResolutionAuditOutbox" ("id", "resolutionId") VALUES ($1, $2)', ["duplicate-outbox-id", resolution.id]))
@@ -816,4 +819,45 @@ it("Prisma contract tests are skipped when RD_SYNC_TEST_DATABASE_URL is unset", 
   } else {
     expect(TEST_DB_URL).toBeDefined();
   }
+});
+
+describe.skipIf(!hasTestDb)("Prisma manual recovery audit delivery (requires RD_SYNC_TEST_DATABASE_URL)", () => {
+  beforeEach(truncateTables); afterEach(truncateTables);
+  async function seed(suffix: string) {
+    if (!prisma) throw new Error("prisma not initialized");
+    const resolution = await prisma.manualRecoveryResolution.create({ data: { id: `resolution-${suffix}`, expiredEventId: `event-${suffix}`, bankCode: `bank-${suffix}`, runId: `run-${suffix}`, outcome: "resolved_no_retry", reason: "closed_without_retry", operatorId: "admin-audit" } });
+    return prisma.manualRecoveryResolutionAuditOutbox.create({ data: { id: `outbox-${suffix}`, resolutionId: resolution.id } });
+  }
+
+  it("declares atomic delivery state constraints", async () => {
+    if (!prisma || !TEST_DB_URL) throw new Error("prisma not initialized");
+    const outbox = await seed("tuple"); const pool = new Pool({ connectionString: TEST_DB_URL });
+    try {
+      for (const tuple of [["pending", "owner", null, null], ["delivering", null, new Date(), null], ["delivered", null, null, null], ["delivered", "owner", null, new Date()]] as const)
+        await expect(pool.query('UPDATE "ManualRecoveryResolutionAuditOutbox" SET "state" = $1, "leaseOwner" = $2, "leaseExpiresAt" = $3, "deliveredAt" = $4 WHERE "id" = $5', [...tuple, outbox.id])).rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolutionAuditOutbox_deliveryState_check" });
+      await expect(pool.query('UPDATE "ManualRecoveryResolutionAuditOutbox" SET "state" = $1, "leaseOwner" = $2, "leaseExpiresAt" = NOW(), "deliveredAt" = NULL WHERE "id" = $3', ["delivering", "owner", outbox.id])).resolves.toMatchObject({ rowCount: 1 });
+      const migration = await readFile(auditDeliveryMigrationPath, "utf8");
+      expect(migration.trimStart()).toMatch(/^BEGIN;/); expect(migration.trimEnd()).toMatch(/COMMIT;$/); expect(migration).toContain("ManualRecoveryResolutionAuditOutbox_deliveryState_check");
+    } finally { await pool.end(); }
+  });
+
+  it("elects one overlapping claimant and protects a new owner after lease expiry", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const outbox = await seed("race"); const first = new PrismaManualRecoveryResolutionAuditOutboxRepository(prisma); const second = new PrismaManualRecoveryResolutionAuditOutboxRepository(prisma);
+    expect((await Promise.all([first.claim(outbox.id, "owner-a", 10000), second.claim(outbox.id, "owner-b", 10000)])).filter(Boolean)).toHaveLength(1);
+    await prisma.$executeRaw`UPDATE "ManualRecoveryResolutionAuditOutbox" SET "leaseExpiresAt" = NOW() - INTERVAL '1 millisecond' WHERE "id" = ${outbox.id}`;
+    await expect(second.claim(outbox.id, "owner-b", 10000)).resolves.toBe(true);
+    await expect(first.markDelivered(outbox.id, "owner-a")).resolves.toBe(false); await expect(first.releaseClaim(outbox.id, "owner-a")).resolves.toBe(false);
+    await expect(second.markDelivered(outbox.id, "owner-b")).resolves.toBe(true);
+  });
+
+  it("recovers acknowledgement loss with one AuditEvent after episode deletion", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const outbox = await seed("ack"); await prisma.bankSessionExpiryEpisode.create({ data: { bankCode: "bank-ack", expiredEventId: "event-ack", runId: "run-ack" } }); await prisma.bankSessionExpiryEpisode.delete({ where: { bankCode: "bank-ack" } });
+    const repo = new PrismaManualRecoveryResolutionAuditOutboxRepository(prisma); const sink = new PrismaAuditSink();
+    await expect(deliverManualRecoveryResolutionAudit({ findClaimable: () => repo.findClaimable(), claim: (id, owner, lease) => repo.claim(id, owner, lease), markDelivered: async () => false, releaseClaim: (id, owner) => repo.releaseClaim(id, owner), inspect: (id) => repo.inspect(id) }, sink, "owner-a", 10000)).rejects.toThrow("acknowledgement lost");
+    await prisma.$executeRaw`UPDATE "ManualRecoveryResolutionAuditOutbox" SET "leaseExpiresAt" = NOW() - INTERVAL '1 millisecond' WHERE "id" = ${outbox.id}`;
+    await expect(deliverManualRecoveryResolutionAudit(repo, sink, "owner-b", 10000)).resolves.toBe(true);
+    await expect(prisma.auditEvent.count({ where: { id: "bank-autologin-manual-recovery-resolved:resolution-ack" } })).resolves.toBe(1);
+  });
 });

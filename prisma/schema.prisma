@@ -205,6 +205,9 @@ model ManualRecoveryResolutionAuditOutbox {
   resolutionId String                   @unique
   resolution   ManualRecoveryResolution @relation(fields: [resolutionId], references: [id], onDelete: Restrict)
   state        String                   @default("pending")
+  leaseOwner   String?
+  leaseExpiresAt DateTime?
+  deliveredAt  DateTime?
   createdAt    DateTime                 @default(now())
 }
 
