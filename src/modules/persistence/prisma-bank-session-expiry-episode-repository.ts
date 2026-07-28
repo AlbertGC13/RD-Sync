@@ -1,5 +1,6 @@
-import type { PrismaClient } from "../../generated/prisma/client";
+import type { Prisma, PrismaClient } from "../../generated/prisma/client";
 import type { ManualRecoveryResolutionCommand, ManualRecoveryResolutionResult } from "../bank-sessions/manual-recovery-resolution";
+import { createManualRecoveryReplayAuthorizedAudit, type ManualRecoveryReplayAuthorizationCandidate, type ManualRecoveryReplayAuthorizationRepository, type ManualRecoveryReplayAuthorizationResult } from "../bank-sessions/manual-recovery-replay-authorization";
 import { PUBLICATION_CLAIM_TIMEOUT_MS, assertConsumerClaimToken, consumerAttemptTransitions, parseConsumerAttemptState, parseEpisodePublicationState, type ConsumerAttemptTransition } from "../bank-sessions/expiry-episodes";
 import type {
   BankSessionExpiryEpisode,
@@ -41,9 +42,54 @@ function mapRow(row: EpisodeRow): BankSessionExpiryEpisode {
   };
 }
 
-export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpiryEpisodeRepository {
+export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpiryEpisodeRepository, ManualRecoveryReplayAuthorizationRepository {
   constructor(private readonly prisma: PrismaClient) {}
 
+  async findManualRecoveryReplayBankCode(resolutionId: string): Promise<string | null> {
+    const rows = await this.prisma.$queryRaw<{ bankCode: string }[]>`SELECT "bankCode" FROM "ManualRecoveryResolution" WHERE "id" = ${resolutionId}`;
+    return rows[0]?.bankCode ?? null;
+  }
+
+  async authorizeManualRecoveryReplay(candidate: ManualRecoveryReplayAuthorizationCandidate, retry = true): Promise<ManualRecoveryReplayAuthorizationResult> {
+    type Resolution = { id: string; bankCode: string; expiredEventId: string; runId: string; operatorId: string; outcome: string; reason: string; replayExpiredEventId: string | null; replayRunId: string | null; replayAuthorizedAt: Date | null; state: string; deliveredAt: Date | null };
+    const result = (status: "authorized" | "already_authorized", resolution: Resolution): ManualRecoveryReplayAuthorizationResult => {
+      const audit = createManualRecoveryReplayAuthorizedAudit(resolution.id, resolution.operatorId, resolution.replayExpiredEventId!, resolution.replayRunId!, resolution.replayAuthorizedAt!);
+      return { status, replayExpiredEventId: resolution.replayExpiredEventId!, replayRunId: resolution.replayRunId!, audit };
+    };
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRaw<Resolution[]>`
+          SELECT r."id", r."bankCode", r."expiredEventId", r."runId", r."operatorId", r."outcome", r."reason", r."replayExpiredEventId", r."replayRunId", r."replayAuthorizedAt", o."state", o."deliveredAt"
+          FROM "ManualRecoveryResolution" r JOIN "ManualRecoveryResolutionAuditOutbox" o ON o."resolutionId" = r."id" WHERE r."id" = ${candidate.resolutionId} FOR UPDATE OF r, o
+        `;
+        const resolution = rows[0];
+        if (!resolution || resolution.outcome !== "safe_to_retry" || resolution.reason !== "verified_no_mutation" || resolution.state !== "delivered" || !resolution.deliveredAt) return { status: "ineligible" };
+        if (resolution.replayExpiredEventId && resolution.replayRunId && resolution.replayAuthorizedAt) return result("already_authorized", resolution);
+        if (!candidate.replayExpiredEventId.trim() || !candidate.replayRunId.trim() || candidate.replayExpiredEventId === candidate.replayRunId || candidate.replayExpiredEventId === resolution.expiredEventId || candidate.replayRunId === resolution.runId) throw new Error("Replay IDs must be nonblank and different");
+        const conflicts = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "ManualRecoveryResolution" WHERE "expiredEventId" = ${candidate.replayExpiredEventId} OR "runId" = ${candidate.replayRunId} OR "replayExpiredEventId" = ${candidate.replayExpiredEventId} OR "replayRunId" = ${candidate.replayRunId} FOR UPDATE`;
+        if (conflicts[0]) throw new Error("Replay IDs conflict with durable identity");
+        const episodes = await tx.$queryRaw<EpisodeRow[]>`SELECT "bankCode", "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "consumerAttemptState", "updatedAt" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = ${resolution.bankCode} FOR UPDATE`;
+        const episode = episodes[0];
+        if (episode && (episode.expiredEventId !== resolution.expiredEventId || episode.runId !== resolution.runId || episode.publicationState !== "published" || episode.consumerAttemptState !== "resolved")) return { status: "ineligible" };
+        const updated = await tx.$queryRaw<{ id: string }[]>`UPDATE "ManualRecoveryResolution" r SET "replayExpiredEventId" = ${candidate.replayExpiredEventId}, "replayRunId" = ${candidate.replayRunId}, "replayAuthorizedAt" = ${candidate.authorizedAt} FROM "ManualRecoveryResolutionAuditOutbox" o WHERE r."id" = ${resolution.id} AND o."resolutionId" = r."id" AND r."outcome" = 'safe_to_retry' AND r."reason" = 'verified_no_mutation' AND o."state" = 'delivered' AND o."deliveredAt" IS NOT NULL AND r."replayExpiredEventId" IS NULL AND r."replayRunId" IS NULL AND r."replayAuthorizedAt" IS NULL RETURNING r."id"`;
+        if (!updated[0]) throw new Error("Replay authorization CAS lost");
+        if (episode && await tx.$executeRaw`DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = ${resolution.bankCode} AND "expiredEventId" = ${resolution.expiredEventId} AND "runId" = ${resolution.runId} AND "publicationState" = 'published' AND "consumerAttemptState" = 'resolved'` !== 1) throw new Error("Replay authorization episode CAS lost");
+        await tx.$executeRaw`INSERT INTO "BankSessionExpiryEpisode" ("bankCode", "expiredEventId", "runId", "updatedAt") VALUES (${resolution.bankCode}, ${candidate.replayExpiredEventId}, ${candidate.replayRunId}, NOW())`;
+        const authorized = { ...resolution, replayExpiredEventId: candidate.replayExpiredEventId, replayRunId: candidate.replayRunId, replayAuthorizedAt: candidate.authorizedAt };
+        const audit = result("authorized", authorized).audit!;
+        await tx.auditEvent.create({ data: { ...audit, metadata: (audit.metadata as Prisma.InputJsonValue | null) ?? undefined } });
+        return { status: "authorized", replayExpiredEventId: candidate.replayExpiredEventId, replayRunId: candidate.replayRunId, audit };
+      }, { isolationLevel: "Serializable" });
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error ? (error as { code?: string }).code : undefined;
+      const serializationFailure = code === "P2034" || code === "40001" || /40001|serialize access/.test(String(error));
+      if (!["P2002", "23505"].includes(code ?? "") && !serializationFailure) throw error;
+      const rows = await this.prisma.$queryRaw<Resolution[]>`SELECT r."id", r."bankCode", r."expiredEventId", r."runId", r."operatorId", r."outcome", r."reason", r."replayExpiredEventId", r."replayRunId", r."replayAuthorizedAt", o."state", o."deliveredAt" FROM "ManualRecoveryResolution" r JOIN "ManualRecoveryResolutionAuditOutbox" o ON o."resolutionId" = r."id" WHERE r."id" = ${candidate.resolutionId}`;
+      if (rows[0]?.replayExpiredEventId && rows[0].replayRunId && rows[0].replayAuthorizedAt) return result("already_authorized", rows[0]);
+      if (serializationFailure && retry) return this.authorizeManualRecoveryReplay(candidate, false);
+      throw error;
+    }
+  }
   async getOrCreate(input: CreateBankSessionExpiryEpisodeInput): Promise<GetOrCreateBankSessionExpiryEpisodeResult> {
     const inserted = await this.prisma.$queryRaw<EpisodeRow[]>`
       INSERT INTO "BankSessionExpiryEpisode" ("bankCode", "expiredEventId", "runId", "updatedAt")
