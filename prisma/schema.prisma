@@ -194,6 +194,9 @@ model ManualRecoveryResolution {
   reason         String
   operatorId     String
   resolvedAt     DateTime                             @default(now())
+  replayExpiredEventId String?                        @unique
+  replayRunId          String?                        @unique
+  replayAuthorizedAt   DateTime?
   auditOutbox    ManualRecoveryResolutionAuditOutbox?
 
   @@unique([bankCode, runId])

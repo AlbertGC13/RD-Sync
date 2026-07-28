@@ -54,6 +54,7 @@ const recoveryMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/
 const schemaPath = fileURLToPath(new URL("../../../prisma/schema.prisma", import.meta.url));
 const manualRecoveryResolutionMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260728120000_add_manual_recovery_resolution_outbox/migration.sql", import.meta.url));
 const auditDeliveryMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260728190000_add_manual_recovery_audit_delivery_state/migration.sql", import.meta.url));
+const replayAuthorizationMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260728213000_authorize_manual_recovery_replay/migration.sql", import.meta.url));
 
 // ---------------------------------------------------------------------------
 // Shared test client — one pool for the entire test file.
@@ -627,6 +628,21 @@ describe("Manual recovery resolution schema contract", () => {
     expect(migration).not.toContain('REFERENCES "BankSessionExpiryEpisode"');
     expect(persistedContract).not.toMatch(/claimToken|publicationToken|credential|ciphertext|secret|errorMessage|errorDetail/i);
   });
+
+  it("declares replay authorization identity, fail-closed tuple constraints, and partial uniqueness", async () => {
+    const [schema, migration] = await Promise.all([readFile(schemaPath, "utf8"), readFile(replayAuthorizationMigrationPath, "utf8")]);
+    expect(schema).toMatch(/replayExpiredEventId\s+String\?\s+@unique/);
+    expect(schema).toMatch(/replayRunId\s+String\?\s+@unique/);
+    expect(schema).toMatch(/replayAuthorizedAt\s+DateTime\?/);
+    expect(migration).toContain('CONSTRAINT "ManualRecoveryResolution_replayTuple_check" CHECK');
+    expect(migration).toContain('CONSTRAINT "ManualRecoveryResolution_replayDecision_check" CHECK');
+    expect(migration).toContain('CONSTRAINT "ManualRecoveryResolution_replayId_check" CHECK');
+    expect(migration).toContain('CREATE UNIQUE INDEX "ManualRecoveryResolution_replayExpiredEventId_key"');
+    expect(migration).toContain('CREATE UNIQUE INDEX "ManualRecoveryResolution_replayRunId_key"');
+    expect(migration).not.toMatch(/claimToken|publicationToken|credential|ciphertext|secret|errorMessage|errorDetail/i);
+    expect(migration.trimStart()).toMatch(/^BEGIN;/);
+    expect(migration.trimEnd()).toMatch(/COMMIT;$/);
+  });
 });
 
 describe.skipIf(!hasTestDb)("Prisma manual recovery resolution schema (requires RD_SYNC_TEST_DATABASE_URL)", () => {
@@ -675,6 +691,25 @@ describe.skipIf(!hasTestDb)("Prisma manual recovery resolution schema (requires 
       await expect(repo.close(episode)).resolves.toBe("closed");
       await expect(pool.query('SELECT COUNT(*)::int AS "count" FROM "ManualRecoveryResolutionAuditOutbox" WHERE "resolutionId" = $1', [resolution.rows[0]!.id]))
         .resolves.toMatchObject({ rows: [{ count: 1 }] });
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it("enforces replay tuples, safe decisions, nonblank distinct IDs, and partial uniqueness", async () => {
+    if (!TEST_DB_URL) throw new Error("RD_SYNC_TEST_DATABASE_URL is required");
+    const pool = new Pool({ connectionString: TEST_DB_URL });
+    const insert = (id: string, event: string, run: string, replayEvent: string | null, replayRun: string | null, replayAt: Date | null, outcome = "safe_to_retry", reason = "verified_no_mutation") =>
+      pool.query('INSERT INTO "ManualRecoveryResolution" ("id", "expiredEventId", "bankCode", "runId", "outcome", "reason", "operatorId", "replayExpiredEventId", "replayRunId", "replayAuthorizedAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)', [id, event, `bank-${id}`, run, outcome, reason, "admin-replay", replayEvent, replayRun, replayAt]);
+    const authorizedAt = new Date("2026-07-28T21:30:00.000Z");
+    try {
+      await expect(insert("replay-valid", "original-event", "original-run", "replay-event", "replay-run", authorizedAt)).resolves.toMatchObject({ rowCount: 1 });
+      await expect(insert("replay-partial", "event-2", "run-2", "replay-event-2", null, null)).rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolution_replayTuple_check" });
+      await expect(insert("replay-unsafe", "event-3", "run-3", "replay-event-3", "replay-run-3", authorizedAt, "resolved_no_retry", "closed_without_retry")).rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolution_replayDecision_check" });
+      await expect(insert("replay-blank", "event-4", "run-4", " ", "replay-run-4", authorizedAt)).rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolution_replayId_check" });
+      await expect(insert("replay-equal", "event-5", "run-5", "event-5", "run-5", authorizedAt)).rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolution_replayId_check" });
+      await expect(insert("replay-event-conflict", "event-6", "run-6", "replay-event", "replay-run-6", authorizedAt)).rejects.toMatchObject({ code: "23505", constraint: "ManualRecoveryResolution_replayExpiredEventId_key" });
+      await expect(insert("replay-run-conflict", "event-7", "run-7", "replay-event-7", "replay-run", authorizedAt)).rejects.toMatchObject({ code: "23505", constraint: "ManualRecoveryResolution_replayRunId_key" });
     } finally {
       await pool.end();
     }
