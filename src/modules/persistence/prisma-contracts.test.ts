@@ -35,6 +35,7 @@ import { PUBLICATION_CLAIM_TIMEOUT_MS, publishExpiryEpisode, type ExpiryPublicat
 import { createBankSessionMonitor } from "../bank-sessions";
 import { createManualRecoveryReplayAuthorization } from "../bank-sessions/manual-recovery-replay-authorization";
 import { InMemoryAuditSink } from "../audit";
+import { reserveExpiryPublicationConsumerClaim } from "../bank-sessions/expiry-publication-consumer";
 
 function createPublisherStub(overrides: Partial<ExpiryPublicationPublisher> = {}): ExpiryPublicationPublisher {
   return { schedule: async () => undefined, observe: async () => undefined, ...overrides };
@@ -483,6 +484,34 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
       await closePausedPostgresConnection(observer);
       await closePausedPostgresConnection(holder);
     }
+  });
+
+  it("linearizes deterministic consumer claim acquisition, crash resume, and mutation no-resume", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const first = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const second = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(first, "resumable-race");
+    const gate = { check: async () => "eligible" as const };
+    const results = await Promise.all([
+      reserveExpiryPublicationConsumerClaim(first, envelope, gate),
+      reserveExpiryPublicationConsumerClaim(second, envelope, gate),
+    ]);
+    expect(results.map(({ status }) => status).sort()).toEqual(["claim_acquired", "claim_resumed"]);
+    await expect(reserveExpiryPublicationConsumerClaim(first, envelope, gate)).resolves.toEqual({ status: "claim_resumed" });
+    const claim = (await first.findByBankCode(envelope.bankCode))!.consumerClaimToken!;
+    await first.markConsumerMutationStarted(envelope, claim);
+    await expect(reserveExpiryPublicationConsumerClaim(second, envelope, gate)).resolves.toEqual({ status: "ignored_already_claimed" });
+  });
+  it("rejects stale, restored, and invalid consumer claim deliveries without writes", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, "resumable-stale");
+    const gate = { check: vi.fn().mockResolvedValue("eligible" as const) };
+    for (const stale of [{ ...envelope, token: "wrong" }, { ...envelope, runId: "wrong" }]) await expect(reserveExpiryPublicationConsumerClaim(repo, stale, gate)).resolves.toEqual({ status: "ignored_stale_envelope" });
+    await repo.markAuditDelivered(envelope, "restored");
+    await expect(reserveExpiryPublicationConsumerClaim(repo, envelope, gate)).resolves.toEqual({ status: "ignored_stale_envelope" });
+    await expect(repo.claimConsumerAttempt(envelope, " ")).rejects.toThrow("Consumer claim token must be nonblank");
+    expect(gate.check).not.toHaveBeenCalled();
   });
 
   it("enforces the consumer recovery tuple and independent transition predicates", async () => {

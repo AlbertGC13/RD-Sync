@@ -207,6 +207,11 @@ export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpi
   async markConsumerManualRecoveryRequired(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
     return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.manualRecoveryRequired);
   }
+  async markConsumerResolved(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
+    assertConsumerClaimToken(consumerClaimToken);
+    const updated = await this.prisma.$queryRaw<{ bankCode: string }[]>`UPDATE "BankSessionExpiryEpisode" SET "consumerAttemptState" = 'resolved', "updatedAt" = NOW() WHERE "bankCode" = ${envelope.bankCode} AND "expiredEventId" = ${envelope.expiredEventId} AND "runId" = ${envelope.runId} AND "publicationState" = 'published' AND "publicationClaimToken" = ${envelope.token} AND "consumerClaimToken" = ${consumerClaimToken} AND ("consumerAttemptState" = 'mutation_started' OR ("consumerAttemptState" = 'reserved' AND "restoredAuditDeliveredAt" IS NULL)) RETURNING "bankCode"`;
+    return updated.length === 1;
+  }
   async resolveConsumerManualRecovery(
     envelope: ExpiryPublicationEnvelope,
     consumerClaimToken: string,
