@@ -499,17 +499,14 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
       await expect(repo.markConsumerMutationStarted(envelope, "consumer-token")).resolves.toBe(true);
       await expect(repo.markConsumerManualRecoveryRequired(envelope, "wrong-owner")).resolves.toBe(false);
       await expect(repo.markConsumerManualRecoveryRequired(envelope, "consumer-token")).resolves.toBe(true);
-      await expect(repo.markConsumerManualRecoveryResolved(envelope, "consumer-token")).resolves.toBe(true);
-      await expect(repo.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ consumerAttemptState: "resolved", consumerClaimToken: "consumer-token" });
+      await expect(repo.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ consumerAttemptState: "manual_recovery_required", consumerClaimToken: "consumer-token" });
       for (const token of ["", " ", "\t", "\n"]) {
         await expect(repo.markConsumerMutationStarted(envelope, token)).rejects.toThrow("Consumer claim token must be nonblank");
         await expect(repo.markConsumerManualRecoveryRequired(envelope, token)).rejects.toThrow("Consumer claim token must be nonblank");
-        await expect(repo.markConsumerManualRecoveryResolved(envelope, token)).rejects.toThrow("Consumer claim token must be nonblank");
       }
       await expect(repo.markConsumerMutationStarted(envelope, "consumer-token")).resolves.toBe(false);
       await expect(repo.markConsumerManualRecoveryRequired(envelope, "consumer-token")).resolves.toBe(false);
-      await expect(repo.markConsumerManualRecoveryResolved(envelope, "consumer-token")).resolves.toBe(false);
-      await expect(repo.close(envelope)).resolves.toBe("closed");
+      await expect(repo.close(envelope)).resolves.toBe("retained_for_recovery");
     } finally { await pool.end(); }
   });
 
@@ -549,7 +546,7 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     } finally { await closePausedPostgresConnection(startedObserver); await closePausedPostgresConnection(startedHolder); }
   });
 
-  it("retains restored manual recovery evidence before resolving and closing", async () => {
+  it("atomically resolves exact manual recovery ownership and preserves durable records after close", async () => {
     if (!prisma) throw new Error("prisma not initialized");
     const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
     const envelope = await publishEnvelope(repo, "restored-recovery");
@@ -558,9 +555,40 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     await expect(repo.markAuditDelivered(envelope, "restored")).resolves.toBe(true);
     await expect(repo.markConsumerManualRecoveryRequired(envelope, "recovery-token")).resolves.toBe(true);
     await expect(repo.close(envelope)).resolves.toBe("retained_for_recovery");
-    await expect(repo.markConsumerManualRecoveryResolved(envelope, "recovery-token")).resolves.toBe(true);
+    const command = { operatorId: "admin-recovery", decision: { outcome: "resolved_no_retry", reason: "closed_without_retry" } } as const;
+    await expect(repo.resolveConsumerManualRecovery(envelope, "wrong-owner", command)).resolves.toBeNull();
+    const result = await repo.resolveConsumerManualRecovery(envelope, "recovery-token", command);
+    expect(result).toMatchObject({ bankCode: envelope.bankCode, decision: command.decision, operatorId: command.operatorId, resolvedAt: expect.any(Date) });
+    await expect(repo.resolveConsumerManualRecovery(envelope, "recovery-token", command)).resolves.toBeNull();
     await expect(repo.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ restoredAuditDelivered: true, consumerClaimToken: "recovery-token", consumerAttemptState: "resolved" });
     await expect(repo.close(envelope)).resolves.toBe("closed");
+    await expect(prisma.manualRecoveryResolution.count()).resolves.toBe(1);
+    await expect(prisma.manualRecoveryResolutionAuditOutbox.count({ where: { resolutionId: result!.id, state: "pending" } })).resolves.toBe(1);
+  });
+
+  it("rolls back resolution when PostgreSQL rejects the pending outbox and elects one concurrent winner", async () => {
+    if (!prisma || !TEST_DB_URL) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const command = { operatorId: "admin-atomic", decision: { outcome: "safe_to_retry", reason: "verified_no_mutation" } } as const;
+    const failed = await publishEnvelope(repo, "resolution-outbox-failure");
+    await repo.claimConsumerAttempt(failed, "consumer-token"); await repo.markConsumerMutationStarted(failed, "consumer-token"); await repo.markConsumerManualRecoveryRequired(failed, "consumer-token");
+    const pool = new Pool({ connectionString: TEST_DB_URL });
+    try {
+      await pool.query('CREATE FUNCTION "fail_manual_resolution_outbox"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION \'outbox failed\'; END; $$');
+      await pool.query('CREATE TRIGGER "fail_manual_resolution_outbox" BEFORE INSERT ON "ManualRecoveryResolutionAuditOutbox" FOR EACH ROW EXECUTE FUNCTION "fail_manual_resolution_outbox"()');
+      await expect(repo.resolveConsumerManualRecovery(failed, "consumer-token", command)).rejects.toThrow();
+      await expect(repo.findByBankCode(failed.bankCode)).resolves.toMatchObject({ consumerAttemptState: "manual_recovery_required" });
+      await expect(prisma.manualRecoveryResolution.count()).resolves.toBe(0);
+      await pool.query('DROP TRIGGER "fail_manual_resolution_outbox" ON "ManualRecoveryResolutionAuditOutbox"');
+      await pool.query('DROP FUNCTION "fail_manual_resolution_outbox"()');
+    } finally { await pool.end(); }
+
+    const envelope = await publishEnvelope(repo, "resolution-contenders");
+    await repo.claimConsumerAttempt(envelope, "consumer-token"); await repo.markConsumerMutationStarted(envelope, "consumer-token"); await repo.markConsumerManualRecoveryRequired(envelope, "consumer-token");
+    const results = await Promise.all([repo.resolveConsumerManualRecovery(envelope, "consumer-token", command), repo.resolveConsumerManualRecovery(envelope, "consumer-token", command)]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    await expect(prisma.manualRecoveryResolution.count()).resolves.toBe(1);
+    await expect(prisma.manualRecoveryResolutionAuditOutbox.count()).resolves.toBe(1);
   });
 
 });

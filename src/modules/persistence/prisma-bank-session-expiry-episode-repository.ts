@@ -1,4 +1,5 @@
 import type { PrismaClient } from "../../generated/prisma/client";
+import type { ManualRecoveryResolutionCommand, ManualRecoveryResolutionResult } from "../bank-sessions/manual-recovery-resolution";
 import { PUBLICATION_CLAIM_TIMEOUT_MS, assertConsumerClaimToken, consumerAttemptTransitions, parseConsumerAttemptState, parseEpisodePublicationState, type ConsumerAttemptTransition } from "../bank-sessions/expiry-episodes";
 import type {
   BankSessionExpiryEpisode,
@@ -132,8 +133,58 @@ export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpi
   async markConsumerManualRecoveryRequired(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
     return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.manualRecoveryRequired);
   }
-  async markConsumerManualRecoveryResolved(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
-    return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.manualRecoveryResolved);
+  async resolveConsumerManualRecovery(
+    envelope: ExpiryPublicationEnvelope,
+    consumerClaimToken: string,
+    command: ManualRecoveryResolutionCommand,
+  ): Promise<ManualRecoveryResolutionResult | null> {
+    assertConsumerClaimToken(consumerClaimToken);
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const claimed = await tx.$queryRaw<{ bankCode: string; expiredEventId: string; runId: string }[]>`
+          UPDATE "BankSessionExpiryEpisode"
+          SET "consumerAttemptState" = 'resolved', "updatedAt" = NOW()
+          WHERE "bankCode" = ${envelope.bankCode}
+            AND "expiredEventId" = ${envelope.expiredEventId}
+            AND "runId" = ${envelope.runId}
+            AND "publicationClaimToken" = ${envelope.token}
+            AND "publicationState" = 'published'
+            AND "consumerClaimToken" = ${consumerClaimToken}
+            AND "consumerAttemptState" = 'manual_recovery_required'
+          RETURNING "bankCode", "expiredEventId", "runId"
+        `;
+        if (!claimed[0]) return null;
+
+        const resolution = await tx.manualRecoveryResolution.create({
+          data: {
+            expiredEventId: claimed[0].expiredEventId,
+            bankCode: claimed[0].bankCode,
+            runId: claimed[0].runId,
+            outcome: command.decision.outcome,
+            reason: command.decision.reason,
+            operatorId: command.operatorId,
+          },
+        });
+        await tx.manualRecoveryResolutionAuditOutbox.create({ data: { resolutionId: resolution.id } });
+        return {
+          id: resolution.id,
+          bankCode: resolution.bankCode,
+          expiredEventId: resolution.expiredEventId,
+          runId: resolution.runId,
+          decision: command.decision,
+          operatorId: resolution.operatorId,
+          resolvedAt: resolution.resolvedAt,
+        };
+      });
+    } catch (error) {
+      if (
+        typeof error === "object"
+        && error !== null
+        && "code" in error
+        && ((error as { code?: string }).code === "P2002" || (error as { code?: string }).code === "23505")
+      ) return null;
+      throw error;
+    }
   }
   async isAuditDelivered(
     episode: Pick<BankSessionExpiryEpisode, "bankCode" | "runId">,

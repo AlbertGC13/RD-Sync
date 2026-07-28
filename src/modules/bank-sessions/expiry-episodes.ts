@@ -1,10 +1,11 @@
+import type { ManualRecoveryResolutionCommand, ManualRecoveryResolutionResult } from "./manual-recovery-resolution";
+
 export type SessionEpisodeAuditKind = "expired" | "restored";
 export type EpisodePublicationState = "pending" | "publishing" | "published" | "cancelled";
 export type ConsumerAttemptState = "reserved" | "mutation_started" | "manual_recovery_required" | "resolved";
 export const consumerAttemptTransitions = {
   mutationStarted: { from: "reserved", to: "mutation_started", requiresUnrestored: true },
   manualRecoveryRequired: { from: "mutation_started", to: "manual_recovery_required", requiresUnrestored: false },
-  manualRecoveryResolved: { from: "manual_recovery_required", to: "resolved", requiresUnrestored: false },
 } as const;
 export type ConsumerAttemptTransition = (typeof consumerAttemptTransitions)[keyof typeof consumerAttemptTransitions];
 export const PUBLICATION_CLAIM_TIMEOUT_MS = 30_000;
@@ -68,8 +69,7 @@ export interface BankSessionExpiryEpisodeRepository {
   markConsumerMutationStarted(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
   /** Persists a manual-recovery requirement; it performs no operator notification or audit delivery. */
   markConsumerManualRecoveryRequired(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
-  /** Persists an explicit operator resolution; it performs no operator action itself. */
-  markConsumerManualRecoveryResolved(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
+  resolveConsumerManualRecovery(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string, command: ManualRecoveryResolutionCommand): Promise<ManualRecoveryResolutionResult | null>;
   /** The monitor retains mutation_started/manual_recovery_required evidence; resolved episodes close normally. */
   close(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<EpisodeCloseResult>;
 }
@@ -122,7 +122,21 @@ export async function publishExpiryEpisode(
 }
 export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionExpiryEpisodeRepository {
   private readonly episodes = new Map<string, BankSessionExpiryEpisode>();
-  constructor(private readonly clock: () => Date = () => new Date()) {}
+  private readonly resolutions: ManualRecoveryResolutionResult[] = [];
+  private readonly outboxes: Array<{ resolutionId: string; state: "pending" }> = [];
+
+  constructor(
+    private readonly clock: () => Date = () => new Date(),
+    private readonly failOutbox?: () => void,
+  ) {}
+
+  listManualRecoveryResolutions(): readonly ManualRecoveryResolutionResult[] {
+    return this.resolutions.map((resolution) => ({ ...resolution, decision: { ...resolution.decision } }));
+  }
+
+  listManualRecoveryResolutionAuditOutboxes(): ReadonlyArray<{ resolutionId: string; state: "pending" }> {
+    return this.outboxes.map((outbox) => ({ ...outbox }));
+  }
 
   async getOrCreate(input: CreateBankSessionExpiryEpisodeInput): Promise<GetOrCreateBankSessionExpiryEpisodeResult> {
     const existing = this.episodes.get(input.bankCode);
@@ -175,8 +189,38 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
   async markConsumerManualRecoveryRequired(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
     return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.manualRecoveryRequired);
   }
-  async markConsumerManualRecoveryResolved(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
-    return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.manualRecoveryResolved);
+  async resolveConsumerManualRecovery(
+    envelope: ExpiryPublicationEnvelope,
+    consumerClaimToken: string,
+    command: ManualRecoveryResolutionCommand,
+  ): Promise<ManualRecoveryResolutionResult | null> {
+    assertConsumerClaimToken(consumerClaimToken);
+    const current = this.episodes.get(envelope.bankCode);
+    if (
+      !current
+      || current.expiredEventId !== envelope.expiredEventId
+      || current.runId !== envelope.runId
+      || current.publicationState !== "published"
+      || current.publicationClaimToken !== envelope.token
+      || current.consumerClaimToken !== consumerClaimToken
+      || current.consumerAttemptState !== "manual_recovery_required"
+    ) return null;
+
+    const resolvedAt = this.clock();
+    const resolution: ManualRecoveryResolutionResult = {
+      id: `resolution-${this.resolutions.length + 1}`,
+      bankCode: current.bankCode,
+      expiredEventId: current.expiredEventId,
+      runId: current.runId,
+      decision: { ...command.decision },
+      operatorId: command.operatorId,
+      resolvedAt,
+    };
+    this.failOutbox?.();
+    this.episodes.set(envelope.bankCode, { ...current, consumerAttemptState: "resolved", updatedAt: resolvedAt });
+    this.resolutions.push(resolution);
+    this.outboxes.push({ resolutionId: resolution.id, state: "pending" });
+    return { ...resolution, decision: { ...resolution.decision } };
   }
 
   async findByBankCode(bankCode: string): Promise<BankSessionExpiryEpisode | null> {
