@@ -559,6 +559,8 @@ describe("Bank session expiry episodes", () => {
       .resolves.toMatchObject({ bankCode: envelope.bankCode, decision, operatorId: "admin-1", resolvedAt });
     expect(episodes.listManualRecoveryResolutions()).toHaveLength(1);
     expect(episodes.listManualRecoveryResolutionAuditOutboxes()).toEqual([{ resolutionId: "resolution-1", state: "pending" }]);
+    await expect(episodes.setManualRecoveryResolutionAuditState("resolution-1", "delivered")).resolves.toBe(true);
+    expect(episodes.listManualRecoveryResolutionAuditOutboxes()).toEqual([{ resolutionId: "resolution-1", state: "delivered" }]);
     await expect(episodes.close(envelope)).resolves.toBe("closed");
     expect(episodes.listManualRecoveryResolutions()).toHaveLength(1);
   });

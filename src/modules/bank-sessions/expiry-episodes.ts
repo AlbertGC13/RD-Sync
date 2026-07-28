@@ -1,4 +1,10 @@
 import type { ManualRecoveryResolutionCommand, ManualRecoveryResolutionResult } from "./manual-recovery-resolution";
+import {
+  createManualRecoveryReplayAuthorizedAudit,
+  type ManualRecoveryReplayAuthorizationCandidate,
+  type ManualRecoveryReplayAuthorizationResult,
+  type ManualRecoveryReplayAuthorizationRepository,
+} from "./manual-recovery-replay-authorization";
 
 export type SessionEpisodeAuditKind = "expired" | "restored";
 export type EpisodePublicationState = "pending" | "publishing" | "published" | "cancelled";
@@ -120,10 +126,10 @@ export async function publishExpiryEpisode(
   }
   return episodes.markPublicationPublished(episode, token);
 }
-export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionExpiryEpisodeRepository {
+export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionExpiryEpisodeRepository, ManualRecoveryReplayAuthorizationRepository {
   private readonly episodes = new Map<string, BankSessionExpiryEpisode>();
   private readonly resolutions: ManualRecoveryResolutionResult[] = [];
-  private readonly outboxes: Array<{ resolutionId: string; state: "pending" }> = [];
+  private readonly outboxes: Array<{ resolutionId: string; state: "pending" | "delivering" | "delivered"; deliveredAt: Date | null }> = [];
 
   constructor(
     private readonly clock: () => Date = () => new Date(),
@@ -134,8 +140,14 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
     return this.resolutions.map((resolution) => ({ ...resolution, decision: { ...resolution.decision } }));
   }
 
-  listManualRecoveryResolutionAuditOutboxes(): ReadonlyArray<{ resolutionId: string; state: "pending" }> {
-    return this.outboxes.map((outbox) => ({ ...outbox }));
+  listManualRecoveryResolutionAuditOutboxes(): ReadonlyArray<{ resolutionId: string; state: "pending" | "delivering" | "delivered" }> {
+    return this.outboxes.map(({ resolutionId, state }) => ({ resolutionId, state }));
+  }
+  async setManualRecoveryResolutionAuditState(resolutionId: string, state: "pending" | "delivering" | "delivered"): Promise<boolean> {
+    const outbox = this.outboxes.find((item) => item.resolutionId === resolutionId);
+    if (!outbox) return false;
+    outbox.state = state; outbox.deliveredAt = state === "delivered" ? this.clock() : null;
+    return true;
   }
 
   async getOrCreate(input: CreateBankSessionExpiryEpisodeInput): Promise<GetOrCreateBankSessionExpiryEpisodeResult> {
@@ -219,8 +231,27 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
     this.failOutbox?.();
     this.episodes.set(envelope.bankCode, { ...current, consumerAttemptState: "resolved", updatedAt: resolvedAt });
     this.resolutions.push(resolution);
-    this.outboxes.push({ resolutionId: resolution.id, state: "pending" });
+    this.outboxes.push({ resolutionId: resolution.id, state: "pending", deliveredAt: null });
     return { ...resolution, decision: { ...resolution.decision } };
+  }
+
+  async findManualRecoveryReplayBankCode(resolutionId: string): Promise<string | null> { return this.resolutions.find((resolution) => resolution.id === resolutionId)?.bankCode ?? null; }
+  async authorizeManualRecoveryReplay(candidate: ManualRecoveryReplayAuthorizationCandidate): Promise<ManualRecoveryReplayAuthorizationResult> {
+    const resolution = this.resolutions.find((item) => item.id === candidate.resolutionId); const outbox = this.outboxes.find((item) => item.resolutionId === candidate.resolutionId);
+    if (!resolution || !outbox || resolution.decision.outcome !== "safe_to_retry" || resolution.decision.reason !== "verified_no_mutation" || outbox.state !== "delivered" || !outbox.deliveredAt) return { status: "ineligible" };
+    const stored = resolution as ManualRecoveryResolutionResult & { replayExpiredEventId?: string; replayRunId?: string; replayAuthorizedAt?: Date };
+    if (stored.replayExpiredEventId && stored.replayRunId && stored.replayAuthorizedAt) return this.replayResult("already_authorized", stored);
+    if (!candidate.replayExpiredEventId.trim() || !candidate.replayRunId.trim() || candidate.replayExpiredEventId === candidate.replayRunId) throw new Error("Replay IDs must be nonblank and different");
+    const current = this.episodes.get(resolution.bankCode);
+    if (current && (current.expiredEventId !== resolution.expiredEventId || current.runId !== resolution.runId || current.publicationState !== "published" || current.consumerAttemptState !== "resolved")) return { status: "ineligible" };
+    if (this.resolutions.some((item) => item.expiredEventId === candidate.replayExpiredEventId || item.runId === candidate.replayRunId || (item as typeof stored).replayExpiredEventId === candidate.replayExpiredEventId || (item as typeof stored).replayRunId === candidate.replayRunId)) throw new Error("Replay IDs conflict with durable identity");
+    const replay: BankSessionExpiryEpisode = { bankCode: resolution.bankCode, expiredEventId: candidate.replayExpiredEventId, runId: candidate.replayRunId, expiredAuditDelivered: false, restoredAuditDelivered: false, publicationState: "pending", publicationClaimToken: null, publicationFailureReportedAt: null, consumerClaimToken: null, consumerAttemptState: null, updatedAt: candidate.authorizedAt };
+    stored.replayExpiredEventId = candidate.replayExpiredEventId; stored.replayRunId = candidate.replayRunId; stored.replayAuthorizedAt = candidate.authorizedAt;
+    this.episodes.set(resolution.bankCode, replay);
+    return this.replayResult("authorized", stored);
+  }
+  private replayResult(status: "authorized" | "already_authorized", resolution: ManualRecoveryResolutionResult & { replayExpiredEventId?: string; replayRunId?: string; replayAuthorizedAt?: Date }): ManualRecoveryReplayAuthorizationResult {
+    return { status, replayExpiredEventId: resolution.replayExpiredEventId!, replayRunId: resolution.replayRunId!, audit: createManualRecoveryReplayAuthorizedAudit(resolution.id, resolution.operatorId, resolution.replayExpiredEventId!, resolution.replayRunId!, resolution.replayAuthorizedAt!) };
   }
 
   async findByBankCode(bankCode: string): Promise<BankSessionExpiryEpisode | null> {
