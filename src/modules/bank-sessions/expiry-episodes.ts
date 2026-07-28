@@ -5,6 +5,7 @@ import {
   type ManualRecoveryReplayAuthorizationResult,
   type ManualRecoveryReplayAuthorizationRepository,
 } from "./manual-recovery-replay-authorization";
+import { createExpiryTerminalAudit, EXPIRY_TERMINAL_OPERATOR_SIGNAL, type ExpiryTerminalFailureReason, type ExpiryTerminalReconciliationResult } from "./expiry-terminal-reconciliation";
 
 export type SessionEpisodeAuditKind = "expired" | "restored";
 export type EpisodePublicationState = "pending" | "publishing" | "published" | "cancelled";
@@ -39,6 +40,8 @@ export interface BankSessionExpiryEpisode {
   publicationFailureReportedAt: Date | null;
   consumerClaimToken: string | null;
   consumerAttemptState: ConsumerAttemptState | null;
+  terminalFailureReason?: ExpiryTerminalFailureReason | null;
+  terminalFailureReconciledAt?: Date | null;
   updatedAt: Date;
 }
 
@@ -163,6 +166,8 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
       publicationFailureReportedAt: null,
       consumerClaimToken: null,
       consumerAttemptState: null,
+      terminalFailureReason: null,
+      terminalFailureReconciledAt: null,
       updatedAt: this.clock(),
     };
     this.episodes.set(input.bankCode, episode);
@@ -250,10 +255,32 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
     this.episodes.set(resolution.bankCode, replay);
     return this.replayResult("authorized", stored);
   }
+  async reconcileTerminalFailure(envelope: ExpiryPublicationEnvelope, reason: ExpiryTerminalFailureReason, reconciledAt: Date): Promise<ExpiryTerminalReconciliationResult> {
+    const current = this.episodes.get(envelope.bankCode);
+    if (!current || current.expiredEventId !== envelope.expiredEventId || current.runId !== envelope.runId || current.publicationState !== "published" || current.publicationClaimToken !== envelope.token || current.restoredAuditDelivered || current.consumerAttemptState === "resolved") {
+      return { status: "ignored_stale_envelope", operatorSignal: EXPIRY_TERMINAL_OPERATOR_SIGNAL };
+    }
+    const storedReason = current.terminalFailureReason;
+    if (storedReason === "job_failed" || storedReason === reason) {
+      return {
+        status: "already_reconciled", operatorSignal: EXPIRY_TERMINAL_OPERATOR_SIGNAL,
+        audit: createExpiryTerminalAudit(envelope, storedReason ?? reason, current.terminalFailureReconciledAt ?? reconciledAt, current.consumerAttemptState === "mutation_started" || current.consumerAttemptState === "manual_recovery_required"),
+      };
+    }
+    const requiresManualRecovery = current.consumerAttemptState === "mutation_started" || current.consumerAttemptState === "manual_recovery_required";
+    const updated = {
+      ...current,
+      consumerAttemptState: requiresManualRecovery ? "manual_recovery_required" as const : current.consumerAttemptState,
+      terminalFailureReason: reason,
+      terminalFailureReconciledAt: current.terminalFailureReconciledAt ?? reconciledAt,
+      updatedAt: this.clock(),
+    };
+    this.episodes.set(envelope.bankCode, updated);
+    return { status: "reconciled", operatorSignal: EXPIRY_TERMINAL_OPERATOR_SIGNAL, audit: createExpiryTerminalAudit(envelope, reason, updated.terminalFailureReconciledAt, requiresManualRecovery) };
+  }
   private replayResult(status: "authorized" | "already_authorized", resolution: ManualRecoveryResolutionResult & { replayExpiredEventId?: string; replayRunId?: string; replayAuthorizedAt?: Date }): ManualRecoveryReplayAuthorizationResult {
     return { status, replayExpiredEventId: resolution.replayExpiredEventId!, replayRunId: resolution.replayRunId!, audit: createManualRecoveryReplayAuthorizedAudit(resolution.id, resolution.operatorId, resolution.replayExpiredEventId!, resolution.replayRunId!, resolution.replayAuthorizedAt!) };
   }
-
   async findByBankCode(bankCode: string): Promise<BankSessionExpiryEpisode | null> {
     const episode = this.episodes.get(bankCode);
     return episode ? { ...episode } : null;

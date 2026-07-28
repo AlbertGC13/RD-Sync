@@ -635,3 +635,10 @@ describe("Bank session expiry episodes", () => {
     expect(episodes.listManualRecoveryResolutionAuditOutboxes()).toHaveLength(1);
   });
 });
+  it("retains terminal reconciliation fields on newly created episodes", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    await episodes.getOrCreate({ bankCode: "terminal-fields", expiredEventId: "event", runId: "run" });
+    await expect(episodes.findByBankCode("terminal-fields")).resolves.toMatchObject({
+      terminalFailureReason: null, terminalFailureReconciledAt: null,
+    });
+  });
