@@ -49,6 +49,8 @@ const hasTestDb = Boolean(TEST_DB_URL);
 const MAX_POSTGRES_LOCK_WAIT_ATTEMPTS = 100;
 const POSTGRES_CHECK_VIOLATION = "23514";
 const recoveryMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260718014500_add_expiry_consumer_recovery_state/migration.sql", import.meta.url));
+const schemaPath = fileURLToPath(new URL("../../../prisma/schema.prisma", import.meta.url));
+const manualRecoveryResolutionMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260728120000_add_manual_recovery_resolution_outbox/migration.sql", import.meta.url));
 
 // ---------------------------------------------------------------------------
 // Shared test client — one pool for the entire test file.
@@ -89,6 +91,8 @@ async function truncateTables(): Promise<void> {
   await prisma.auditEvent.deleteMany();
   await prisma.transaction.deleteMany();
   await prisma.scrapeRun.deleteMany();
+  await prisma.$executeRawUnsafe('DELETE FROM "ManualRecoveryResolutionAuditOutbox"');
+  await prisma.$executeRawUnsafe('DELETE FROM "ManualRecoveryResolution"');
   await prisma.$executeRawUnsafe('DELETE FROM "BankSessionExpiryEpisode"');
   await prisma.bank.deleteMany();
   await prisma.userRole.deleteMany();
@@ -559,6 +563,91 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     await expect(repo.close(envelope)).resolves.toBe("closed");
   });
 
+});
+describe("Manual recovery resolution schema contract", () => {
+  it("declares durable resolution and pending audit-outbox models with independent identities", async () => {
+    const schema = await readFile(schemaPath, "utf8");
+    const migration = await readFile(manualRecoveryResolutionMigrationPath, "utf8");
+
+    expect(schema).toContain("model ManualRecoveryResolution {");
+    expect(schema).toMatch(/expiredEventId\s+String\s+@unique/);
+    expect(schema).toContain("@@unique([bankCode, runId])");
+    expect(schema).toMatch(/resolvedAt\s+DateTime\s+@default\(now\(\)\)/);
+    expect(schema).toContain("model ManualRecoveryResolutionAuditOutbox {");
+    expect(schema).toMatch(/resolutionId\s+String\s+@unique/);
+    expect(schema).toMatch(/state\s+String\s+@default\("pending"\)/);
+    expect(migration).toContain('CONSTRAINT "ManualRecoveryResolution_outcomeReason_check" CHECK');
+    expect(migration).toContain('CONSTRAINT "ManualRecoveryResolution_operatorId_check" CHECK');
+    expect(migration).toContain("CONSTRAINT \"ManualRecoveryResolutionAuditOutbox_state_check\" CHECK (\"state\" = 'pending')");
+    expect(migration).toContain('FOREIGN KEY ("resolutionId") REFERENCES "ManualRecoveryResolution"("id") ON DELETE RESTRICT');
+    expect(migration).toContain('CREATE UNIQUE INDEX "ManualRecoveryResolution_expiredEventId_key"');
+    expect(migration).toContain('CREATE UNIQUE INDEX "ManualRecoveryResolution_bankCode_runId_key"');
+    expect(migration).toContain('CREATE UNIQUE INDEX "ManualRecoveryResolutionAuditOutbox_resolutionId_key"');
+    expect(migration.trimStart()).toMatch(/^BEGIN;/);
+    expect(migration.trimEnd()).toMatch(/COMMIT;$/);
+  });
+
+  it("does not couple durable recovery records to the deletable expiry episode or sensitive delivery state", async () => {
+    const schema = await readFile(schemaPath, "utf8");
+    const migration = await readFile(manualRecoveryResolutionMigrationPath, "utf8");
+    const resolutionModels = schema.slice(schema.indexOf("model ManualRecoveryResolution {"), schema.indexOf("// Change 4:"));
+    const persistedContract = `${resolutionModels}\n${migration}`;
+
+    expect(migration).not.toContain('REFERENCES "BankSessionExpiryEpisode"');
+    expect(persistedContract).not.toMatch(/claimToken|publicationToken|credential|ciphertext|secret|errorMessage|errorDetail/i);
+  });
+});
+
+describe.skipIf(!hasTestDb)("Prisma manual recovery resolution schema (requires RD_SYNC_TEST_DATABASE_URL)", () => {
+  beforeEach(truncateTables);
+  afterEach(truncateTables);
+
+  it("enforces valid resolution decisions, nonblank operator identity, and pending-only causal outbox rows", async () => {
+    if (!TEST_DB_URL) throw new Error("RD_SYNC_TEST_DATABASE_URL is required");
+    const pool = new Pool({ connectionString: TEST_DB_URL });
+    try {
+      const created = await pool.query<{ id: string; resolvedAt: Date }>(
+        'INSERT INTO "ManualRecoveryResolution" ("id", "expiredEventId", "bankCode", "runId", "outcome", "reason", "operatorId") VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING "id", "resolvedAt"',
+        ["resolution-id", "resolution-event", "resolution-bank", "resolution-run", "safe_to_retry", "verified_no_mutation", "admin-resolution"],
+      );
+      const resolution = created.rows[0]!;
+      expect(resolution.resolvedAt).toBeInstanceOf(Date);
+      await expect(pool.query('INSERT INTO "ManualRecoveryResolutionAuditOutbox" ("id", "resolutionId") VALUES ($1, $2) RETURNING "state"', ["resolution-outbox-id", resolution.id]))
+        .resolves.toMatchObject({ rows: [{ state: "pending" }] });
+
+      for (const [outcome, reason] of [["safe_to_retry", "verified_mutation"], ["mutation_confirmed", "closed_without_retry"], ["resolved_no_retry", "verified_no_mutation"]]) {
+        await expect(pool.query('INSERT INTO "ManualRecoveryResolution" ("id", "expiredEventId", "bankCode", "runId", "outcome", "reason", "operatorId") VALUES ($1, $2, $3, $4, $5, $6, $7)', [`invalid-id-${outcome}-${reason}`, `invalid-${outcome}-${reason}`, "invalid-bank", `invalid-run-${outcome}`, outcome, reason, "admin-resolution"]))
+          .rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolution_outcomeReason_check" });
+      }
+      await expect(pool.query('INSERT INTO "ManualRecoveryResolution" ("id", "expiredEventId", "bankCode", "runId", "outcome", "reason", "operatorId") VALUES ($1, $2, $3, $4, $5, $6, $7)', ["blank-operator-id", "blank-operator", "blank-bank", "blank-run", "safe_to_retry", "verified_no_mutation", " \t "]))
+        .rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolution_operatorId_check" });
+      await expect(pool.query('UPDATE "ManualRecoveryResolutionAuditOutbox" SET "state" = $1 WHERE "resolutionId" = $2', ["published", resolution.id]))
+        .rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolutionAuditOutbox_state_check" });
+      await expect(pool.query('INSERT INTO "ManualRecoveryResolution" ("id", "expiredEventId", "bankCode", "runId", "outcome", "reason", "operatorId") VALUES ($1, $2, $3, $4, $5, $6, $7)', ["duplicate-resolution-id", "duplicate-resolution-event", "resolution-bank", "resolution-run", "safe_to_retry", "verified_no_mutation", "admin-resolution"]))
+        .rejects.toMatchObject({ code: "23505", constraint: "ManualRecoveryResolution_bankCode_runId_key" });
+      await expect(pool.query('INSERT INTO "ManualRecoveryResolutionAuditOutbox" ("id", "resolutionId") VALUES ($1, $2)', ["duplicate-outbox-id", resolution.id]))
+        .rejects.toMatchObject({ code: "23505", constraint: "ManualRecoveryResolutionAuditOutbox_resolutionId_key" });
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it("keeps resolution and its unique outbox after the matching expiry episode is deleted", async () => {
+    if (!prisma || !TEST_DB_URL) throw new Error("prisma not initialized");
+    const episode = { bankCode: "durable-bank", expiredEventId: "durable-event", runId: "durable-run" };
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    await repo.getOrCreate(episode);
+    const pool = new Pool({ connectionString: TEST_DB_URL });
+    try {
+      const resolution = await pool.query<{ id: string }>('INSERT INTO "ManualRecoveryResolution" ("id", "expiredEventId", "bankCode", "runId", "outcome", "reason", "operatorId") VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING "id"', ["durable-resolution-id", episode.expiredEventId, episode.bankCode, episode.runId, "resolved_no_retry", "closed_without_retry", "admin-durable"]);
+      await pool.query('INSERT INTO "ManualRecoveryResolutionAuditOutbox" ("id", "resolutionId") VALUES ($1, $2)', ["durable-outbox-id", resolution.rows[0]!.id]);
+      await expect(repo.close(episode)).resolves.toBe("closed");
+      await expect(pool.query('SELECT COUNT(*)::int AS "count" FROM "ManualRecoveryResolutionAuditOutbox" WHERE "resolutionId" = $1', [resolution.rows[0]!.id]))
+        .resolves.toMatchObject({ rows: [{ count: 1 }] });
+    } finally {
+      await pool.end();
+    }
+  });
 });
 
 describe.skipIf(!hasTestDb)("Prisma atomic auto-login contract (requires RD_SYNC_TEST_DATABASE_URL)", () => {

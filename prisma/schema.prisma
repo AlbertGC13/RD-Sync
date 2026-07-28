@@ -184,6 +184,30 @@ model BankSessionExpiryEpisode {
   updatedAt                    DateTime @updatedAt
 }
 
+// Durable resolution evidence survives deletion of its ephemeral expiry episode.
+model ManualRecoveryResolution {
+  id             String                               @id @default(cuid())
+  expiredEventId String                               @unique
+  bankCode       String
+  runId          String
+  outcome        String
+  reason         String
+  operatorId     String
+  resolvedAt     DateTime                             @default(now())
+  auditOutbox    ManualRecoveryResolutionAuditOutbox?
+
+  @@unique([bankCode, runId])
+}
+
+// Delivery remains deferred; this is only the causal pending audit intent.
+model ManualRecoveryResolutionAuditOutbox {
+  id           String                   @id @default(cuid())
+  resolutionId String                   @unique
+  resolution   ManualRecoveryResolution @relation(fields: [resolutionId], references: [id], onDelete: Restrict)
+  state        String                   @default("pending")
+  createdAt    DateTime                 @default(now())
+}
+
 // Change 4: EncryptedSessionRef model DROPPED entirely.
 
 // Change 3: Remove actor User relation from AuditEvent; actorId/actorRole remain as plain String?.
