@@ -6,9 +6,10 @@
  * connection.
  */
 
-import type { IngestionJob, IngestionResult } from "./queues/index";
+import { ingestionJobName, type IngestionJob, type IngestionResult } from "./queues/index";
+import { expiryPublicationJobName } from "../modules/bank-sessions/expiry-publication";
 
-export const INGESTION_QUEUE_NAME = "bank-transaction-ingestion";
+export const INGESTION_QUEUE_NAME = ingestionJobName;
 
 // ---------------------------------------------------------------------------
 // Ports (structural interfaces so tests never import bullmq directly)
@@ -16,6 +17,7 @@ export const INGESTION_QUEUE_NAME = "bank-transaction-ingestion";
 
 /** Minimal BullMQ Job surface the worker handler needs. */
 export interface WorkerJob {
+  name?: string;
   data: IngestionJob["data"];
 }
 
@@ -27,7 +29,7 @@ export interface WorkerHandle {
 /** The constructor signature for a BullMQ Worker (or a test double). */
 export type WorkerConstructor = new (
   queueName: string,
-  handler: (job: WorkerJob) => Promise<IngestionResult>,
+  handler: (job: WorkerJob) => Promise<unknown>,
   options: { connection: unknown; concurrency: number },
 ) => WorkerHandle;
 
@@ -40,6 +42,7 @@ export interface CreateIngestionWorkerOptions {
   connection: { host: string; port: number; password?: string; maxRetriesPerRequest: null };
   /** Ingestion processor — called once per job. */
   processor: (job: IngestionJob) => Promise<IngestionResult>;
+  expiryPublicationConsumer?: (data: unknown) => Promise<unknown>;
   /** How many jobs to process in parallel.  Defaults to 2. */
   concurrency?: number;
   /**
@@ -69,9 +72,14 @@ export function createIngestionWorker(options: CreateIngestionWorkerOptions): Wo
 
   const worker = new WorkerCtor(
     INGESTION_QUEUE_NAME,
-    async (job: WorkerJob): Promise<IngestionResult> => {
-      // Unexpected throws propagate — BullMQ applies attempts/backoff.
-      return options.processor({ data: job.data });
+    async (job: WorkerJob): Promise<unknown> => {
+      if (job.name === INGESTION_QUEUE_NAME) {
+        return options.processor({ data: job.data });
+      }
+      if (job.name === expiryPublicationJobName && options.expiryPublicationConsumer) {
+        return options.expiryPublicationConsumer(job.data);
+      }
+      throw new Error("Unsupported BullMQ job name");
     },
     {
       connection: options.connection,

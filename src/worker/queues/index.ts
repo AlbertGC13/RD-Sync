@@ -108,7 +108,7 @@ export interface QueueLike {
   add(name: string, data: IngestionJobData, options: JobsOptions): Promise<unknown>;
 }
 
-const ingestionJobName = "bank-transaction-ingestion";
+export const ingestionJobName = "bank-transaction-ingestion";
 const SYSTEM_INGESTION_ACTOR = "system:ingestion-worker";
 const SYSTEM_AUTOLOGIN_ACTOR = "system:auto-login";
 
