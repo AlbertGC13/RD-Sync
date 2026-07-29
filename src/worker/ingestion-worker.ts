@@ -31,6 +31,7 @@ import { Worker } from "bullmq";
 import { buildRedisConnectionOptions } from "./queues/bullmq-queue";
 import { createIngestionWorker, type WorkerConstructor } from "./ingestion-worker-factory";
 import { createExpiryPublicationConsumer } from "./expiry-publication-consumer";
+import { createDefaultExpiryRuntime } from "./expiry-runtime";
 import { resolveDefaultAlertSink } from "./alerts/email-alert-sink";
 import { bankAdapterRegistry } from "../modules/bank-adapters/registry";
 import { BankAutoLoginConfigRepository } from "../modules/bank-auto-login-config/repository";
@@ -63,6 +64,7 @@ if (!redisUrl) {
   );
   process.exit(1);
 }
+const expiryRuntime = createDefaultExpiryRuntime();
 
 // ---------------------------------------------------------------------------
 // Wire up real dependencies
@@ -160,6 +162,7 @@ const worker = createIngestionWorker({
   // our structural WorkerConstructor port.
   WorkerCtor: Worker as unknown as WorkerConstructor,
 });
+expiryRuntime.start();
 
 console.log("[ingestion-worker] Started. Waiting for jobs on 'bank-transaction-ingestion'...");
 
@@ -174,7 +177,7 @@ const SHUTDOWN_GRACE_MS = 25_000;
 async function shutdown(signal: string): Promise<void> {
   console.log(`[ingestion-worker] ${signal} received — shutting down gracefully (${SHUTDOWN_GRACE_MS}ms timeout)...`);
 
-  const graceful = worker.close();
+  const graceful = Promise.all([worker.close(), expiryRuntime.shutdown()]);
   const timeout = new Promise<void>((resolve) =>
     setTimeout(() => {
       console.warn("[ingestion-worker] Shutdown grace period exceeded — forcing exit.");

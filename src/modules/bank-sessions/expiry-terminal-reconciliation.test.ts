@@ -45,7 +45,7 @@ describe("expiry terminal reconciliation", () => {
     const upgraded = await reconcileExpiryTerminalObservation(async () => "failed", episodes, envelope);
     expect([missing.kind === "terminal" && missing.result.status, duplicate.kind === "terminal" && duplicate.result.status, upgraded.kind === "terminal" && upgraded.result.status]).toEqual(["reconciled", "already_reconciled", "reconciled"]);
     expect(await episodes.findByBankCode("popular")).toMatchObject({ terminalFailureReason: "job_failed" });
-    expect(upgraded.kind === "terminal" && upgraded.result.audit).toMatchObject({ actorId: "system", actorRole: "system", action: "needs_admin_action", target: "bank_session_expiry_episode", targetId: "popular:event-1:run-1", metadata: { bankCode: "popular", expiredEventId: "event-1", runId: "run-1", reconciledAt: expect.any(String), reason: "job_failed" } });
+    expect(upgraded.kind === "terminal" && upgraded.result.audit).toMatchObject({ actorId: "system", actorRole: "system", action: "bank_autologin.needs_admin_action", target: "bank_session_expiry_episode", targetId: "popular:event-1:run-1", metadata: { bankCode: "popular", expiredEventId: "event-1", runId: "run-1", reconciledAt: expect.any(String), reason: "job_failed" } });
     expect(JSON.stringify(upgraded)).not.toContain("publication-token");
   });
 

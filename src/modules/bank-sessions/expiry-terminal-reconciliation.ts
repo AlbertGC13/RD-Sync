@@ -44,7 +44,7 @@ export function createExpiryTerminalAudit(
   return {
     id: `bank-session-expiry-terminal:${identity}`,
     actorId: "system", actorRole: "system",
-    action: requiresManualRecovery ? "manual_recovery_required" : "needs_admin_action",
+    action: requiresManualRecovery ? "bank_autologin.manual_recovery_required" : "bank_autologin.needs_admin_action",
     target: "bank_session_expiry_episode", targetId: identity,
     metadata: { bankCode: envelope.bankCode, expiredEventId: envelope.expiredEventId, runId: envelope.runId, reason, reconciledAt: reconciledAt.toISOString() },
     createdAt: reconciledAt,
