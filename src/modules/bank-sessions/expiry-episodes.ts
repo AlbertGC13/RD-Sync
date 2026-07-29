@@ -78,6 +78,7 @@ export interface BankSessionExpiryEpisodeRepository {
   markConsumerMutationStarted(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
   /** Persists a manual-recovery requirement; it performs no operator notification or audit delivery. */
   markConsumerManualRecoveryRequired(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
+  markConsumerResolved(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
   resolveConsumerManualRecovery(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string, command: ManualRecoveryResolutionCommand): Promise<ManualRecoveryResolutionResult | null>;
   /** The monitor retains mutation_started/manual_recovery_required evidence; resolved episodes close normally. */
   close(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<EpisodeCloseResult>;
@@ -205,6 +206,10 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
   }
   async markConsumerManualRecoveryRequired(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
     return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.manualRecoveryRequired);
+  }
+  async markConsumerResolved(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
+    assertConsumerClaimToken(consumerClaimToken);
+    return this.updatePublication(envelope, (current) => current.publicationState === "published" && current.publicationClaimToken === envelope.token && current.consumerClaimToken === consumerClaimToken && (current.consumerAttemptState === "mutation_started" || (current.consumerAttemptState === "reserved" && !current.restoredAuditDelivered)), (current) => ({ ...current, consumerAttemptState: "resolved" }));
   }
   async resolveConsumerManualRecovery(
     envelope: ExpiryPublicationEnvelope,

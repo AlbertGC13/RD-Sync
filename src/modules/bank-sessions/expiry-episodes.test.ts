@@ -494,8 +494,9 @@ describe("Bank session expiry episodes", () => {
       cancelPublication: (episode) => base.cancelPublication(episode),
        markPublicationFailureReported: (episode, token) => base.markPublicationFailureReported(episode, token),
        claimConsumerAttempt: (envelope, token) => base.claimConsumerAttempt(envelope, token),
-       markConsumerMutationStarted: (envelope, token) => base.markConsumerMutationStarted(envelope, token),
-       markConsumerManualRecoveryRequired: (envelope, token) => base.markConsumerManualRecoveryRequired(envelope, token),
+        markConsumerMutationStarted: (envelope, token) => base.markConsumerMutationStarted(envelope, token),
+        markConsumerManualRecoveryRequired: (envelope, token) => base.markConsumerManualRecoveryRequired(envelope, token),
+        markConsumerResolved: (envelope, token) => base.markConsumerResolved(envelope, token),
         resolveConsumerManualRecovery: (envelope, token, command) => base.resolveConsumerManualRecovery(envelope, token, command),
        close: async (episode) => {
         closeCalls.push(episode.expiredEventId);
@@ -606,6 +607,28 @@ describe("Bank session expiry episodes", () => {
     });
     await expect(episodes.close(envelope)).resolves.toBe("closed");
   });
+  it("resolves only an exact safe reservation or a mutation-started attempt", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    const reserved = await createPublishedConsumerEnvelope(episodes, "resolve-reserved");
+    await episodes.claimConsumerAttempt(reserved, "consumer-token");
+    await expect(episodes.markConsumerResolved(reserved, "consumer-token")).resolves.toBe(true);
+    await expect(episodes.close(reserved)).resolves.toBe("closed");
+
+    const started = await createPublishedConsumerEnvelope(episodes, "resolve-started");
+    await episodes.claimConsumerAttempt(started, "consumer-token");
+    await episodes.markConsumerMutationStarted(started, "consumer-token");
+    await expect(episodes.markConsumerResolved(started, "consumer-token")).resolves.toBe(true);
+    await expect(episodes.markConsumerResolved(started, "consumer-token")).resolves.toBe(false);
+  });
+  it("fails closed when resolution ownership is stale, restored, or requires manual recovery", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    const envelope = await createPublishedConsumerEnvelope(episodes, "resolve-invalid");
+    await episodes.claimConsumerAttempt(envelope, "consumer-token");
+    await expect(episodes.markConsumerResolved({ ...envelope, token: "wrong" }, "consumer-token")).resolves.toBe(false);
+    await episodes.markAuditDelivered(envelope, "restored");
+    await expect(episodes.markConsumerResolved(envelope, "consumer-token")).resolves.toBe(false);
+  });
+
   it.each([
     ["bank", (envelope: ReturnType<typeof consumerEnvelope>) => ({ ...envelope, bankCode: "other-bank" })],
     ["event", (envelope: ReturnType<typeof consumerEnvelope>) => ({ ...envelope, expiredEventId: "other-event" })],
