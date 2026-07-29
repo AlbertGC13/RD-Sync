@@ -125,6 +125,15 @@ describe("expiry runtime", () => {
     expect(outbox.markDelivered).toHaveBeenCalledOnce();
   });
 
+  it("limits manual recovery audit deliveries per tick", async () => {
+    const outbox = {
+      findClaimable: vi.fn().mockResolvedValue({ id: "outbox", resolution: { id: "resolution", bankCode: "popular", expiredEventId: "event", runId: "run", outcome: "resolved_no_retry" as const, reason: "closed_without_retry" as const, operatorId: "admin", resolvedAt: new Date() } }),
+      claim: vi.fn().mockResolvedValue(true), markDelivered: vi.fn().mockResolvedValue(true), releaseClaim: vi.fn(), inspect: vi.fn(),
+    };
+    await createExpiryRuntime(enabled, () => dependencies({ outbox })).tick();
+    expect(outbox.markDelivered).toHaveBeenCalledTimes(100);
+  });
+
   it("shares in-flight ticks and closes owned resources exactly once on shutdown", async () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => { release = resolve; });
@@ -137,6 +146,21 @@ describe("expiry runtime", () => {
     release();
     await Promise.all([first, second, stopping, runtime.shutdown()]);
     expect(deps.monitor.tick).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("waits for a failing in-flight tick but fulfills shutdown", async () => {
+    let reject!: (reason: Error) => void;
+    const failure = new Error("monitor failed");
+    const pending = new Promise<void>((_, rejectPending) => { reject = rejectPending; });
+    const close = vi.fn().mockResolvedValue(undefined);
+    const runtime = createExpiryRuntime(enabled, () => dependencies({ monitor: { tick: vi.fn().mockReturnValue(pending) }, close }));
+    const tick = runtime.tick();
+    const stopping = runtime.shutdown();
+    reject(failure);
+    await expect(tick).rejects.toBe(failure);
+    await expect(stopping).resolves.toBeUndefined();
+    await expect(runtime.shutdown()).resolves.toBeUndefined();
     expect(close).toHaveBeenCalledOnce();
   });
 });
