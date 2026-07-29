@@ -369,3 +369,37 @@ Single concatenated delta artifact (Engram-only store). Encodes NEW and MODIFIED
 - Edge cases: unsupported bank fail-closed vs absent-default, adapter kill switch, adapter-credential mismatch, concurrent de-dup via Redis lock + fencing, distinct expired events, stale release rejection, kill switch, breaker open (no half-open)/manual reset, redirect rejection, CDP non-loopback rejection, browser throttling, portal drift incompatible pre-submit.
 - Error states: MFA stop, launch failure without leakage, breaker-open run, throttled run, unknown keyVersion, malformed envelope, lock-busy skip.
 - Implementation/architecture details deferred to sdd-design.
+
+---
+
+## Domain: expiry-consumer-recovery (ADDED)
+
+| Requirement | Strength | Behavior |
+|---|---|---|
+| Manual resolution authorization | MUST | The domain operation accepts `{ operatorId, roles }`, rejects unless `roles` includes `admin`, and invokes an injected rate-limit gate before persistence. A denial creates no state or outbox change. PR4.8 owns the future authenticated-admin HTTP integration that invokes this domain command; no endpoint exists in PR4p2b2. |
+| Immutable resolution record | MUST | Only `manual_recovery_required` may resolve. Resolution atomically persists `outcome`, `operatorId`, compatible categorized `reason`, and `resolvedAt`; these fields are immutable. Allowed pairs are `safe_to_retry/verified_no_mutation`, `mutation_confirmed/verified_mutation`, and `resolved_no_retry/closed_without_retry`. |
+| Resolution audit outbox | MUST | The same PostgreSQL transaction that resolves the exact durable envelope and claim owner inserts one pending, idempotent resolution-audit outbox row. Stale, wrong-owner, duplicate, unauthorized, or rate-limited requests produce neither transition nor row. Delivery is deferred. |
+| Recovery containment | MUST | `manual_recovery_required` remains visible and does not increment the auto-login breaker; it represents infrastructure uncertainty. Auto-login remains dormant and never retries an uncertain mutation. |
+| Future replay | MUST | Only `safe_to_retry` may authorize replay in PR4p2b2b. Replay is not created in this slice and must use a new `expiredEventId`, `runId`, claim token, and attempt budget while preserving the original resolution; at most one replay per resolution. |
+
+#### Scenario: admin resolves an uncertain mutation
+- GIVEN an exact `manual_recovery_required` episode and matching consumer claim
+- WHEN an admin passes the rate-limit gate with `mutation_confirmed/verified_mutation`
+- THEN one immutable resolution and one pending `bank_autologin.manual_recovery_resolved` audit-outbox row commit together.
+
+#### Scenario: resolution is denied before persistence
+- GIVEN a non-admin, rate-limited, stale, wrong-owner, or already-resolved request
+- WHEN the resolution operation runs
+- THEN it makes no durable state or audit-outbox change.
+
+### Consumer recovery audit actions
+
+| Action | Actor | Allowed metadata keys |
+|---|---|---|
+| `bank_autologin.consumer_reserved` | `system:auto-login` | `bankCode`, `expiredEventId`, `runId`, `reservedAt` |
+| `bank_autologin.mutation_started` | `system:auto-login` | `bankCode`, `expiredEventId`, `runId`, `mutationStartedAt` |
+| `bank_autologin.manual_recovery_required` | `system:auto-login` | `bankCode`, `expiredEventId`, `runId`, categorized `reason`, `manualRecoveryRequiredAt` |
+| `bank_autologin.manual_recovery_resolved` | admin `operatorId` | `bankCode`, `expiredEventId`, `runId`, `outcome`, `operatorId`, categorized `reason`, `resolvedAt` |
+| `bank_autologin.replay_authorized` | admin `operatorId` | `bankCode`, `expiredEventId`, `runId`, `outcome`, `operatorId`, categorized `reason`, `replayAuthorizedAt` |
+
+No action may include claim tokens, credentials, secrets, or internal errors. The three system actions are emitted by future consumer/runtime phases; the two operator actions are emitted only after the authenticated domain path authorizes the admin actor.

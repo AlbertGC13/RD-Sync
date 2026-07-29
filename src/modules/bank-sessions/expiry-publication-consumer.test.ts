@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   evaluateExpiryPublicationClaimEligibility,
   InvalidExpiryPublicationEnvelopeError,
+  reserveExpiryPublicationConsumerClaim,
   RetryableExpiryPublicationThrottleError,
+  UnexpectedExpiryPublicationClaimResultError,
   UnexpectedExpiryPublicationGateResultError,
   type ExpiryPublicationPreClaimGate,
 } from "./expiry-publication-consumer";
@@ -34,6 +36,7 @@ function durableEpisode(overrides: Partial<BankSessionExpiryEpisode> = {}): Bank
     publicationClaimToken: "token-1",
     publicationFailureReportedAt: null,
     consumerClaimToken: null,
+    consumerAttemptState: null,
     updatedAt: new Date("2026-07-17T00:00:00.000Z"),
     ...overrides,
   };
@@ -43,6 +46,13 @@ function createRepository(
   findByBankCode: BankSessionExpiryEpisodeRepository["findByBankCode"],
 ): Pick<BankSessionExpiryEpisodeRepository, "findByBankCode"> {
   return { findByBankCode };
+}
+
+function createReservationRepository(
+  findByBankCode: BankSessionExpiryEpisodeRepository["findByBankCode"],
+  claimConsumerAttempt: BankSessionExpiryEpisodeRepository["claimConsumerAttempt"],
+): Pick<BankSessionExpiryEpisodeRepository, "findByBankCode" | "claimConsumerAttempt"> {
+  return { findByBankCode, claimConsumerAttempt };
 }
 
 function createPreClaimGate(
@@ -189,5 +199,216 @@ describe("evaluateExpiryPublicationClaimEligibility", () => {
     await expect(
       evaluateExpiryPublicationClaimEligibility(createRepository(vi.fn().mockResolvedValue(durableEpisode())), envelope(), rejectingGate),
     ).rejects.toBe(gateError);
+  });
+});
+
+describe("reserveExpiryPublicationConsumerClaim", () => {
+  it.each([
+    ["null queue hint", null, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
+    ["array queue hint", [], "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
+    ["missing bank code", { ...envelope(), bankCode: undefined }, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
+    ["blank bank code", { ...envelope(), bankCode: " " }, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
+    ["missing expired event id", { ...envelope(), expiredEventId: undefined }, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
+    ["blank expired event id", { ...envelope(), expiredEventId: " " }, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
+    ["missing run id", { ...envelope(), runId: undefined }, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
+    ["blank run id", { ...envelope(), runId: " " }, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
+    ["missing publication token", { ...envelope(), token: undefined }, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
+    ["blank publication token", { ...envelope(), token: " " }, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
+    ["stale version", { ...envelope(), version: 0 }, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
+    ["unsupported version", { ...envelope(), version: 2 }, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
+  ] as const)("rejects a %s before durable, gate, or CAS access", async (_case, queuedHint, _consumerClaimToken, error) => {
+    const findByBankCode = vi.fn();
+    const claimConsumerAttempt = vi.fn();
+    const gate = createPreClaimGate("eligible");
+
+    await expect(
+      reserveExpiryPublicationConsumerClaim(
+        createReservationRepository(findByBankCode, claimConsumerAttempt),
+        queuedHint,
+        gate,
+      ),
+    ).rejects.toBeInstanceOf(error);
+    expect(findByBankCode).not.toHaveBeenCalled();
+    expect(claimConsumerAttempt).not.toHaveBeenCalled();
+    expect(gate.check).not.toHaveBeenCalled();
+  });
+
+  it("resumes the exact deterministic reserved claim without invoking the pre-claim gate", async () => {
+    const findByBankCode = vi.fn().mockResolvedValue(durableEpisode({ consumerClaimToken: "ceada9119bc580c326a532f1ec7e47b5862074fca3be66da7f5ff92e96b117ee", consumerAttemptState: "reserved" }));
+    const claimConsumerAttempt = vi.fn();
+    const gate = createPreClaimGate("eligible");
+
+    await expect(
+      reserveExpiryPublicationConsumerClaim(
+        createReservationRepository(findByBankCode, claimConsumerAttempt),
+        envelope(),
+        gate,
+      ),
+    ).resolves.toEqual({ status: "claim_resumed" });
+    expect(gate.check).not.toHaveBeenCalled();
+    expect(claimConsumerAttempt).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing", null],
+    ["restored", durableEpisode({ restoredAuditDelivered: true })],
+    ["non-published", durableEpisode({ publicationState: "publishing" })],
+    ["divergent", durableEpisode({ runId: "other-run" })],
+  ] as const)("ignores a %s durable envelope without invoking the gate", async (_state, durable) => {
+    const claimConsumerAttempt = vi.fn();
+    const gate = createPreClaimGate("eligible");
+
+    await expect(
+      reserveExpiryPublicationConsumerClaim(
+        createReservationRepository(vi.fn().mockResolvedValue(durable), claimConsumerAttempt),
+        envelope(),
+        gate,
+      ),
+    ).resolves.toEqual({ status: "ignored_stale_envelope" });
+    expect(gate.check).not.toHaveBeenCalled();
+    expect(claimConsumerAttempt).not.toHaveBeenCalled();
+  });
+
+  it("propagates a safe throttle without writing a claim", async () => {
+    const claimConsumerAttempt = vi.fn();
+    const gate = createPreClaimGate("throttled");
+
+    await expect(
+      reserveExpiryPublicationConsumerClaim(
+        createReservationRepository(vi.fn().mockResolvedValue(durableEpisode()), claimConsumerAttempt),
+        envelope(),
+        gate,
+      ),
+    ).rejects.toBeInstanceOf(RetryableExpiryPublicationThrottleError);
+    expect(claimConsumerAttempt).not.toHaveBeenCalled();
+  });
+
+  it("returns a reservation-only claim acquisition when the repository CAS wins", async () => {
+    const claimConsumerAttempt = vi.fn().mockResolvedValue(true);
+    const gate = createPreClaimGate("eligible");
+
+    await expect(
+      reserveExpiryPublicationConsumerClaim(
+        createReservationRepository(vi.fn().mockResolvedValue(durableEpisode()), claimConsumerAttempt),
+        envelope(),
+        gate,
+      ),
+    ).resolves.toEqual({ status: "claim_acquired" });
+    expect(claimConsumerAttempt).toHaveBeenCalledWith(envelope(), "ceada9119bc580c326a532f1ec7e47b5862074fca3be66da7f5ff92e96b117ee");
+  });
+
+  it.each([
+    ["a claim written by another consumer", durableEpisode({ consumerClaimToken: "other-claim" }), "ignored_already_claimed"],
+    ["a missing envelope", null, "ignored_stale_envelope"],
+    ["a restored envelope", durableEpisode({ restoredAuditDelivered: true }), "ignored_stale_envelope"],
+    ["a non-published envelope", durableEpisode({ publicationState: "pending", publicationClaimToken: null }), "ignored_stale_envelope"],
+    ["a mismatched publication token", durableEpisode({ publicationClaimToken: "other-token" }), "ignored_stale_envelope"],
+    ["a divergent envelope", durableEpisode({ expiredEventId: "other-event" }), "ignored_stale_envelope"],
+  ] as const)("classifies failed CAS reloads for %s without running a second gate", async (_state, reloaded, status) => {
+    const findByBankCode = vi.fn()
+      .mockResolvedValueOnce(durableEpisode())
+      .mockResolvedValueOnce(reloaded);
+    const claimConsumerAttempt = vi.fn().mockResolvedValue(false);
+    const gate = createPreClaimGate("eligible");
+
+    await expect(
+      reserveExpiryPublicationConsumerClaim(
+        createReservationRepository(findByBankCode, claimConsumerAttempt),
+        envelope(),
+        gate,
+      ),
+    ).resolves.toEqual({ status });
+    expect(gate.check).toHaveBeenCalledTimes(1);
+    expect(claimConsumerAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when a failed CAS reload is still the exact unclaimed envelope", async () => {
+    const findByBankCode = vi.fn()
+      .mockResolvedValueOnce(durableEpisode())
+      .mockResolvedValueOnce(durableEpisode());
+    const claimConsumerAttempt = vi.fn().mockResolvedValue(false);
+    const gate = createPreClaimGate("eligible");
+
+    await expect(
+      reserveExpiryPublicationConsumerClaim(
+        createReservationRepository(findByBankCode, claimConsumerAttempt),
+        envelope(),
+        gate,
+      ),
+    ).rejects.toBeInstanceOf(UnexpectedExpiryPublicationClaimResultError);
+    expect(gate.check).toHaveBeenCalledTimes(1);
+    expect(claimConsumerAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates a pre-claim gate rejection without writing a claim", async () => {
+    const gateError = new Error("capacity unavailable");
+    const claimConsumerAttempt = vi.fn();
+    const gate: ExpiryPublicationPreClaimGate = { check: vi.fn().mockRejectedValue(gateError) };
+
+    await expect(
+      reserveExpiryPublicationConsumerClaim(
+        createReservationRepository(vi.fn().mockResolvedValue(durableEpisode()), claimConsumerAttempt),
+        envelope(),
+        gate,
+      ),
+    ).rejects.toBe(gateError);
+    expect(claimConsumerAttempt).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unexpected resolved gate result without writing a claim", async () => {
+    const claimConsumerAttempt = vi.fn();
+    const invalidGate: ExpiryPublicationPreClaimGate = {
+      check: vi.fn().mockResolvedValue("unexpected" as unknown as "eligible"),
+    };
+
+    await expect(
+      reserveExpiryPublicationConsumerClaim(
+        createReservationRepository(vi.fn().mockResolvedValue(durableEpisode()), claimConsumerAttempt),
+        envelope(),
+        invalidGate,
+      ),
+    ).rejects.toBeInstanceOf(UnexpectedExpiryPublicationGateResultError);
+    expect(claimConsumerAttempt).not.toHaveBeenCalled();
+  });
+
+  it("propagates the initial durable-load error object unchanged", async () => {
+    const initialLoadError = new Error("database unavailable");
+    const gate = createPreClaimGate("eligible");
+
+    await expect(
+      reserveExpiryPublicationConsumerClaim(
+        createReservationRepository(vi.fn().mockRejectedValue(initialLoadError), vi.fn()),
+        envelope(),
+        gate,
+      ),
+    ).rejects.toBe(initialLoadError);
+    expect(gate.check).not.toHaveBeenCalled();
+  });
+
+  it("propagates the claim CAS error object unchanged", async () => {
+    const claimError = new Error("claim unavailable");
+
+    await expect(
+      reserveExpiryPublicationConsumerClaim(
+        createReservationRepository(vi.fn().mockResolvedValue(durableEpisode()), vi.fn().mockRejectedValue(claimError)),
+        envelope(),
+        createPreClaimGate("eligible"),
+      ),
+    ).rejects.toBe(claimError);
+  });
+
+  it("propagates the post-failed-CAS reload error object unchanged", async () => {
+    const reloadError = new Error("reload unavailable");
+    const findByBankCode = vi.fn()
+      .mockResolvedValueOnce(durableEpisode())
+      .mockRejectedValueOnce(reloadError);
+
+    await expect(
+      reserveExpiryPublicationConsumerClaim(
+        createReservationRepository(findByBankCode, vi.fn().mockResolvedValue(false)),
+        envelope(),
+        createPreClaimGate("eligible"),
+      ),
+    ).rejects.toBe(reloadError);
   });
 });

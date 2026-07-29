@@ -5,6 +5,7 @@ import { getCurrentPrincipal } from "../../../modules/auth/server";
 import { Badge } from "../../../components/ui/badge";
 import { Button } from "../../../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../../components/ui/card";
+import { BankAutoLoginSettings } from "../../../components/admin/bank-auto-login-settings";
 import { PageHeader } from "../../../components/ui/page-header";
 import { bankSessionStatusLabel } from "../../../lib/banks";
 import { AdminAccessRequiredBanking, canManageBanking, type Principal } from "./_components";
@@ -108,6 +109,7 @@ export function AdminBankConnectionsDashboard({
                 Los empleados pueden ver la cuenta {connection.accountNumber} en las vistas de transacciones,
                 pero nunca controles de sesión bancaria, balances, credenciales, cookies ni solicitudes MFA.
               </p>
+              <BankAutoLoginSettings bankCode="popular" bankName={connection.bankName} />
             </CardContent>
           </Card>
         ))}
