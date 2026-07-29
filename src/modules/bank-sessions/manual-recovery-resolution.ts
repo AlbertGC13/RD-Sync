@@ -18,6 +18,16 @@ export interface ManualRecoveryResolutionCommand {
   readonly decision: ManualRecoveryResolutionDecision;
 }
 
+export interface ManualRecoveryResolutionResult {
+  readonly id: string;
+  readonly bankCode: string;
+  readonly expiredEventId: string;
+  readonly runId: string;
+  readonly decision: ManualRecoveryResolutionDecision;
+  readonly operatorId: string;
+  readonly resolvedAt: Date;
+}
+
 export interface ManualRecoveryResolutionRateLimitGate {
   allow(operatorId: string): Promise<boolean>;
 }

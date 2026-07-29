@@ -7,6 +7,7 @@ import {
   type WorkerHandle,
   type WorkerJob,
 } from "./ingestion-worker-factory";
+import { expiryPublicationJobName } from "../modules/bank-sessions/expiry-publication";
 import type { IngestionResult } from "./queues/index";
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,7 @@ const fakeConnection = {
 };
 
 const fakeJob: WorkerJob = {
+  name: INGESTION_QUEUE_NAME,
   data: { runId: "run-worker-1", bankId: "popular", accountFingerprint: "acct-main" },
 };
 
@@ -115,11 +117,31 @@ describe("createIngestionWorker", () => {
     const processor = makeSuccessProcessor();
     createIngestionWorker({ connection: fakeConnection, processor, WorkerCtor: Ctor });
 
-    const result = await instances[0].handler(fakeJob);
+    const result = await instances[0].handler({ ...fakeJob, name: INGESTION_QUEUE_NAME });
 
     expect(processor).toHaveBeenCalledOnce();
     expect(processor).toHaveBeenCalledWith({ data: fakeJob.data });
     expect(result).toEqual(successResult);
+  });
+
+  it("routes only the exact expiry publication job name to its consumer", async () => {
+    const { Ctor, instances } = makeFakeWorkerCtor();
+    const expiryPublicationConsumer = vi.fn(async () => ({ status: "ignored" }));
+    const processor = makeSuccessProcessor();
+    createIngestionWorker({ connection: fakeConnection, processor, expiryPublicationConsumer, WorkerCtor: Ctor });
+
+    await instances[0].handler({ ...fakeJob, name: expiryPublicationJobName });
+
+    expect(expiryPublicationConsumer).toHaveBeenCalledWith(fakeJob.data);
+    expect(processor).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for unknown names and for expiry jobs without a consumer", async () => {
+    const { Ctor, instances } = makeFakeWorkerCtor();
+    createIngestionWorker({ connection: fakeConnection, processor: makeSuccessProcessor(), WorkerCtor: Ctor });
+
+    await expect(instances[0].handler({ ...fakeJob, name: "unknown" })).rejects.toThrow("Unsupported BullMQ job name");
+    await expect(instances[0].handler({ ...fakeJob, name: expiryPublicationJobName })).rejects.toThrow("Unsupported BullMQ job name");
   });
 
   it("the worker handler does NOT swallow an unexpected processor throw", async () => {
