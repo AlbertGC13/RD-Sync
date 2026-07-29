@@ -290,6 +290,80 @@ describe("createBankAutoLoginStrategy", () => {
 });
 
 describe("executeScrapeTimeAutoLoginTrigger", () => {
+  it("runs the mutation hook once immediately before the first credential fill", async () => {
+    const events: string[] = [];
+    const page = makePage({ onFill: (selector) => { events.push(`fill:${selector}`); } });
+    const beforeAutoLoginMutation = vi.fn(() => { events.push("before"); return true; });
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular", expiredEventId: "E1", credential, cdpUrl: "http://127.0.0.1:9222",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => createBankAutoLoginStrategy(portalConfig) },
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn().mockResolvedValue(true) },
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(page)), beforeAutoLoginMutation,
+    })).resolves.toEqual({ status: "succeeded" });
+
+    expect(beforeAutoLoginMutation).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(["before", "fill:#username", "fill:#password"]);
+  });
+
+  it("fails closed when the mutation hook rejects or denies the compare-and-set", async () => {
+    for (const beforeAutoLoginMutation of [vi.fn().mockResolvedValue(false), vi.fn().mockRejectedValue(new Error("CAS token=secret failed"))]) {
+      const fill = vi.fn();
+      const click = vi.fn();
+      await expect(executeScrapeTimeAutoLoginTrigger({
+        bankCode: "popular", expiredEventId: "E1", credential, cdpUrl: "http://127.0.0.1:9222",
+        adapter: { bankCode: "popular", createAutoLoginStrategy: () => createBankAutoLoginStrategy(portalConfig) },
+        lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn().mockResolvedValue(true) },
+        ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(makePage({ onFill: fill, onClick: click }))), beforeAutoLoginMutation,
+      })).resolves.toMatchObject({ status: "needs_admin_action", reason: "portal_state_unavailable" });
+      expect(beforeAutoLoginMutation).toHaveBeenCalledTimes(1);
+      expect(fill).not.toHaveBeenCalled();
+      expect(click).not.toHaveBeenCalled();
+    }
+  });
+
+  it("reports safe terminal outcomes without credentials and never reports success after a fill failure", async () => {
+    const successOutcome = vi.fn();
+    await executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular", expiredEventId: "E1", credential, cdpUrl: "http://127.0.0.1:9222",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => createBankAutoLoginStrategy(portalConfig) },
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn().mockResolvedValue(true) },
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(makePage())), afterAutoLoginOutcome: successOutcome,
+    });
+    expect(successOutcome).toHaveBeenCalledWith({ bankCode: "popular", expiredEventId: "E1", outcome: { status: "succeeded" } });
+
+    const uncertainOutcome = vi.fn();
+    const page = makePage({ onFill: (selector) => { if (selector === portalConfig.passwordSelector) throw new Error("portal token=secret crashed"); } });
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular", expiredEventId: "E1", credential, cdpUrl: "http://127.0.0.1:9222",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => createBankAutoLoginStrategy(portalConfig) },
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn().mockResolvedValue(true) },
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(page)), afterAutoLoginOutcome: uncertainOutcome,
+    })).resolves.toMatchObject({ status: "needs_admin_action", reason: "portal_state_unavailable" });
+    expect(uncertainOutcome).toHaveBeenCalledWith({ bankCode: "popular", expiredEventId: "E1", outcome: { status: "needs_admin_action", reason: "portal_state_unavailable" } });
+    expect(uncertainOutcome.mock.calls).not.toContainEqual(expect.arrayContaining([expect.objectContaining({ outcome: { status: "succeeded" } })]));
+  });
+
+  it("does not call the mutation hook before lock, browser, throttle, or guard rejections", async () => {
+    const beforeAutoLoginMutation = vi.fn();
+    const base = {
+      bankCode: "popular", expiredEventId: "E1", credential, cdpUrl: "http://127.0.0.1:9222",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => createBankAutoLoginStrategy(portalConfig) },
+      beforeAutoLoginMutation,
+    };
+
+    await executeScrapeTimeAutoLoginTrigger({ ...base, lock: { acquire: vi.fn().mockRejectedValue(new Error("lock unavailable")), release: vi.fn() }, ensureBrowser: vi.fn() });
+    await executeScrapeTimeAutoLoginTrigger({ ...base, lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn() }, ensureBrowser: vi.fn().mockRejectedValue(new Error("browser unavailable")) });
+    await executeScrapeTimeAutoLoginTrigger({ ...base, lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn() }, ensureBrowser: vi.fn().mockResolvedValue({ status: "throttled" }) });
+    await executeScrapeTimeAutoLoginTrigger({
+      ...base,
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn() },
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(makePage({ visible: [portalConfig.mfaIndicatorSelector, ...loginControls] }))),
+    });
+
+    expect(beforeAutoLoginMutation).not.toHaveBeenCalled();
+  });
+
   it("acquires the expired-event lock, runs browser login, and awaits owner release after success", async () => {
     const page = makePage();
     const events: string[] = [];
@@ -602,6 +676,28 @@ describe("createScrapeTimeAutoLoginRunner", () => {
       encryptedPasswordEnvelope: JSON.stringify(encryptCredentialField("bank-password", keyResolver)),
     };
   }
+
+  it("does not call the mutation hook when config is off or credentials are absent", async () => {
+    const beforeAutoLoginMutation = vi.fn();
+    for (const [config, storedCredential] of [
+      [{ autoLoginEnabled: false, breakerState: "closed" }, encryptedCredentialRecord()],
+      [{ autoLoginEnabled: true, breakerState: "closed" }, null],
+    ] as const) {
+      const run = createScrapeTimeAutoLoginRunner({
+        adapterRegistry: { get: vi.fn().mockReturnValue({ bankCode: "popular", createAutoLoginStrategy: vi.fn() }) },
+        autoLoginConfigs: { getByBankCode: vi.fn().mockResolvedValue(config) },
+        credentials: { findByBankCode: vi.fn().mockResolvedValue(storedCredential) },
+        keyResolver,
+        lock: { acquire: vi.fn(), release: vi.fn() },
+        cdpUrlForBankCode: vi.fn(),
+        ensureBrowser: vi.fn(),
+        beforeAutoLoginMutation,
+      });
+
+      await run({ data: { bankId: "popular", expiredEventId: "E1" } });
+    }
+    expect(beforeAutoLoginMutation).not.toHaveBeenCalled();
+  });
 
   it("fails closed for an explicit unknown bank without falling back to Popular", async () => {
     const findByBankCode = vi.fn();

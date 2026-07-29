@@ -2,10 +2,13 @@ import { resolvePrincipal, requireRole } from "../../../modules/auth";
 import type { RateLimiter } from "../../../modules/auth/rate-limiter";
 import { InMemoryRateLimiter } from "../../../modules/auth/rate-limiter";
 import type { BankCredentialService } from "../../../modules/bank-credentials/service";
+import { BankAutoLoginConfigRepository } from "../../../modules/bank-auto-login-config/repository";
+import { getPrismaClient } from "../../../modules/persistence/prisma-client";
 import { getDefaultBankCredentialService } from "./defaults";
 
 export interface GetBankCredentialsHandlerDeps {
   service: Pick<BankCredentialService, "getMetadata">;
+  autoLoginConfigs: Pick<BankAutoLoginConfigRepository, "getByBankCode">;
 }
 
 export interface PostBankCredentialsHandlerDeps {
@@ -41,7 +44,7 @@ export function createGetBankCredentialsHandler(deps?: GetBankCredentialsHandler
 
     if (!resolvedDeps) {
       try {
-        resolvedDeps = { service: getDefaultBankCredentialService() };
+        resolvedDeps = { service: getDefaultBankCredentialService(), autoLoginConfigs: new BankAutoLoginConfigRepository(getPrismaClient()) };
       } catch (error) {
         logGetCredentialMetadataFailure(trimmedBankCode, error);
         return Response.json(
@@ -52,7 +55,10 @@ export function createGetBankCredentialsHandler(deps?: GetBankCredentialsHandler
     }
 
     try {
-      const metadata = await resolvedDeps.service.getMetadata(trimmedBankCode);
+      const [metadata, autoLoginConfig] = await Promise.all([
+        resolvedDeps.service.getMetadata(trimmedBankCode),
+        resolvedDeps.autoLoginConfigs.getByBankCode(trimmedBankCode),
+      ]);
 
       if (!metadata) {
         return Response.json(
@@ -61,7 +67,7 @@ export function createGetBankCredentialsHandler(deps?: GetBankCredentialsHandler
         );
       }
 
-      return Response.json(metadata);
+      return Response.json({ ...metadata, autoLoginEnabled: autoLoginConfig?.autoLoginEnabled ?? false });
     } catch (error) {
       logGetCredentialMetadataFailure(trimmedBankCode, error);
       return Response.json(
