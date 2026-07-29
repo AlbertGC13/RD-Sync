@@ -26,9 +26,13 @@
  * credentials are logged, exposed in API responses, or persisted.
  */
 
+import { createRequire } from "node:module";
+
 import { buildRedisConnectionOptions } from "../../worker/queues/bullmq-queue";
 import { createAutoLoginLock, type AutoLoginLock } from "./index";
 import { RedisLockStore, type RedisEvalClient } from "./redis-store";
+
+const require = createRequire(import.meta.url);
 
 // ---------------------------------------------------------------------------
 // Redis fail-closed policy — named constants for lock-specific overrides
@@ -94,7 +98,6 @@ export function createAutoLoginLockFromEnv(
   if (options?.redisClientFactory) {
     client = options.redisClientFactory(lockConnectionOpts);
   } else {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const Redis = require("ioredis") as new (opts: typeof lockConnectionOpts) => RedisEvalClient;
     client = new Redis(lockConnectionOpts);
   }
