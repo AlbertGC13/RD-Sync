@@ -20,6 +20,7 @@ import type { AdminAlertSink } from "./queues";
 type Timer = ReturnType<typeof setInterval> | number;
 const INTERVAL_MS = 60_000;
 const LEASE_MS = 30_000;
+const MAX_MANUAL_RECOVERY_AUDIT_DELIVERIES_PER_TICK = 100;
 const TERMINAL_ALERT = "Automatic session recovery requires administrative review";
 
 export interface ExpiryRuntime {
@@ -97,7 +98,7 @@ function createEnabledRuntime(deps: ExpiryRuntimeDependencies): ExpiryRuntime {
   async function tickOnce(): Promise<void> {
     await deps.monitor.tick();
     await observeTerminalEpisode();
-    for (let delivered = true; delivered;) {
+    for (let delivered = true, deliveries = 0; delivered && deliveries < MAX_MANUAL_RECOVERY_AUDIT_DELIVERIES_PER_TICK; deliveries += 1) {
       delivered = await deliverManualRecoveryResolutionAudit(
         deps.outbox,
         deps.auditSink,
@@ -122,6 +123,8 @@ function createEnabledRuntime(deps: ExpiryRuntimeDependencies): ExpiryRuntime {
         timer = undefined;
         try {
           await inFlight;
+        } catch {
+          // tick() retains its failure; shutdown only waits for the resource-safe boundary.
         } finally {
           await deps.close?.();
         }

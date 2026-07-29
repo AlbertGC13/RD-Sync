@@ -1,4 +1,5 @@
 import type { AuditEvent } from "../audit";
+import { BANK_AUTOLOGIN_ACTIONS } from "../audit/bank-actions";
 import type { ExpiryPublicationEnvelope } from "./expiry-episodes";
 
 export type ExpiryTerminalFailureReason = "job_failed" | "job_missing";
@@ -44,7 +45,7 @@ export function createExpiryTerminalAudit(
   return {
     id: `bank-session-expiry-terminal:${identity}`,
     actorId: "system", actorRole: "system",
-    action: requiresManualRecovery ? "bank_autologin.manual_recovery_required" : "bank_autologin.needs_admin_action",
+    action: requiresManualRecovery ? BANK_AUTOLOGIN_ACTIONS.MANUAL_RECOVERY_REQUIRED : BANK_AUTOLOGIN_ACTIONS.NEEDS_ADMIN_ACTION,
     target: "bank_session_expiry_episode", targetId: identity,
     metadata: { bankCode: envelope.bankCode, expiredEventId: envelope.expiredEventId, runId: envelope.runId, reason, reconciledAt: reconciledAt.toISOString() },
     createdAt: reconciledAt,
