@@ -178,8 +178,42 @@ model BankSessionExpiryEpisode {
   publicationState             String   @default("pending")
   publicationClaimToken        String?
   publicationFailureReportedAt DateTime?
+  consumerClaimToken           String?
+  consumerAttemptState         String?
+  terminalFailureReason        String?
+  terminalFailureReconciledAt  DateTime?
   createdAt                    DateTime @default(now())
   updatedAt                    DateTime @updatedAt
+}
+
+// Durable resolution evidence survives deletion of its ephemeral expiry episode.
+model ManualRecoveryResolution {
+  id             String                               @id @default(cuid())
+  expiredEventId String                               @unique
+  bankCode       String
+  runId          String
+  outcome        String
+  reason         String
+  operatorId     String
+  resolvedAt     DateTime                             @default(now())
+  replayExpiredEventId String?                        @unique
+  replayRunId          String?                        @unique
+  replayAuthorizedAt   DateTime?
+  auditOutbox    ManualRecoveryResolutionAuditOutbox?
+
+  @@unique([bankCode, runId])
+}
+
+// Delivery remains deferred; this is only the causal pending audit intent.
+model ManualRecoveryResolutionAuditOutbox {
+  id           String                   @id @default(cuid())
+  resolutionId String                   @unique
+  resolution   ManualRecoveryResolution @relation(fields: [resolutionId], references: [id], onDelete: Restrict)
+  state        String                   @default("pending")
+  leaseOwner   String?
+  leaseExpiresAt DateTime?
+  deliveredAt  DateTime?
+  createdAt    DateTime                 @default(now())
 }
 
 // Change 4: EncryptedSessionRef model DROPPED entirely.

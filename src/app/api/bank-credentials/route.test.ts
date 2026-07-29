@@ -13,14 +13,18 @@ function makeRequest(path: string, headers: Record<string, string> = {}): Reques
   return new Request(`http://localhost:3000${path}`, { headers });
 }
 
-function makeHandler(metadata: BankCredentialMetadata | null = null) {
+function makeHandler(metadata: BankCredentialMetadata | null = null, autoLoginEnabled = false) {
   const service = {
     getMetadata: vi.fn().mockResolvedValue(metadata),
   } satisfies GetBankCredentialsHandlerDeps["service"];
+  const autoLoginConfigs = {
+    getByBankCode: vi.fn().mockResolvedValue({ autoLoginEnabled }),
+  } satisfies GetBankCredentialsHandlerDeps["autoLoginConfigs"];
 
   return {
     service,
-    handler: createGetBankCredentialsHandler({ service }),
+    autoLoginConfigs,
+    handler: createGetBankCredentialsHandler({ service, autoLoginConfigs }),
   };
 }
 
@@ -96,7 +100,7 @@ describe("GET /api/bank-credentials", () => {
       keyVersion: 1,
       lastRotatedAt: null,
     } satisfies BankCredentialMetadata;
-    const { handler, service } = makeHandler(metadata);
+    const { handler, service, autoLoginConfigs } = makeHandler(metadata, true);
 
     const res = await handler(makeRequest("/api/bank-credentials?bankCode=popular", adminHeaders()));
     const body = await res.json();
@@ -104,7 +108,8 @@ describe("GET /api/bank-credentials", () => {
 
     expect(res.status).toBe(200);
     expect(service.getMetadata).toHaveBeenCalledWith("popular");
-    expect(body).toEqual(metadata);
+    expect(autoLoginConfigs.getByBankCode).toHaveBeenCalledWith("popular");
+    expect(body).toEqual({ ...metadata, autoLoginEnabled: true });
     expect(serialized).not.toContain("username");
     expect(serialized).not.toContain("password");
     expect(serialized).not.toContain("ciphertext");

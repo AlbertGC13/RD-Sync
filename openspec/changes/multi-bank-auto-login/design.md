@@ -177,6 +177,20 @@ State machine: `expired(scrape-time, expiredEventId) -> adapterEnabled? scraping
 
 Reuse `AuditSink` + `createAuditEvent`. Actions use the CANONICAL table (see spec): `bank_credential.set|rotate|test|decrypt_use`, `bank_autologin.attempted|succeeded|failed|skipped|needs_admin_action`, `bank_breaker.opened|reset`, `bank_killswitch.auto_login_enabled|auto_login_disabled`, `bank_adapter.enabled|disabled`, plus existing `bank_session.expired|restored|unavailable`. Metadata per action in the canonical table — NEVER the value. Actor: admin id (admin actions) or `system:auto-login` / `system:session-monitor` (system actions). Extend `sensitiveKeys` with `username`/`credential`/`envelope`/`plaintext`. Same retention/severity as existing operational audit. No bare `disabled` shorthand.
 
+### Consumer recovery resolution (PR4p2b2)
+
+The currently dormant consumer gains a domain-only resolution command before any endpoint: it validates a nonblank admin actor and an injected rate-limit gate before delegating to persistence. Its discriminated decision union makes only `safe_to_retry/verified_no_mutation`, `mutation_confirmed/verified_mutation`, and `resolved_no_retry/closed_without_retry` representable; runtime validation rejects unknown/cast input before rate limiting. It deliberately does not set `resolvedAt`: b2a2 stamps the database-authoritative timestamp in the same transaction as durable resolution and its outbox row. PR4p2b2a is split for review budget: **b2a1** owns this pure command, canonical constants, and TDD proof; **b2a2** owns the PostgreSQL schema, exact-CAS transaction, pending idempotent resolution-audit outbox, in-memory parity, and real-PostgreSQL proof. The transaction writes resolution fields and the outbox row together or neither. Delivery and replay creation are deferred: only `safe_to_retry` can authorize one later replay with a wholly new episode identity, token, and attempt budget. `manual_recovery_required` is alertable infrastructure uncertainty, never breaker failure. PR4.8 owns authenticated-admin HTTP integration and invokes the domain command; this child adds no endpoint.
+
+| Action | Actor | Exact allowed metadata |
+|---|---|---|
+| `bank_autologin.consumer_reserved` | `system:auto-login` | `bankCode`, `expiredEventId`, `runId`, `reservedAt` |
+| `bank_autologin.mutation_started` | `system:auto-login` | `bankCode`, `expiredEventId`, `runId`, `mutationStartedAt` |
+| `bank_autologin.manual_recovery_required` | `system:auto-login` | `bankCode`, `expiredEventId`, `runId`, categorized `reason`, `manualRecoveryRequiredAt` |
+| `bank_autologin.manual_recovery_resolved` | admin `operatorId` | `bankCode`, `expiredEventId`, `runId`, `outcome`, `operatorId`, categorized `reason`, `resolvedAt` |
+| `bank_autologin.replay_authorized` | admin `operatorId` | `bankCode`, `expiredEventId`, `runId`, `outcome`, `operatorId`, categorized `reason`, `replayAuthorizedAt` |
+
+Tokens, credentials, secrets, and internal errors are structurally excluded from every recovery action.
+
 ## Observability
 
 Per-bank metrics (keyed by `bankCode`): `bank_autologin_failure_rate`, `bank_autologin_breaker_open`, `bank_autologin_latency_ms`, `bank_browser_launch_failures`, `bank_needs_admin_action_backlog`, `bank_browser_capacity` (active/queueDepth/throttleEvents). CONCRETE production alert thresholds (15-min rolling window unless noted): failure rate >1% -> investigate warning; >2% -> emergency/high-priority; >5% OR >=3 banks affected -> all-hands/recommend disable auto-login; login latency p95 >30s -> warning, >60s -> high-priority; browser launch failures >10% -> warning, >25% -> high-priority; breaker open -> alert on open + repeat <=every 30 min; needs_admin_action backlog >5 -> warning, >10 OR oldest >24h -> high-priority; browser capacity queue depth >2x max concurrency sustained 5 min -> warning. Metrics never include credential values or URLs with embedded creds.
