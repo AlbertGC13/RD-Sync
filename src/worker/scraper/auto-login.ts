@@ -78,6 +78,17 @@ export interface ScrapeTimeAutoLoginTriggerContext {
   lock: Pick<AutoLoginLock, "acquire" | "release">;
   ensureBrowser(cdpUrl: string): Promise<ScrapeTimeAutoLoginBrowserResult>;
   recordLockReleaseFailure?(metadata: { bankCode: string; expiredEventId: string }): void | Promise<void>;
+  beforeAutoLoginMutation?(metadata: AutoLoginMutationHookMetadata): boolean | Promise<boolean>;
+  afterAutoLoginOutcome?(metadata: AutoLoginOutcomeHookMetadata): void | Promise<void>;
+}
+
+export interface AutoLoginMutationHookMetadata {
+  bankCode: string;
+  expiredEventId: string;
+}
+
+export interface AutoLoginOutcomeHookMetadata extends AutoLoginMutationHookMetadata {
+  outcome: { status: "succeeded" } | { status: "needs_admin_action"; reason: BankAutoLoginAdminActionReason };
 }
 
 export interface ScrapeTimeAutoLoginRunnerJob {
@@ -116,6 +127,8 @@ export interface ScrapeTimeAutoLoginRunnerDependencies {
   ensureBrowser(bankCode: string, cdpUrl: string): Promise<ScrapeTimeAutoLoginBrowserResult>;
   recordLockReleaseFailure?(metadata: { bankCode: string; expiredEventId: string }): void | Promise<void>;
   recordCredentialDecryptUse?(metadata: { bankCode: string; keyVersion: number }): void | Promise<void>;
+  beforeAutoLoginMutation?(metadata: AutoLoginMutationHookMetadata): boolean | Promise<boolean>;
+  afterAutoLoginOutcome?(metadata: AutoLoginOutcomeHookMetadata): void | Promise<void>;
 }
 
 const SAFE_ADMIN_ACTION_SUMMARY = "Bank auto-login requires admin action";
@@ -316,6 +329,8 @@ export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerD
       lock: deps.lock,
       ensureBrowser: (url) => deps.ensureBrowser(bankCode, url),
       recordLockReleaseFailure: deps.recordLockReleaseFailure,
+      beforeAutoLoginMutation: deps.beforeAutoLoginMutation,
+      afterAutoLoginOutcome: deps.afterAutoLoginOutcome,
     });
   };
 }
@@ -454,10 +469,14 @@ async function runOwnedAutoLogin(context: ScrapeTimeAutoLoginTriggerContext, cdp
   if (browser?.status === "throttled") return { status: "throttled", safeSummary: SAFE_BROWSER_THROTTLED_SUMMARY };
   if (!browser) return needsAdminAction("browser_unavailable");
 
+  let outcome: BankAutoLoginOutcome;
   try {
-    return await context.adapter.createAutoLoginStrategy().autoLogin({ credential: context.credential, page: browser.page });
+    outcome = await context.adapter.createAutoLoginStrategy().autoLogin({
+      credential: context.credential,
+      page: withAutoLoginMutationHook(browser.page, context),
+    });
   } catch {
-    return needsAdminAction("portal_state_unavailable");
+    outcome = needsAdminAction("portal_state_unavailable");
   } finally {
     try {
       await browser.close();
@@ -465,6 +484,35 @@ async function runOwnedAutoLogin(context: ScrapeTimeAutoLoginTriggerContext, cdp
       // Cleanup failures must not change or leak past the safe auto-login outcome.
     }
   }
+
+  try {
+    await context.afterAutoLoginOutcome?.({
+      bankCode: context.bankCode,
+      expiredEventId: context.expiredEventId,
+      outcome: outcome.status === "succeeded" ? outcome : { status: outcome.status, reason: outcome.reason },
+    });
+  } catch {
+    if (outcome.status === "succeeded") return needsAdminAction("portal_state_unavailable");
+  }
+  return outcome;
+}
+
+function withAutoLoginMutationHook(page: BankAutoLoginPage, context: ScrapeTimeAutoLoginTriggerContext): BankAutoLoginPage {
+  if (!context.beforeAutoLoginMutation) return page;
+  let mutationAuthorized = false;
+  return {
+    currentUrl: () => page.currentUrl(),
+    hasVisibleSelector: (selector) => page.hasVisibleSelector(selector),
+    async fill(selector, value) {
+      if (!mutationAuthorized) {
+        const permitted = await context.beforeAutoLoginMutation?.({ bankCode: context.bankCode, expiredEventId: context.expiredEventId });
+        if (permitted === false) throw new Error("Auto-login mutation was not authorized");
+        mutationAuthorized = true;
+      }
+      await page.fill(selector, value);
+    },
+    click: (selector) => page.click(selector),
+  };
 }
 
 function manualRequired(reason: "lock_busy" | "lock_unavailable"): ScrapeTimeAutoLoginOutcome {

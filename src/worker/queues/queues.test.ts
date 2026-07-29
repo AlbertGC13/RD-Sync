@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createIngestionProcessor,
   createIngestionQueueOptions,
+  ingestionJobName,
   scheduleIngestionJob,
   type IngestionJobData,
   type ResolveScraper,
@@ -332,6 +333,10 @@ describe("ingestion processor — audit events", () => {
 });
 
 describe("BullMQ ingestion scheduling", () => {
+  it("exports the exact ingestion job name used by the shared queue router", () => {
+    expect(ingestionJobName).toBe("bank-transaction-ingestion");
+  });
+
   it("uses stable job ids and retry/backoff options", async () => {
     const queue = new FakeQueue();
 
