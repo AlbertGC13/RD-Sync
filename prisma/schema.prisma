@@ -180,6 +180,8 @@ model BankSessionExpiryEpisode {
   publicationFailureReportedAt DateTime?
   consumerClaimToken           String?
   consumerAttemptState         String?
+  terminalFailureReason        String?
+  terminalFailureReconciledAt  DateTime?
   createdAt                    DateTime @default(now())
   updatedAt                    DateTime @updatedAt
 }
@@ -194,6 +196,9 @@ model ManualRecoveryResolution {
   reason         String
   operatorId     String
   resolvedAt     DateTime                             @default(now())
+  replayExpiredEventId String?                        @unique
+  replayRunId          String?                        @unique
+  replayAuthorizedAt   DateTime?
   auditOutbox    ManualRecoveryResolutionAuditOutbox?
 
   @@unique([bankCode, runId])

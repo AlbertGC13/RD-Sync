@@ -33,7 +33,9 @@ import { deliverManualRecoveryResolutionAudit } from "../bank-sessions/manual-re
 import { createSetAutoLoginEnabledAndAudit } from "../../app/api/bank-credentials/[bankCode]/auto-login/defaults";
 import { PUBLICATION_CLAIM_TIMEOUT_MS, publishExpiryEpisode, type ExpiryPublicationPublisher } from "../bank-sessions/expiry-episodes";
 import { createBankSessionMonitor } from "../bank-sessions";
+import { createManualRecoveryReplayAuthorization } from "../bank-sessions/manual-recovery-replay-authorization";
 import { InMemoryAuditSink } from "../audit";
+import { reserveExpiryPublicationConsumerClaim } from "../bank-sessions/expiry-publication-consumer";
 
 function createPublisherStub(overrides: Partial<ExpiryPublicationPublisher> = {}): ExpiryPublicationPublisher {
   return { schedule: async () => undefined, observe: async () => undefined, ...overrides };
@@ -54,6 +56,8 @@ const recoveryMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/
 const schemaPath = fileURLToPath(new URL("../../../prisma/schema.prisma", import.meta.url));
 const manualRecoveryResolutionMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260728120000_add_manual_recovery_resolution_outbox/migration.sql", import.meta.url));
 const auditDeliveryMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260728190000_add_manual_recovery_audit_delivery_state/migration.sql", import.meta.url));
+const replayAuthorizationMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260728213000_authorize_manual_recovery_replay/migration.sql", import.meta.url));
+const terminalFailureMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260728130000_reconcile_expiry_terminal_failures/migration.sql", import.meta.url));
 
 // ---------------------------------------------------------------------------
 // Shared test client — one pool for the entire test file.
@@ -121,7 +125,7 @@ async function closePausedPostgresConnection(connection: Awaited<ReturnType<type
 async function waitForLockWait(observer: Awaited<ReturnType<typeof openPausedPostgresConnection>>, holderPid: number): Promise<number> {
   for (let attempts = 0; attempts < MAX_POSTGRES_LOCK_WAIT_ATTEMPTS; attempts += 1) {
     const result = await observer.client.query<{ pid: number }>(
-      "SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%BankSessionExpiryEpisode%'",
+      "SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid))",
       [holderPid],
     );
     if (result.rows[0]) return result.rows[0].pid;
@@ -482,6 +486,34 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     }
   });
 
+  it("linearizes deterministic consumer claim acquisition, crash resume, and mutation no-resume", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const first = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const second = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(first, "resumable-race");
+    const gate = { check: async () => "eligible" as const };
+    const results = await Promise.all([
+      reserveExpiryPublicationConsumerClaim(first, envelope, gate),
+      reserveExpiryPublicationConsumerClaim(second, envelope, gate),
+    ]);
+    expect(results.map(({ status }) => status).sort()).toEqual(["claim_acquired", "claim_resumed"]);
+    await expect(reserveExpiryPublicationConsumerClaim(first, envelope, gate)).resolves.toEqual({ status: "claim_resumed" });
+    const claim = (await first.findByBankCode(envelope.bankCode))!.consumerClaimToken!;
+    await first.markConsumerMutationStarted(envelope, claim);
+    await expect(reserveExpiryPublicationConsumerClaim(second, envelope, gate)).resolves.toEqual({ status: "ignored_already_claimed" });
+  });
+  it("rejects stale, restored, and invalid consumer claim deliveries without writes", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, "resumable-stale");
+    const gate = { check: vi.fn().mockResolvedValue("eligible" as const) };
+    for (const stale of [{ ...envelope, token: "wrong" }, { ...envelope, runId: "wrong" }]) await expect(reserveExpiryPublicationConsumerClaim(repo, stale, gate)).resolves.toEqual({ status: "ignored_stale_envelope" });
+    await repo.markAuditDelivered(envelope, "restored");
+    await expect(reserveExpiryPublicationConsumerClaim(repo, envelope, gate)).resolves.toEqual({ status: "ignored_stale_envelope" });
+    await expect(repo.claimConsumerAttempt(envelope, " ")).rejects.toThrow("Consumer claim token must be nonblank");
+    expect(gate.check).not.toHaveBeenCalled();
+  });
+
   it("enforces the consumer recovery tuple and independent transition predicates", async () => {
     if (!prisma || !TEST_DB_URL) throw new Error("prisma not initialized");
     const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
@@ -594,6 +626,91 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     await expect(prisma.manualRecoveryResolutionAuditOutbox.count()).resolves.toBe(1);
   });
 
+  it("linearizes terminal markers, upgrades missing evidence, and keeps audit metadata allowlisted", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const first = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const second = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(first, "terminal-race");
+    const results = await Promise.all([
+      first.reconcileTerminalFailure(envelope, "job_missing", new Date("2026-07-28T13:00:00.000Z")),
+      second.reconcileTerminalFailure(envelope, "job_failed", new Date("2026-07-28T13:00:01.000Z")),
+    ]);
+    expect(results.some((result) => result.status === "reconciled")).toBe(true);
+    await expect(first.reconcileTerminalFailure(envelope, "job_failed", new Date("2026-07-28T13:00:02.000Z"))).resolves.toMatchObject({ status: "already_reconciled" });
+    await expect(first.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ terminalFailureReason: "job_failed", terminalFailureReconciledAt: expect.any(Date) });
+    const audit = await prisma.auditEvent.findUnique({ where: { id: `bank-session-expiry-terminal:${envelope.bankCode}:${envelope.expiredEventId}:${envelope.runId}` } });
+    expect(audit).toMatchObject({ action: "needs_admin_action", metadata: { bankCode: envelope.bankCode, expiredEventId: envelope.expiredEventId, runId: envelope.runId, reason: "job_failed" } });
+    expect(JSON.stringify(audit?.metadata)).not.toContain(envelope.token);
+    await expect(prisma.auditEvent.count({ where: { id: audit!.id } })).resolves.toBe(1);
+  });
+
+  it.each(["bankCode", "expiredEventId", "runId", "token"] as const)("ignores exact stale terminal envelopes with a different %s", async (field) => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, `terminal-stale-${field}`);
+    await expect(repo.reconcileTerminalFailure({ ...envelope, [field]: `wrong-${field}` }, "job_failed", new Date())).resolves.toMatchObject({ status: "ignored_stale_envelope" });
+    await expect(prisma.auditEvent.count()).resolves.toBe(0);
+  });
+
+  it("ignores restoration-first and replacement replay while terminal-first preserves manual recovery", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const restored = await publishEnvelope(repo, "terminal-restored");
+    await repo.markAuditDelivered(restored, "restored");
+    await expect(repo.reconcileTerminalFailure(restored, "job_failed", new Date())).resolves.toMatchObject({ status: "ignored_stale_envelope" });
+    const started = await publishEnvelope(repo, "terminal-started");
+    await repo.claimConsumerAttempt(started, "terminal-owner");
+    await repo.markConsumerMutationStarted(started, "terminal-owner");
+    await expect(repo.reconcileTerminalFailure(started, "job_failed", new Date())).resolves.toMatchObject({ status: "reconciled" });
+    await expect(repo.findByBankCode(started.bankCode)).resolves.toMatchObject({ consumerAttemptState: "manual_recovery_required" });
+    const replay = await publishEnvelope(repo, "terminal-replay");
+    await repo.reconcileTerminalFailure(replay, "job_failed", new Date());
+    await repo.close(replay);
+    const replacement = { ...replay, expiredEventId: "replacement-event", runId: "replacement-run" };
+    await repo.getOrCreate(replacement);
+    await expect(repo.reconcileTerminalFailure(replay, "job_failed", new Date())).resolves.toMatchObject({ status: "ignored_stale_envelope" });
+    await expect(repo.findByBankCode(replay.bankCode)).resolves.toMatchObject({ bankCode: replacement.bankCode, expiredEventId: replacement.expiredEventId, runId: replacement.runId });
+    const pending = await createUnclaimedEnvelope(repo, "terminal-pending");
+    await expect(repo.reconcileTerminalFailure(pending, "job_failed", new Date())).resolves.toMatchObject({ status: "ignored_stale_envelope" });
+    const resolved = await publishEnvelope(repo, "terminal-resolved");
+    await prisma.$executeRaw`UPDATE "BankSessionExpiryEpisode" SET "consumerClaimToken" = 'resolved-owner', "consumerAttemptState" = 'resolved' WHERE "bankCode" = ${resolved.bankCode}`;
+    await expect(repo.reconcileTerminalFailure(resolved, "job_failed", new Date())).resolves.toMatchObject({ status: "ignored_stale_envelope" });
+    await expect(prisma.auditEvent.count({ where: { targetId: `${resolved.bankCode}:${resolved.expiredEventId}:${resolved.runId}` } })).resolves.toBe(0);
+
+  });
+
+  it("rolls back terminal marker and consumer state when audit persistence fails", async () => {
+    if (!prisma || !TEST_DB_URL) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, "terminal-audit-rollback");
+    await repo.claimConsumerAttempt(envelope, "terminal-owner");
+    await repo.markConsumerMutationStarted(envelope, "terminal-owner");
+    const pool = new Pool({ connectionString: TEST_DB_URL });
+    try {
+      await pool.query('CREATE FUNCTION "fail_terminal_audit"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION \'audit failed\'; END; $$');
+      await pool.query('CREATE TRIGGER "fail_terminal_audit" BEFORE INSERT OR UPDATE ON "AuditEvent" FOR EACH ROW EXECUTE FUNCTION "fail_terminal_audit"()');
+      await expect(repo.reconcileTerminalFailure(envelope, "job_failed", new Date())).rejects.toThrow();
+      await expect(repo.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ terminalFailureReason: null, terminalFailureReconciledAt: null, consumerAttemptState: "mutation_started" });
+      await expect(prisma.auditEvent.count()).resolves.toBe(0);
+      await pool.query('DROP TRIGGER "fail_terminal_audit" ON "AuditEvent"');
+      await pool.query('DROP FUNCTION "fail_terminal_audit"()');
+    } finally { await pool.end(); }
+  });
+
+  it("enforces the named terminal tuple constraint", async () => {
+    const migration = await readFile(terminalFailureMigrationPath, "utf8");
+    expect(migration).toContain('CONSTRAINT "BankSessionExpiryEpisode_terminalFailure_check" CHECK');
+    expect(migration.trimStart()).toMatch(/^BEGIN;/);
+    if (!prisma || !TEST_DB_URL) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await createUnclaimedEnvelope(repo, "terminal-check");
+    const pool = new Pool({ connectionString: TEST_DB_URL });
+    try {
+      for (const [reason, at, state, token] of [["job_failed", null, "published", "token"], ["unknown", new Date(), "published", "token"]] as const) {
+        await expect(pool.query('UPDATE "BankSessionExpiryEpisode" SET "terminalFailureReason" = $1, "terminalFailureReconciledAt" = $2, "publicationState" = $3, "publicationClaimToken" = $4 WHERE "bankCode" = $5', [reason, at, state, token, envelope.bankCode])).rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "BankSessionExpiryEpisode_terminalFailure_check" });
+      }
+    } finally { await pool.end(); }
+  });
 });
 describe("Manual recovery resolution schema contract", () => {
   it("declares durable resolution and pending audit-outbox models with independent identities", async () => {
@@ -626,6 +743,21 @@ describe("Manual recovery resolution schema contract", () => {
 
     expect(migration).not.toContain('REFERENCES "BankSessionExpiryEpisode"');
     expect(persistedContract).not.toMatch(/claimToken|publicationToken|credential|ciphertext|secret|errorMessage|errorDetail/i);
+  });
+
+  it("declares replay authorization identity, fail-closed tuple constraints, and partial uniqueness", async () => {
+    const [schema, migration] = await Promise.all([readFile(schemaPath, "utf8"), readFile(replayAuthorizationMigrationPath, "utf8")]);
+    expect(schema).toMatch(/replayExpiredEventId\s+String\?\s+@unique/);
+    expect(schema).toMatch(/replayRunId\s+String\?\s+@unique/);
+    expect(schema).toMatch(/replayAuthorizedAt\s+DateTime\?/);
+    expect(migration).toContain('CONSTRAINT "ManualRecoveryResolution_replayTuple_check" CHECK');
+    expect(migration).toContain('CONSTRAINT "ManualRecoveryResolution_replayDecision_check" CHECK');
+    expect(migration).toContain('CONSTRAINT "ManualRecoveryResolution_replayId_check" CHECK');
+    expect(migration).toContain('CREATE UNIQUE INDEX "ManualRecoveryResolution_replayExpiredEventId_key"');
+    expect(migration).toContain('CREATE UNIQUE INDEX "ManualRecoveryResolution_replayRunId_key"');
+    expect(migration).not.toMatch(/claimToken|publicationToken|credential|ciphertext|secret|errorMessage|errorDetail/i);
+    expect(migration.trimStart()).toMatch(/^BEGIN;/);
+    expect(migration.trimEnd()).toMatch(/COMMIT;$/);
   });
 });
 
@@ -679,8 +811,97 @@ describe.skipIf(!hasTestDb)("Prisma manual recovery resolution schema (requires 
       await pool.end();
     }
   });
+
+  it("enforces replay tuples, safe decisions, nonblank distinct IDs, and partial uniqueness", async () => {
+    if (!TEST_DB_URL) throw new Error("RD_SYNC_TEST_DATABASE_URL is required");
+    const pool = new Pool({ connectionString: TEST_DB_URL });
+    const insert = (id: string, event: string, run: string, replayEvent: string | null, replayRun: string | null, replayAt: Date | null, outcome = "safe_to_retry", reason = "verified_no_mutation") =>
+      pool.query('INSERT INTO "ManualRecoveryResolution" ("id", "expiredEventId", "bankCode", "runId", "outcome", "reason", "operatorId", "replayExpiredEventId", "replayRunId", "replayAuthorizedAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)', [id, event, `bank-${id}`, run, outcome, reason, "admin-replay", replayEvent, replayRun, replayAt]);
+    const authorizedAt = new Date("2026-07-28T21:30:00.000Z");
+    try {
+      await expect(insert("replay-valid", "original-event", "original-run", "replay-event", "replay-run", authorizedAt)).resolves.toMatchObject({ rowCount: 1 });
+      await expect(insert("replay-partial", "event-2", "run-2", "replay-event-2", null, null)).rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolution_replayTuple_check" });
+      await expect(insert("replay-unsafe", "event-3", "run-3", "replay-event-3", "replay-run-3", authorizedAt, "resolved_no_retry", "closed_without_retry")).rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolution_replayDecision_check" });
+      await expect(insert("replay-blank", "event-4", "run-4", " ", "replay-run-4", authorizedAt)).rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolution_replayId_check" });
+      await expect(insert("replay-equal", "event-5", "run-5", "event-5", "run-5", authorizedAt)).rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "ManualRecoveryResolution_replayId_check" });
+      await expect(insert("replay-event-conflict", "event-6", "run-6", "replay-event", "replay-run-6", authorizedAt)).rejects.toMatchObject({ code: "23505", constraint: "ManualRecoveryResolution_replayExpiredEventId_key" });
+      await expect(insert("replay-run-conflict", "event-7", "run-7", "replay-event-7", "replay-run", authorizedAt)).rejects.toMatchObject({ code: "23505", constraint: "ManualRecoveryResolution_replayRunId_key" });
+    } finally {
+      await pool.end();
+    }
+  });
 });
 
+describe.skipIf(!hasTestDb)("Prisma replay authorization contract (requires RD_SYNC_TEST_DATABASE_URL)", () => {
+  beforeEach(truncateTables); afterEach(truncateTables);
+  async function fixture(options: { state?: "delivered" | "pending" | "delivering"; current?: "original" | "absent" | "newer" | "wrong"; safe?: boolean } = {}) {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const original = { bankCode: `replay-${crypto.randomUUID()}`, expiredEventId: `original-${crypto.randomUUID()}`, runId: `original-run-${crypto.randomUUID()}`, token: "replay-token" };
+    await repo.getOrCreate(original); await repo.claimPublication(original, original.token); await repo.markPublicationPublished(original, original.token);
+    await repo.claimConsumerAttempt(original, "consumer"); await repo.markConsumerMutationStarted(original, "consumer"); await repo.markConsumerManualRecoveryRequired(original, "consumer");
+    const resolution = await repo.resolveConsumerManualRecovery(original, "consumer", { operatorId: "admin-replay", decision: options.safe === false ? { outcome: "resolved_no_retry", reason: "closed_without_retry" } : { outcome: "safe_to_retry", reason: "verified_no_mutation" } });
+    if (!resolution) throw new Error("fixture resolution failed");
+    const state = options.state ?? "delivered";
+    await prisma.$executeRaw`UPDATE "ManualRecoveryResolutionAuditOutbox" SET "state" = ${state}, "leaseOwner" = ${state === "delivering" ? "delivery-worker" : null}, "leaseExpiresAt" = ${state === "delivering" ? new Date("2026-07-28T12:05:00.000Z") : null}, "deliveredAt" = ${state === "delivered" ? new Date("2026-07-28T12:00:00.000Z") : null} WHERE "resolutionId" = ${resolution.id}`;
+    if (options.current === "absent" || options.current === "newer") await repo.close(original);
+    if (options.current === "newer") await repo.getOrCreate({ ...original, expiredEventId: `newer-${crypto.randomUUID()}`, runId: `newer-run-${crypto.randomUUID()}` });
+    if (options.current === "wrong") await prisma.$executeRaw`UPDATE "BankSessionExpiryEpisode" SET "publicationState" = 'publishing' WHERE "bankCode" = ${original.bankCode}`;
+    const authorize = createManualRecoveryReplayAuthorization({ repository: repo, createExpiredEventId: () => "replay-event", createRunId: () => "replay-run", clock: () => new Date("2026-07-28T12:01:00.000Z") });
+    return { repo, original, resolution, authorize };
+  }
+
+  it.each(["original", "absent"] as const)("authorizes an %s original with one token-free audit and clean pending episode", async (current) => {
+    const { repo, resolution, authorize } = await fixture({ current });
+    await expect(authorize.authorize(resolution.id)).resolves.toMatchObject({ status: "authorized", audit: { id: `bank-autologin-replay-authorized:${resolution.id}`, actorId: "admin-replay", action: "bank_autologin.replay_authorized", metadata: { replayExpiredEventId: "replay-event", replayRunId: "replay-run" } } });
+    await expect(repo.findByBankCode(resolution.bankCode)).resolves.toMatchObject({ expiredEventId: "replay-event", runId: "replay-run", publicationState: "pending", publicationClaimToken: null, publicationFailureReportedAt: null, consumerClaimToken: null, consumerAttemptState: null, expiredAuditDelivered: false, restoredAuditDelivered: false });
+    await expect(prisma!.auditEvent.count()).resolves.toBe(1);
+  });
+
+  it.each([{ state: "pending" }, { state: "delivering" }, { safe: false }, { current: "newer" }, { current: "wrong" }] as const)("blocks persisted precondition failures without writes", async (options) => {
+    const { repo, original, resolution, authorize } = await fixture(options);
+    await expect(authorize.authorize(resolution.id)).resolves.toEqual({ status: "ineligible" });
+    await expect(prisma!.auditEvent.count()).resolves.toBe(0);
+    await expect(repo.findByBankCode(original.bankCode)).resolves.toMatchObject(options.current === "newer" ? { expiredEventId: expect.stringMatching(/^newer-/) } : { bankCode: original.bankCode, expiredEventId: original.expiredEventId, runId: original.runId });
+  });
+
+  it("rolls back invalid/conflicting IDs and an audit failure", async () => {
+    if (!TEST_DB_URL) throw new Error("RD_SYNC_TEST_DATABASE_URL is required");
+    const { repo, original, resolution, authorize } = await fixture();
+    for (const [event, run] of [["", "replay-run"], [original.expiredEventId, "replay-run"], ["same", "same"]]) await expect(createManualRecoveryReplayAuthorization({ repository: repo, createExpiredEventId: () => event, createRunId: () => run }).authorize(resolution.id)).rejects.toThrow();
+    const pool = new Pool({ connectionString: TEST_DB_URL });
+    try {
+      await pool.query('CREATE FUNCTION "fail_replay_audit"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION \'audit failed\'; END; $$'); await pool.query('CREATE TRIGGER "fail_replay_audit" BEFORE INSERT ON "AuditEvent" FOR EACH ROW EXECUTE FUNCTION "fail_replay_audit"()');
+      await expect(authorize.authorize(resolution.id)).rejects.toThrow();
+      await expect(repo.findByBankCode(original.bankCode)).resolves.toMatchObject({ bankCode: original.bankCode, expiredEventId: original.expiredEventId, runId: original.runId });
+      await expect(prisma!.manualRecoveryResolution.findUnique({ where: { id: resolution.id } })).resolves.toMatchObject({ replayExpiredEventId: null, replayRunId: null, replayAuthorizedAt: null });
+      await pool.query('DROP TRIGGER "fail_replay_audit" ON "AuditEvent"'); await pool.query('DROP FUNCTION "fail_replay_audit"()');
+    } finally { await pool.end(); }
+  });
+
+  it("linearizes two authorizers into one replay episode and audit", async () => {
+    const { resolution, authorize } = await fixture();
+    const results = await Promise.all([authorize.authorize(resolution.id), authorize.authorize(resolution.id)]);
+    expect(results.map(({ status }) => status).sort()).toEqual(["already_authorized", "authorized"]);
+    await expect(prisma!.bankSessionExpiryEpisode.count({ where: { bankCode: resolution.bankCode, expiredEventId: "replay-event" } })).resolves.toBe(1);
+    await expect(prisma!.auditEvent.count()).resolves.toBe(1);
+  });
+
+  it("does not overwrite a competing legitimate replacement episode", async () => {
+    const { repo, original, resolution, authorize } = await fixture();
+    const holder = await openPausedPostgresConnection(); const observer = await openPausedPostgresConnection();
+    try {
+      await holder.client.query('SELECT "bankCode" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1 FOR UPDATE', [original.bankCode]);
+      const contender = authorize.authorize(resolution.id);
+      expect(await waitForLockWait(observer, holder.pid)).not.toBe(holder.pid);
+      await holder.client.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [original.bankCode]);
+      await holder.client.query('INSERT INTO "BankSessionExpiryEpisode" ("bankCode", "expiredEventId", "runId", "updatedAt") VALUES ($1, $2, $3, NOW())', [original.bankCode, "monitor-event", "monitor-run"]);
+      await holder.client.query("COMMIT");
+      await expect(contender).resolves.toEqual({ status: "ineligible" });
+      await expect(repo.findByBankCode(original.bankCode)).resolves.toMatchObject({ expiredEventId: "monitor-event", runId: "monitor-run" });
+    } finally { await closePausedPostgresConnection(observer); await closePausedPostgresConnection(holder); }
+  });
+});
 describe.skipIf(!hasTestDb)("Prisma atomic auto-login contract (requires RD_SYNC_TEST_DATABASE_URL)", () => {
   beforeEach(truncateTables);
   afterEach(truncateTables);

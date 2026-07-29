@@ -30,6 +30,8 @@ import { Worker } from "bullmq";
 
 import { buildRedisConnectionOptions } from "./queues/bullmq-queue";
 import { createIngestionWorker, type WorkerConstructor } from "./ingestion-worker-factory";
+import { createExpiryPublicationConsumer } from "./expiry-publication-consumer";
+import { createDefaultExpiryRuntime } from "./expiry-runtime";
 import { resolveDefaultAlertSink } from "./alerts/email-alert-sink";
 import { bankAdapterRegistry } from "../modules/bank-adapters/registry";
 import { BankAutoLoginConfigRepository } from "../modules/bank-auto-login-config/repository";
@@ -39,6 +41,8 @@ import { resolveCredentialKey } from "../modules/bank-credentials/key-resolver";
 import { createAuditEvent } from "../modules/audit";
 import { BANK_AUTOLOGIN_ACTIONS, BANK_CREDENTIAL_ACTIONS } from "../modules/audit/bank-actions";
 import { getPrismaClient } from "../modules/persistence/prisma-client";
+import { PrismaBankSessionExpiryEpisodeRepository } from "../modules/persistence/prisma-bank-session-expiry-episode-repository";
+import { popularScraperProfile } from "../modules/bank-adapters/popular";
 import { resolveBankBrowserEnv } from "./scraper/browser-runtime";
 import { createScrapeTimeAutoLoginRunner, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginStrategy } from "./scraper/auto-login";
 import { resolveDefaultScraper } from "../app/api/scrape-runs/consumer-defaults";
@@ -60,6 +64,7 @@ if (!redisUrl) {
   );
   process.exit(1);
 }
+const expiryRuntime = createDefaultExpiryRuntime();
 
 // ---------------------------------------------------------------------------
 // Wire up real dependencies
@@ -132,6 +137,17 @@ const processor = createIngestionProcessor({
   runScrapeTimeAutoLogin,
 });
 
+const expiryPublicationConsumer = createExpiryPublicationConsumer({
+  episodes: new PrismaBankSessionExpiryEpisodeRepository(prisma),
+  gate: { check: async () => "eligible" },
+  ingest: processor,
+  resolveAccountFingerprint(bankCode) {
+    return bankCode === popularScraperProfile.bankId
+      ? popularScraperProfile.accountFingerprint
+      : undefined;
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Start the worker
 // ---------------------------------------------------------------------------
@@ -139,12 +155,14 @@ const processor = createIngestionProcessor({
 const worker = createIngestionWorker({
   connection,
   processor,
+  expiryPublicationConsumer,
   concurrency: 2,
   // Bind the real bullmq Worker at the composition root; the factory stays
   // bullmq-free. The cast is the single adapter seam between the library and
   // our structural WorkerConstructor port.
   WorkerCtor: Worker as unknown as WorkerConstructor,
 });
+expiryRuntime.start();
 
 console.log("[ingestion-worker] Started. Waiting for jobs on 'bank-transaction-ingestion'...");
 
@@ -159,7 +177,7 @@ const SHUTDOWN_GRACE_MS = 25_000;
 async function shutdown(signal: string): Promise<void> {
   console.log(`[ingestion-worker] ${signal} received — shutting down gracefully (${SHUTDOWN_GRACE_MS}ms timeout)...`);
 
-  const graceful = worker.close();
+  const graceful = Promise.all([worker.close(), expiryRuntime.shutdown()]);
   const timeout = new Promise<void>((resolve) =>
     setTimeout(() => {
       console.warn("[ingestion-worker] Shutdown grace period exceeded — forcing exit.");
