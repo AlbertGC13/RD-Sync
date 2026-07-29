@@ -127,7 +127,7 @@ Gate: full gates + FRESH 4R review + Judgment Day before merge; PR3B1 <=400 line
   - [ ] PR4p2b2b: deliver pending recovery-audit outbox rows and authorize one replay only for `safe_to_retry`, using a wholly new episode identity/token/attempt budget while preserving the original resolution.
   - [ ] PR4p2b3: define terminal-failure reconciliation and published-observe rejection signals.
 - [x] B2.4 Scheduler provider: deduplicate jobs by exact episode `runId`; configure three total attempts (initial attempt plus two automatic retries) with exponential backoff (30s), retained failures (10), and bounded completed history (100); return observed normal/resolved-race/thrown-race BullMQ states, leaving terminal failures retained without manual retry. A published monitor tick observes the exact retained job or `missing`; it never creates a replacement attempt budget. After a successful `add`, an observation failure propagates as the observation error itself without entering duplicate-add recovery.
-- [ ] B2.5 Prove two-replica disabled/config-missing behavior: one episode, one expiry audit, and one restoration audit.
+- [x] B2.5 Prove two-replica runtime behavior with dedicated PostgreSQL and Redis: one durable episode, one expiry audit, one publication job, leased manual-recovery audit delivery, terminal reconciliation, and graceful shutdown.
 - [ ] B2.6 Run fresh 4R and Judgment Day before review.
 - Gate: ≤400 changed lines; no B2 implementation in B1.
 - B2a predecessor owns B2.1-B2.2, including active-session pending-candidate clearing before restoration/retry; its behavior remains unchanged.
