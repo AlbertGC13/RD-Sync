@@ -36,6 +36,7 @@ function durableEpisode(overrides: Partial<BankSessionExpiryEpisode> = {}): Bank
     publicationClaimToken: "token-1",
     publicationFailureReportedAt: null,
     consumerClaimToken: null,
+    consumerAttemptState: null,
     updatedAt: new Date("2026-07-17T00:00:00.000Z"),
     ...overrides,
   };
@@ -215,8 +216,7 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
     ["blank publication token", { ...envelope(), token: " " }, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
     ["stale version", { ...envelope(), version: 0 }, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
     ["unsupported version", { ...envelope(), version: 2 }, "consumer-claim-1", InvalidExpiryPublicationEnvelopeError],
-    ["blank consumer claim token", envelope(), " \t\n", Error],
-  ] as const)("rejects a %s before durable, gate, or CAS access", async (_case, queuedHint, consumerClaimToken, error) => {
+  ] as const)("rejects a %s before durable, gate, or CAS access", async (_case, queuedHint, _consumerClaimToken, error) => {
     const findByBankCode = vi.fn();
     const claimConsumerAttempt = vi.fn();
     const gate = createPreClaimGate("eligible");
@@ -225,7 +225,6 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
       reserveExpiryPublicationConsumerClaim(
         createReservationRepository(findByBankCode, claimConsumerAttempt),
         queuedHint,
-        consumerClaimToken,
         gate,
       ),
     ).rejects.toBeInstanceOf(error);
@@ -234,8 +233,8 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
     expect(gate.check).not.toHaveBeenCalled();
   });
 
-  it("bypasses the pre-claim gate when the exact current envelope is already claimed", async () => {
-    const findByBankCode = vi.fn().mockResolvedValue(durableEpisode({ consumerClaimToken: "existing-claim" }));
+  it("resumes the exact deterministic reserved claim without invoking the pre-claim gate", async () => {
+    const findByBankCode = vi.fn().mockResolvedValue(durableEpisode({ consumerClaimToken: "ceada9119bc580c326a532f1ec7e47b5862074fca3be66da7f5ff92e96b117ee", consumerAttemptState: "reserved" }));
     const claimConsumerAttempt = vi.fn();
     const gate = createPreClaimGate("eligible");
 
@@ -243,10 +242,9 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
       reserveExpiryPublicationConsumerClaim(
         createReservationRepository(findByBankCode, claimConsumerAttempt),
         envelope(),
-        "consumer-claim-2",
         gate,
       ),
-    ).resolves.toEqual({ status: "ignored_already_claimed" });
+    ).resolves.toEqual({ status: "claim_resumed" });
     expect(gate.check).not.toHaveBeenCalled();
     expect(claimConsumerAttempt).not.toHaveBeenCalled();
   });
@@ -264,7 +262,6 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
       reserveExpiryPublicationConsumerClaim(
         createReservationRepository(vi.fn().mockResolvedValue(durable), claimConsumerAttempt),
         envelope(),
-        "consumer-claim-3",
         gate,
       ),
     ).resolves.toEqual({ status: "ignored_stale_envelope" });
@@ -280,7 +277,6 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
       reserveExpiryPublicationConsumerClaim(
         createReservationRepository(vi.fn().mockResolvedValue(durableEpisode()), claimConsumerAttempt),
         envelope(),
-        "consumer-claim-4",
         gate,
       ),
     ).rejects.toBeInstanceOf(RetryableExpiryPublicationThrottleError);
@@ -295,11 +291,10 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
       reserveExpiryPublicationConsumerClaim(
         createReservationRepository(vi.fn().mockResolvedValue(durableEpisode()), claimConsumerAttempt),
         envelope(),
-        "consumer-claim-5",
         gate,
       ),
     ).resolves.toEqual({ status: "claim_acquired" });
-    expect(claimConsumerAttempt).toHaveBeenCalledWith(envelope(), "consumer-claim-5");
+    expect(claimConsumerAttempt).toHaveBeenCalledWith(envelope(), "ceada9119bc580c326a532f1ec7e47b5862074fca3be66da7f5ff92e96b117ee");
   });
 
   it.each([
@@ -320,7 +315,6 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
       reserveExpiryPublicationConsumerClaim(
         createReservationRepository(findByBankCode, claimConsumerAttempt),
         envelope(),
-        "consumer-claim-6",
         gate,
       ),
     ).resolves.toEqual({ status });
@@ -339,7 +333,6 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
       reserveExpiryPublicationConsumerClaim(
         createReservationRepository(findByBankCode, claimConsumerAttempt),
         envelope(),
-        "consumer-claim-7",
         gate,
       ),
     ).rejects.toBeInstanceOf(UnexpectedExpiryPublicationClaimResultError);
@@ -356,7 +349,6 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
       reserveExpiryPublicationConsumerClaim(
         createReservationRepository(vi.fn().mockResolvedValue(durableEpisode()), claimConsumerAttempt),
         envelope(),
-        "consumer-claim-7",
         gate,
       ),
     ).rejects.toBe(gateError);
@@ -373,7 +365,6 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
       reserveExpiryPublicationConsumerClaim(
         createReservationRepository(vi.fn().mockResolvedValue(durableEpisode()), claimConsumerAttempt),
         envelope(),
-        "consumer-claim-8",
         invalidGate,
       ),
     ).rejects.toBeInstanceOf(UnexpectedExpiryPublicationGateResultError);
@@ -388,7 +379,6 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
       reserveExpiryPublicationConsumerClaim(
         createReservationRepository(vi.fn().mockRejectedValue(initialLoadError), vi.fn()),
         envelope(),
-        "consumer-claim-9",
         gate,
       ),
     ).rejects.toBe(initialLoadError);
@@ -402,7 +392,6 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
       reserveExpiryPublicationConsumerClaim(
         createReservationRepository(vi.fn().mockResolvedValue(durableEpisode()), vi.fn().mockRejectedValue(claimError)),
         envelope(),
-        "consumer-claim-10",
         createPreClaimGate("eligible"),
       ),
     ).rejects.toBe(claimError);
@@ -418,7 +407,6 @@ describe("reserveExpiryPublicationConsumerClaim", () => {
       reserveExpiryPublicationConsumerClaim(
         createReservationRepository(findByBankCode, vi.fn().mockResolvedValue(false)),
         envelope(),
-        "consumer-claim-11",
         createPreClaimGate("eligible"),
       ),
     ).rejects.toBe(reloadError);
