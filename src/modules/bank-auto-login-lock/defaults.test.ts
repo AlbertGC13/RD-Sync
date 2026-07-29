@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createAutoLoginLockFromEnv } from "./defaults";
 import { FakeRedisClient } from "./fake-redis-client";
@@ -169,6 +170,25 @@ describe("defaultAutoLoginLock (globalThis singleton)", () => {
       const mod = await import("./defaults");
       expect(mod.defaultAutoLoginLock).not.toBeNull();
       expect(typeof mod.defaultAutoLoginLock!.acquire).toBe("function");
+    } finally {
+      delete process.env.RD_SYNC_REDIS_URL;
+      delete (globalThis as Record<string, unknown>).__rdSyncAutoLoginLock;
+      vi.resetModules();
+    }
+  });
+  it("reaches the default ioredis constructor in ESM without a global require (BUG-ESM-RL regression)", async () => {
+    delete (globalThis as Record<string, unknown>).__rdSyncAutoLoginLock;
+    try {
+      expect(() => execFileSync(
+        process.execPath,
+        [
+          "--import", "tsx",
+          "--input-type=module",
+          "--eval",
+          "process.env.RD_SYNC_REDIS_URL = 'redis://localhost:6379'; await import('./src/modules/bank-auto-login-lock/defaults.ts');",
+        ],
+        { cwd: process.cwd(), stdio: "pipe" },
+      )).not.toThrow();
     } finally {
       delete process.env.RD_SYNC_REDIS_URL;
       delete (globalThis as Record<string, unknown>).__rdSyncAutoLoginLock;
