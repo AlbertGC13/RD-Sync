@@ -3,7 +3,7 @@
  *
  * This suite is skipped unless BOTH dedicated test-service URLs are supplied:
  *
- *   RD_SYNC_TEST_DATABASE_URL="postgresql://..." RD_SYNC_TEST_REDIS_URL="redis://..." pnpm test -- src/worker/expiry-runtime.integration.test.ts
+ *   RD_SYNC_REQUIRE_INTEGRATION=true RD_SYNC_TEST_DATABASE_URL="postgresql://..." RD_SYNC_TEST_REDIS_URL="redis://..." pnpm test -- src/worker/expiry-runtime.integration.test.ts
  *
  * It uses a UUID queue and deletes only its own database rows and Redis queue.
  * Do not point either variable at development or production infrastructure.
@@ -24,17 +24,21 @@ import { observeExpiryPublicationJob, scheduleExpiryPublicationJob } from "../mo
 const TEST_DATABASE_URL = process.env.RD_SYNC_TEST_DATABASE_URL;
 const TEST_REDIS_URL = process.env.RD_SYNC_TEST_REDIS_URL;
 const RUN_INTEGRATION = Boolean(TEST_DATABASE_URL && TEST_REDIS_URL);
+const REQUIRE_INTEGRATION = process.env.RD_SYNC_REQUIRE_INTEGRATION === "true";
+const WORKER_READY_TIMEOUT_MS = 5_000;
+if (REQUIRE_INTEGRATION && !RUN_INTEGRATION) {
+  throw new Error("RD_SYNC_REQUIRE_INTEGRATION=true requires RD_SYNC_TEST_DATABASE_URL and RD_SYNC_TEST_REDIS_URL");
+}
 const queueName = `expiry-runtime-integration-${randomUUID()}`;
 const bankCode = `runtime-${randomUUID()}`;
 const expiredEventId = `event-${randomUUID()}`;
 const runId = createExpiredSessionRunId(bankCode, expiredEventId);
-const publicationToken = `publication-${randomUUID()}`;
 const manualExpiredEventId = `manual-${randomUUID()}`;
 const manualResolutionId = `resolution-${randomUUID()}`;
 const manualOutboxId = `outbox-${randomUUID()}`;
-const expiryAuditId = `bank-session-bank_session.expired:${bankCode}:${expiredEventId}`;
-const terminalAuditId = `bank-session-expiry-terminal:${bankCode}:${expiredEventId}:${runId}`;
-const manualAuditId = `bank-autologin-manual-recovery-resolved:${manualResolutionId}`;
+const expiryAuditWhere = { action: "bank_session.expired", target: "bank_session", metadata: { path: ["expiredEventId"], equals: expiredEventId } } satisfies Prisma.AuditEventWhereInput;
+const terminalAuditWhere = { target: "bank_session_expiry_episode", targetId: `${bankCode}:${expiredEventId}:${runId}` } satisfies Prisma.AuditEventWhereInput;
+const manualAuditWhere = { action: "bank_autologin.manual_recovery_resolved", target: "manual_recovery_resolution", targetId: manualResolutionId } satisfies Prisma.AuditEventWhereInput;
 let prisma: PrismaClient | undefined;
 let Queue: typeof import("bullmq").Queue;
 let Worker: typeof import("bullmq").Worker;
@@ -65,9 +69,7 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
       await cleanupQueue.obliterate({ force: true }).catch(() => undefined);
       await cleanupQueue.close().catch(() => undefined);
     }
-    await prisma?.auditEvent.deleteMany({
-      where: { id: { in: [expiryAuditId, terminalAuditId, manualAuditId] } },
-    });
+    await prisma?.auditEvent.deleteMany({ where: { OR: [expiryAuditWhere, terminalAuditWhere, manualAuditWhere] } });
     await prisma?.manualRecoveryResolutionAuditOutbox.deleteMany({ where: { id: manualOutboxId } });
     await prisma?.manualRecoveryResolution.deleteMany({ where: { id: manualResolutionId } });
     await prisma?.bankSessionExpiryEpisode.deleteMany({ where: { bankCode } });
@@ -101,14 +103,17 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
     const timers: number[] = [];
     const clearedTimers: number[] = [];
     const ownersSeen = new Set<string>();
+    const proposedTokens = new Map<string, string>();
     const alerts: Array<{ safeSummary: string }> = [];
-    const tickGate: { wait?: Promise<void>; release?: () => void } = {};
+    const tickGate: { wait?: Promise<void>; release?: () => void; signalReplicaATick?: () => void } = {};
     const localTickStats = new Map<string, { calls: number; active: number; max: number }>();
     let releaseClaimBarrier!: () => void;
     const claimBarrier = new Promise<void>((resolve) => { releaseClaimBarrier = resolve; });
 
     function replica(owner: string, queue: import("bullmq").Queue): ExpiryRuntime {
       const stats = { calls: 0, active: 0, max: 0 };
+      const proposedToken = `publication-${owner}-${randomUUID()}`;
+      proposedTokens.set(owner, proposedToken);
       localTickStats.set(owner, stats);
       const publisher = {
         schedule: (envelope: { bankCode: string; expiredEventId: string; runId: string; token: string }) =>
@@ -121,6 +126,7 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
           stats.active += 1;
           stats.max = Math.max(stats.max, stats.active);
           try {
+            if (owner === "replica-a") tickGate.signalReplicaATick?.();
             await tickGate.wait;
             return { status: "expired", checkedAt: new Date().toISOString(), safeSummary: "Synthetic expiry" };
           } finally {
@@ -135,7 +141,7 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
           bankCode,
           episodes,
           createExpiredEventId: () => expiredEventId,
-          publish: (episode) => publishExpiryEpisode(episodes, episode, publicationToken, publisher).then(() => undefined),
+          publish: (episode) => publishExpiryEpisode(episodes, episode, proposedToken, publisher).then(() => undefined),
         },
       });
       return createExpiryRuntime(
@@ -196,10 +202,12 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
       expiredEventId,
       runId,
       publicationState: "published",
-      publicationClaimToken: publicationToken,
+      publicationClaimToken: expect.any(String),
     });
-    expect(await prisma.auditEvent.count({ where: { id: expiryAuditId } })).toBe(1);
-    expect(await queueA.getJob(runId)).toBeDefined();
+    expect([...proposedTokens.values()]).toEqual(expect.arrayContaining([episode!.publicationClaimToken!]));
+    expect(new Set(proposedTokens.values())).toHaveLength(2);
+    expect(await prisma.auditEvent.count({ where: expiryAuditWhere })).toBe(1);
+    expect((await queueA.getJob(runId))?.data.token).toBe(episode!.publicationClaimToken);
 
     worker = new Worker(
       queueName,
@@ -209,7 +217,11 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
       },
       { connection, concurrency: 1 },
     );
-    await new Promise<void>((resolve) => worker!.once("ready", resolve));
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(`Timed out after ${WORKER_READY_TIMEOUT_MS}ms waiting for BullMQ worker readiness`)), WORKER_READY_TIMEOUT_MS);
+      worker!.once("ready", () => { clearTimeout(timeout); resolve(); });
+      worker!.once("error", (error) => { clearTimeout(timeout); reject(error); });
+    });
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("Timed out waiting for synthetic terminal failure")), 5_000);
       worker!.on("failed", (job) => {
@@ -238,18 +250,19 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
     expect(await prisma.manualRecoveryResolutionAuditOutbox.count({
       where: { id: manualOutboxId, state: "delivered" },
     })).toBe(1);
-    expect(await prisma.auditEvent.count({ where: { id: manualAuditId } })).toBe(1);
-    expect(await prisma.auditEvent.count({ where: { id: terminalAuditId } })).toBe(1);
+    expect(await prisma.auditEvent.count({ where: manualAuditWhere })).toBe(1);
+    expect(await prisma.auditEvent.count({ where: terminalAuditWhere })).toBe(1);
     expect(alerts.filter((alert) => alert.safeSummary === "Automatic session recovery requires administrative review")).toHaveLength(1);
     expect(JSON.stringify(alerts)).not.toMatch(/token|https?:\/\/|synthetic publication failure/i);
 
     tickGate.wait = new Promise<void>((resolve) => { tickGate.release = resolve; });
+    const replicaATickEntered = new Promise<void>((resolve) => { tickGate.signalReplicaATick = resolve; });
     const replicaAStats = localTickStats.get("replica-a")!;
     const callsBeforeFinalTick = replicaAStats.calls;
     const firstTick = runtimeA.tick();
-    runtimeA.tick();
+    void runtimeA.tick();
     const finalTick = runtimeB.tick();
-    await Promise.resolve();
+    await replicaATickEntered;
     expect(replicaAStats.calls).toBe(callsBeforeFinalTick + 1);
     expect(replicaAStats.max).toBe(1);
     const stoppingA = runtimeA.shutdown();

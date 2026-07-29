@@ -122,12 +122,14 @@ migrations and a dedicated Redis instance:
 ```bash
 RD_SYNC_TEST_DATABASE_URL="postgresql://test-user:test-password@localhost:5432/rd_sync_test" \
 RD_SYNC_TEST_REDIS_URL="redis://localhost:6379" \
-pnpm exec vitest run src/worker/expiry-runtime.integration.test.ts
+RD_SYNC_REQUIRE_INTEGRATION=true pnpm exec vitest run src/worker/expiry-runtime.integration.test.ts
 ```
 
-Until this command completes successfully against both dedicated services, the
-proof remains blocked and B2.5 remains pending. Record unavailable PostgreSQL
-or Redis as a blocked verification result; do not infer a pass from the skip.
+This command fails if either service URL is absent. Without
+`RD_SYNC_REQUIRE_INTEGRATION=true`, the normal full suite still skips this
+integration proof when services are unavailable. Until the required command
+completes successfully against both dedicated services, the proof remains
+blocked and B2.5 remains pending.
 
 Expected evidence:
 
