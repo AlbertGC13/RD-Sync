@@ -8,24 +8,24 @@ vi.mock("sonner", () => ({
 }));
 
 import {
-  DEFAULT_RUN_NOW_BANK_ID,
-  SUPPORTED_RUN_NOW_BANK_IDS,
-  isSupportedRunNowBankId,
+  DEFAULT_RUN_NOW_BANK_CODE,
+  SUPPORTED_RUN_NOW_BANK_CODES,
+  isSupportedRunNowBankCode,
   triggerRunNow,
 } from "./trigger-scrape-button";
 import { toast } from "sonner";
 
-describe("SUPPORTED_RUN_NOW_BANK_IDS — bankId whitelist", () => {
+describe("SUPPORTED_RUN_NOW_BANK_CODES — bankCode whitelist", () => {
   it("exposes Popular as the only currently supported bank", () => {
-    expect(SUPPORTED_RUN_NOW_BANK_IDS).toEqual(["popular"]);
-    expect(DEFAULT_RUN_NOW_BANK_ID).toBe("popular");
+    expect(SUPPORTED_RUN_NOW_BANK_CODES).toEqual(["popular"]);
+    expect(DEFAULT_RUN_NOW_BANK_CODE).toBe("popular");
   });
 
-  it("recognises popular as supported and rejects every other bankId", () => {
-    expect(isSupportedRunNowBankId("popular")).toBe(true);
-    expect(isSupportedRunNowBankId("banreservas")).toBe(false);
-    expect(isSupportedRunNowBankId("bhd")).toBe(false);
-    expect(isSupportedRunNowBankId("")).toBe(false);
+  it("recognises popular as supported and rejects every other bankCode", () => {
+    expect(isSupportedRunNowBankCode("popular")).toBe(true);
+    expect(isSupportedRunNowBankCode("banreservas")).toBe(false);
+    expect(isSupportedRunNowBankCode("bhd")).toBe(false);
+    expect(isSupportedRunNowBankCode("")).toBe(false);
   });
 });
 

@@ -3,11 +3,7 @@ import type { CdpSessionChecker, BankSessionCheckResult, BankSessionMonitor } fr
 import {
   defaultSessionChecker,
   defaultSessionMonitor,
-  startDefaultSessionMonitorIfEnabled,
 } from "../defaults";
-
-// Start the background monitor when this module is first imported.
-startDefaultSessionMonitorIfEnabled();
 
 // ---------------------------------------------------------------------------
 // Handler factory (injectable dependencies for testing)

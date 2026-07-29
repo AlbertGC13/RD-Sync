@@ -159,6 +159,30 @@ describe("POST /api/scrape-runs/run-now", () => {
     expect(await scrapeRuns.list({})).toEqual([]);
     expect(queue.addCalls).toEqual([]);
   });
+
+  it("returns 400 with a safe message when an unknown bankId is requested", async () => {
+    const scrapeRuns = new InMemoryScrapeRunRepository();
+    const queue = new FakeQueue();
+    const handler = createPostScrapeRunNowHandler({ scrapeRuns, queue });
+
+    const response = await handler(
+      new Request("http://localhost/api/scrape-runs/run-now", {
+        method: "POST",
+        headers: {
+          "x-rd-sync-user-id": "admin-1",
+          "x-rd-sync-role": "admin",
+        },
+        body: JSON.stringify({ bankId: "unknown-bank" }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toBe("Bank not currently supported for manual runs");
+    // Nothing should have been queued for an unsupported bank.
+    expect(await scrapeRuns.list({})).toEqual([]);
+    expect(queue.addCalls).toEqual([]);
+  });
 });
 
 class FakeQueue implements QueueLike {

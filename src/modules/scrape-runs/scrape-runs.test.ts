@@ -6,6 +6,7 @@ import {
   toDashboardScrapeRun,
 } from "./index";
 import type { ScrapeRunRecord } from "./index";
+import { runScrapeRunRepositoryContract } from "../persistence/contracts/scrape-run-repository.contract";
 
 const baseRun: ScrapeRunRecord = {
   id: "run-1",
@@ -105,6 +106,70 @@ describe("InMemoryScrapeRunRepository", () => {
     expect((await repository.list({})).map((run) => run.id)).toEqual(["run-new", "run-old"]);
   });
 
+  it("findById returns the matching run and null when absent", async () => {
+    const repository = new InMemoryScrapeRunRepository();
+
+    await repository.createQueued({ id: "run-a", bankId: "popular" });
+    await repository.markSucceeded(
+      "run-a",
+      { insertedCount: 5, skippedCount: 2 },
+      new Date("2026-06-08T12:05:00.000Z"),
+    );
+
+    const found = await repository.findById("run-a");
+    expect(found).toMatchObject({
+      id: "run-a",
+      bankId: "popular",
+      status: "succeeded",
+      insertedCount: 5,
+      skippedCount: 2,
+    });
+
+    // Missing run resolves to null — the status endpoint maps this to 404.
+    expect(await repository.findById("does-not-exist")).toBeNull();
+  });
+
+  it("findById returns a copy so callers cannot mutate repository state", async () => {
+    const repository = new InMemoryScrapeRunRepository();
+    await repository.createQueued({ id: "run-a", bankId: "popular" });
+
+    const found = await repository.findById("run-a");
+    expect(found).not.toBeNull();
+    found!.status = "succeeded";
+
+    // The internal record must be untouched — defensive copy on read.
+    expect((await repository.findById("run-a"))?.status).toBe("queued");
+  });
+
+  it("findById clones Date fields so in-place mutation does not leak into stored state", async () => {
+    const repository = new InMemoryScrapeRunRepository();
+    await repository.createQueued({
+      id: "run-dates",
+      bankId: "popular",
+      createdAt: new Date("2026-06-08T12:00:00.000Z"),
+    });
+    await repository.markRunning("run-dates", new Date("2026-06-08T12:01:00.000Z"));
+
+    const found = await repository.findById("run-dates");
+    expect(found).not.toBeNull();
+    // Capture the pristine stored time values before any mutation.
+    const originalCreatedAt = found!.createdAt.getTime();
+    const originalUpdatedAt = found!.updatedAt.getTime();
+    const originalStartedAt = found!.startedAt?.getTime();
+
+    // Mutate the returned Date objects IN PLACE (not just reassigning the
+    // property) — this is the subtle bug a shallow `{ ...record }` copy would
+    // let through, because the Date refs would be shared with the stored record.
+    found!.createdAt.setTime(originalCreatedAt + 3_600_000);
+    found!.updatedAt.setTime(originalUpdatedAt + 3_600_000);
+    found!.startedAt?.setTime((originalStartedAt ?? 0) + 3_600_000);
+
+    const after = await repository.findById("run-dates");
+    expect(after!.createdAt.getTime()).toBe(originalCreatedAt);
+    expect(after!.updatedAt.getTime()).toBe(originalUpdatedAt);
+    expect(after!.startedAt?.getTime()).toBe(originalStartedAt);
+  });
+
   it("records worker status transitions with timestamps and counts", async () => {
     const repository = new InMemoryScrapeRunRepository();
 
@@ -156,4 +221,30 @@ describe("InMemoryScrapeRunRepository", () => {
       ["run-mfa", "needs_admin_action", "Bank session requires admin MFA action"],
     ]);
   });
+
+  it("persists browser throttling as a distinct deferred outcome", async () => {
+    const repository = new InMemoryScrapeRunRepository();
+
+    await repository.createQueued({ id: "run-throttled", bankId: "popular" });
+    await repository.markThrottled(
+      "run-throttled",
+      "Bank browser capacity is temporarily unavailable",
+      new Date("2026-06-08T12:05:00.000Z"),
+    );
+
+    expect(await repository.list({ status: "throttled" })).toMatchObject([
+      {
+        id: "run-throttled",
+        status: "throttled",
+        safeErrorSummary: "Bank browser capacity is temporarily unavailable",
+        endedAt: new Date("2026-06-08T12:05:00.000Z"),
+      },
+    ]);
+    expect(await repository.list({ status: "needs_admin_action" })).toEqual([]);
+  });
 });
+
+runScrapeRunRepositoryContract(async () => ({
+  repo: new InMemoryScrapeRunRepository(),
+  cleanup: async () => undefined,
+}));

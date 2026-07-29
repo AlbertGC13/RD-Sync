@@ -30,7 +30,21 @@ import { Worker } from "bullmq";
 
 import { buildRedisConnectionOptions } from "./queues/bullmq-queue";
 import { createIngestionWorker, type WorkerConstructor } from "./ingestion-worker-factory";
+import { createExpiryPublicationConsumer } from "./expiry-publication-consumer";
+import { createDefaultExpiryRuntime } from "./expiry-runtime";
 import { resolveDefaultAlertSink } from "./alerts/email-alert-sink";
+import { bankAdapterRegistry } from "../modules/bank-adapters/registry";
+import { BankAutoLoginConfigRepository } from "../modules/bank-auto-login-config/repository";
+import { defaultAutoLoginLock } from "../modules/bank-auto-login-lock/defaults";
+import { BankCredentialRepository } from "../modules/bank-credentials/repository";
+import { resolveCredentialKey } from "../modules/bank-credentials/key-resolver";
+import { createAuditEvent } from "../modules/audit";
+import { BANK_AUTOLOGIN_ACTIONS, BANK_CREDENTIAL_ACTIONS } from "../modules/audit/bank-actions";
+import { getPrismaClient } from "../modules/persistence/prisma-client";
+import { PrismaBankSessionExpiryEpisodeRepository } from "../modules/persistence/prisma-bank-session-expiry-episode-repository";
+import { popularScraperProfile } from "../modules/bank-adapters/popular";
+import { resolveBankBrowserEnv } from "./scraper/browser-runtime";
+import { createScrapeTimeAutoLoginRunner, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginStrategy } from "./scraper/auto-login";
 import { resolveDefaultScraper } from "../app/api/scrape-runs/consumer-defaults";
 import { defaultScrapeRunRepository } from "../app/api/scrape-runs/defaults";
 import { defaultTransactionRepository } from "../app/api/transactions/defaults";
@@ -50,19 +64,88 @@ if (!redisUrl) {
   );
   process.exit(1);
 }
+const expiryRuntime = createDefaultExpiryRuntime();
 
 // ---------------------------------------------------------------------------
 // Wire up real dependencies
 // ---------------------------------------------------------------------------
 
 const connection = buildRedisConnectionOptions(redisUrl);
+const prisma = getPrismaClient();
+
+function toScrapeTimeAutoLoginStrategy(strategy: unknown, bankCode: string): BankAutoLoginStrategy {
+  if (isScrapeTimeAutoLoginStrategy(strategy)) return strategy;
+  return {
+    bankCode,
+    async autoLogin() {
+      return { status: "needs_admin_action", reason: "incompatible_flow", safeSummary: "Bank auto-login requires admin action" };
+    },
+  };
+}
+
+function isScrapeTimeAutoLoginStrategy(strategy: unknown): strategy is BankAutoLoginStrategy {
+  if (typeof strategy !== "object" || strategy === null) return false;
+  const candidate = strategy as { autoLogin?: unknown };
+  return typeof candidate.autoLogin === "function";
+}
+
+const runScrapeTimeAutoLogin = createScrapeTimeAutoLoginRunner({
+  adapterRegistry: {
+    get(bankCode) {
+      const adapter = bankAdapterRegistry.get(bankCode);
+      if (!adapter) return undefined;
+      return {
+        bankCode: adapter.bankCode,
+        createAutoLoginStrategy: () => toScrapeTimeAutoLoginStrategy(adapter.createAutoLoginStrategy(), adapter.bankCode),
+      };
+    },
+  },
+  autoLoginConfigs: new BankAutoLoginConfigRepository(prisma),
+  credentials: new BankCredentialRepository(prisma),
+  keyResolver: resolveCredentialKey,
+  lock: defaultAutoLoginLock,
+  cdpUrlForBankCode: (bankCode) => resolveBankBrowserEnv(bankCode, process.env).cdpUrl || undefined,
+  ensureBrowser: unavailableScrapeTimeAutoLoginBrowserOpener,
+  async recordLockReleaseFailure({ bankCode, expiredEventId }) {
+    await defaultAuditSink.record(createAuditEvent({
+      actorId: "system:auto-login",
+      actorRole: null,
+      action: BANK_AUTOLOGIN_ACTIONS.FAILED,
+      target: "bank_autologin_lock",
+      targetId: null,
+      metadata: { bankCode, expiredEventId, failure: "lock_release_failed" },
+    }));
+  },
+  async recordCredentialDecryptUse({ bankCode, keyVersion }) {
+    await defaultAuditSink.record(createAuditEvent({
+      actorId: "system:auto-login",
+      actorRole: null,
+      action: BANK_CREDENTIAL_ACTIONS.DECRYPT_USE,
+      target: "bank_credential",
+      targetId: null,
+      metadata: { bankCode, keyVersion },
+    }));
+  },
+});
 
 const processor = createIngestionProcessor({
   scrapeRuns: defaultScrapeRunRepository,
   transactions: defaultTransactionRepository,
   adminAlerts: resolveDefaultAlertSink(),
   auditSink: defaultAuditSink,
-  scraper: resolveDefaultScraper(),
+  resolveScraper: resolveDefaultScraper,
+  runScrapeTimeAutoLogin,
+});
+
+const expiryPublicationConsumer = createExpiryPublicationConsumer({
+  episodes: new PrismaBankSessionExpiryEpisodeRepository(prisma),
+  gate: { check: async () => "eligible" },
+  ingest: processor,
+  resolveAccountFingerprint(bankCode) {
+    return bankCode === popularScraperProfile.bankId
+      ? popularScraperProfile.accountFingerprint
+      : undefined;
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -72,12 +155,14 @@ const processor = createIngestionProcessor({
 const worker = createIngestionWorker({
   connection,
   processor,
+  expiryPublicationConsumer,
   concurrency: 2,
   // Bind the real bullmq Worker at the composition root; the factory stays
   // bullmq-free. The cast is the single adapter seam between the library and
   // our structural WorkerConstructor port.
   WorkerCtor: Worker as unknown as WorkerConstructor,
 });
+expiryRuntime.start();
 
 console.log("[ingestion-worker] Started. Waiting for jobs on 'bank-transaction-ingestion'...");
 
@@ -92,7 +177,7 @@ const SHUTDOWN_GRACE_MS = 25_000;
 async function shutdown(signal: string): Promise<void> {
   console.log(`[ingestion-worker] ${signal} received — shutting down gracefully (${SHUTDOWN_GRACE_MS}ms timeout)...`);
 
-  const graceful = worker.close();
+  const graceful = Promise.all([worker.close(), expiryRuntime.shutdown()]);
   const timeout = new Promise<void>((resolve) =>
     setTimeout(() => {
       console.warn("[ingestion-worker] Shutdown grace period exceeded — forcing exit.");

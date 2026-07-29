@@ -1,4 +1,6 @@
 export interface AuditEventInput {
+  /** Optional stable delivery key for idempotent operational events. */
+  id?: string;
   actorId: string | null;
   actorRole: string | null;
   action: string;
@@ -7,7 +9,7 @@ export interface AuditEventInput {
   metadata?: Record<string, unknown> | null;
 }
 
-export interface AuditEvent extends Required<Omit<AuditEventInput, "metadata" | "targetId">> {
+export interface AuditEvent extends Required<Omit<AuditEventInput, "id" | "metadata" | "targetId">> {
   id: string;
   targetId: string | null;
   metadata: Record<string, unknown> | null;
@@ -16,18 +18,22 @@ export interface AuditEvent extends Required<Omit<AuditEventInput, "metadata" | 
 
 const sensitiveKeys = new Set([
   "cookie",
+  "credential",
+  "envelope",
   "password",
+  "plaintext",
   "rawhtml",
   "screenshot",
   "secret",
   "sessioncookie",
   "sessiontoken",
   "token",
+  "username",
 ]);
 
 export function createAuditEvent(input: AuditEventInput): AuditEvent {
   return {
-    id: crypto.randomUUID(),
+    id: input.id ?? crypto.randomUUID(),
     actorId: input.actorId,
     actorRole: input.actorRole,
     action: input.action,
@@ -56,8 +62,11 @@ export interface AuditSink {
 
 export class InMemoryAuditSink implements AuditSink {
   private readonly events: AuditEvent[] = [];
+  private readonly eventIds = new Set<string>();
 
   async record(event: AuditEvent): Promise<void> {
+    if (this.eventIds.has(event.id)) return;
+    this.eventIds.add(event.id);
     this.events.push(event);
   }
 

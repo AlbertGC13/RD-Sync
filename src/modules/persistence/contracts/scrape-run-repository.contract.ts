@@ -17,6 +17,7 @@ export interface ScrapeRunRepoHandle {
     markRunning(runId: string, startedAt?: Date): Promise<void>;
     markSucceeded(runId: string, counts: { insertedCount: number; skippedCount: number }, endedAt?: Date): Promise<void>;
     markNeedsAdminAction(runId: string, safeErrorSummary: string, endedAt?: Date): Promise<void>;
+    markThrottled(runId: string, safeErrorSummary: string, endedAt?: Date): Promise<void>;
     markFailed(runId: string, safeErrorSummary: string, endedAt?: Date): Promise<void>;
   };
   cleanup(): Promise<void>;
@@ -169,6 +170,28 @@ export function runScrapeRunRepositoryContract(
 
       expect(run.status).toBe("needs_admin_action");
       expect(run.safeErrorSummary).toBe("Bank session requires admin MFA action");
+    });
+
+    // -------------------------------------------------------------------------
+    // markThrottled
+    // -------------------------------------------------------------------------
+    it("transitions to throttled and filters the deferred run by status", async () => {
+      const endedAt = new Date("2026-06-08T12:03:00.000Z");
+      await handle.repo.createQueued({ id: "run-throttled", bankId: "popular" });
+      await handle.repo.markThrottled(
+        "run-throttled",
+        "Bank browser capacity is temporarily unavailable",
+        endedAt,
+      );
+
+      const [run] = await handle.repo.list({ status: "throttled" });
+
+      expect(run).toMatchObject({
+        id: "run-throttled",
+        status: "throttled",
+        safeErrorSummary: "Bank browser capacity is temporarily unavailable",
+        endedAt,
+      });
     });
 
     // -------------------------------------------------------------------------

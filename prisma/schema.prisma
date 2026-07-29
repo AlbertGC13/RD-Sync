@@ -37,6 +37,7 @@ enum ScrapeRunStatus {
   SUCCEEDED          @map("succeeded")
   FAILED             @map("failed")
   NEEDS_ADMIN_ACTION @map("needs_admin_action")
+  THROTTLED          @map("throttled")
 }
 
 // BankSessionStatus is not referenced by any Prisma model field.
@@ -88,15 +89,18 @@ model UserRole {
 
 // Change 4: DROP sessions EncryptedSessionRef[] from Bank (EncryptedSessionRef model removed).
 model Bank {
-  id           String        @id @default(cuid())
-  code         String        @unique
-  name         String
-  isActive     Boolean       @default(true)
-  accounts     BankAccount[]
-  scrapeRuns   ScrapeRun[]
-  transactions Transaction[]
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  id                 String                @id @default(cuid())
+  code               String                @unique
+  name               String
+  isActive           Boolean               @default(true)
+  accounts           BankAccount[]
+  scrapeRuns         ScrapeRun[]
+  transactions       Transaction[]
+  bankCredential     BankCredential?
+  autoLoginConfig    BankAutoLoginConfig?
+  adapterConfig      BankAdapterConfig?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
 }
 
 model BankAccount {
@@ -163,6 +167,55 @@ model ScrapeRun {
   @@index([status])
 }
 
+// One unresolved expiry episode per bank code. It gives monitor replicas and
+// restarts a stable event/run identity without ever storing credential material.
+model BankSessionExpiryEpisode {
+  bankCode                     String   @id
+  expiredEventId               String   @unique
+  runId                        String   @unique
+  expiredAuditDeliveredAt      DateTime?
+  restoredAuditDeliveredAt     DateTime?
+  publicationState             String   @default("pending")
+  publicationClaimToken        String?
+  publicationFailureReportedAt DateTime?
+  consumerClaimToken           String?
+  consumerAttemptState         String?
+  terminalFailureReason        String?
+  terminalFailureReconciledAt  DateTime?
+  createdAt                    DateTime @default(now())
+  updatedAt                    DateTime @updatedAt
+}
+
+// Durable resolution evidence survives deletion of its ephemeral expiry episode.
+model ManualRecoveryResolution {
+  id             String                               @id @default(cuid())
+  expiredEventId String                               @unique
+  bankCode       String
+  runId          String
+  outcome        String
+  reason         String
+  operatorId     String
+  resolvedAt     DateTime                             @default(now())
+  replayExpiredEventId String?                        @unique
+  replayRunId          String?                        @unique
+  replayAuthorizedAt   DateTime?
+  auditOutbox    ManualRecoveryResolutionAuditOutbox?
+
+  @@unique([bankCode, runId])
+}
+
+// Delivery remains deferred; this is only the causal pending audit intent.
+model ManualRecoveryResolutionAuditOutbox {
+  id           String                   @id @default(cuid())
+  resolutionId String                   @unique
+  resolution   ManualRecoveryResolution @relation(fields: [resolutionId], references: [id], onDelete: Restrict)
+  state        String                   @default("pending")
+  leaseOwner   String?
+  leaseExpiresAt DateTime?
+  deliveredAt  DateTime?
+  createdAt    DateTime                 @default(now())
+}
+
 // Change 4: EncryptedSessionRef model DROPPED entirely.
 
 // Change 3: Remove actor User relation from AuditEvent; actorId/actorRole remain as plain String?.
@@ -179,4 +232,50 @@ model AuditEvent {
   @@index([actorId, createdAt])
   @@index([action, createdAt])
   @@index([target, targetId])
+}
+
+// PR3: Encrypted reversible credential store for bank auto-login.
+// Each bankCode has exactly one credential set (two AES-256-GCM envelopes).
+// The master key lives in RD_SYNC_BANK_CREDENTIAL_KEY (env/KMS), NEVER in DB.
+// plaintext is decrypted ONLY in worker memory at scrape time.
+model BankCredential {
+  id                        String   @id @default(cuid())
+  bankCode                  String   @unique
+  bank                      Bank     @relation(fields: [bankCode], references: [code], onDelete: Cascade)
+  encryptedUsernameEnvelope String
+  encryptedPasswordEnvelope String
+  keyVersion                Int      @default(1)
+  isActive                  Boolean  @default(true)
+  lastRotatedAt             DateTime?
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+}
+
+// PR4: Per-bank auto-login kill switch + circuit breaker state.
+// autoLoginEnabled is the manual kill switch (default off).
+// breakerState remains a String; the PR4.2 migration enforces closed|open only — NO half_open.
+model BankAutoLoginConfig {
+  id                        String    @id @default(cuid())
+  bankCode                  String    @unique
+  bank                      Bank      @relation(fields: [bankCode], references: [code], onDelete: Cascade)
+  autoLoginEnabled          Boolean   @default(false)
+  breakerState              String    @default("closed")
+  breakerFailureCount       Int       @default(0)
+  breakerFailureWindowStart DateTime?
+  breakerOpenedAt           DateTime?
+  breakerLastResetAt        DateTime?
+  updatedAt                 DateTime  @updatedAt
+  updatedBy                 String?
+}
+
+// PR4: Per-bank adapter kill switch (read-only scraping).
+// scrapingEnabled is SEPARATE from autoLoginEnabled — disabling it
+// stops ALL scraping for that bank without disabling other banks.
+model BankAdapterConfig {
+  id              String   @id @default(cuid())
+  bankCode        String   @unique
+  bank            Bank     @relation(fields: [bankCode], references: [code], onDelete: Cascade)
+  scrapingEnabled Boolean  @default(true)
+  updatedAt       DateTime @updatedAt
+  updatedBy       String?
 }

@@ -14,5 +14,8 @@ export default defineConfig({
     },
     environment: "node",
     include: ["src/**/*.test.ts", "src/**/*.test.tsx", "tests/**/*.test.ts"],
+    // Fail the run if any test uses .only — guards against accidentally
+    // skipping the full suite during local development or in CI.
+    allowOnly: false,
   },
 });

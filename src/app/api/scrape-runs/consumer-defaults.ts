@@ -1,13 +1,22 @@
-import { popularPortalFixture, parsePopularTransactionRows } from "../../../modules/bank-adapters/popular";
 import { createIngestionProcessor } from "../../../worker/queues";
 import type { IngestionJob, IngestionScraper } from "../../../worker/queues";
 import { createInMemoryIngestionConsumer, type InMemoryIngestionConsumer } from "../../../worker/ingestion-consumer";
 import { redactDiagnosticText } from "../../../worker/scraper";
 import { resolveDefaultAlertSink } from "../../../worker/alerts/email-alert-sink";
-import { createPopularCdpScraper } from "../../../worker/scraper/navigation/popular-cdp";
+import { getBrowserCapacitySnapshotFromEnv } from "../../../worker/scraper/browser-runtime";
+import {
+  createBrowserCapacityMonitor,
+  type BrowserCapacityMonitor,
+} from "../../../modules/observability/browser-capacity-monitor";
+import { bankAdapterRegistry } from "../../../modules/bank-adapters/registry";
 import { defaultAuditSink } from "../audit/defaults";
 import { defaultTransactionRepository } from "../transactions/defaults";
 import { defaultIngestionQueue, defaultScrapeRunRepository, InMemoryScheduledIngestionQueue } from "./defaults";
+
+// Re-exported so existing imports of the env-wiring helper from this module
+// keep working. The implementation now lives in the adapter registry, which
+// owns Popular scraper wiring.
+export { buildPopularCdpScraperOptionsFromEnv } from "../../../modules/bank-adapters/registry";
 
 const globalRegistry = globalThis as typeof globalThis & {
   __rdSyncIngestionConsumer?: InMemoryIngestionConsumer | undefined;
@@ -15,41 +24,38 @@ const globalRegistry = globalThis as typeof globalThis & {
 };
 
 /**
- * Resolves the default IngestionScraper based on env vars read at call time.
+ * Resolves the default IngestionScraper by routing through the bank adapter
+ * registry keyed by canonical `bankCode` (`Bank.code`).
  *
  * Note: this function is also called once at module-load time (line below) to
- * construct the module-level `defaultProcessor`. Env vars are therefore read at
- * import time for that instance, not lazily per request.
+ * construct the module-level `defaultProcessor`. Env vars are therefore read
+ * lazily inside the Popular adapter's `createScraper` at call time.
  *
- * - RD_SYNC_SCRAPER=popular-cdp → CDP-attach scraper (Via B: attaches to
- *   a human-opened Brave session; cdpUrl from RD_SYNC_CDP_URL).
- * - RD_SYNC_DEV_PREVIEW=enabled → fixture-backed scraper (Popular portal fixture).
- * - Otherwise → stub that reports needs_admin_action so production never
- *   fabricates data while real bank navigation is not configured.
+ * Routing contract (PR1, no behaviour change for Popular):
+ * - `bankCode` absent/empty/whitespace -> defaults to `popular` for backward
+ *   compatibility (legacy/default runs). Only absent bankCode may default to
+ *   Popular.
+ * - `bankCode` explicitly present and registered -> that bank's adapter scraper
+ *   (Popular env logic: popular-cdp > dev-preview fixture > needs_admin_action
+ *   stub, exactly as before).
+ * - `bankCode` explicitly present but NOT registered -> fail closed
+ *   (needs_admin_action with a safe summary). It NEVER falls back to Popular.
+ *   The 400 + audit for unknown banks is enforced in run-now; this consumer
+ *   path fails safely if an unknown code ever reaches it.
  */
-export function resolveDefaultScraper(): IngestionScraper {
-  if (process.env.RD_SYNC_SCRAPER === "popular-cdp") {
-    return createPopularCdpScraper({
-      cdpUrl: process.env.RD_SYNC_CDP_URL,
-    });
-  }
-
-  if (process.env.RD_SYNC_DEV_PREVIEW === "enabled") {
+export function resolveDefaultScraper(bankCode?: string): IngestionScraper {
+  const code = bankCode && bankCode.trim() ? bankCode.trim() : "popular";
+  const adapter = bankAdapterRegistry.get(code);
+  if (!adapter) {
     return {
       collect: async () => ({
-        status: "collected" as const,
-        movements: parsePopularTransactionRows(popularPortalFixture.transactions),
+        status: "needs_admin_action" as const,
+        movements: [],
+        safeErrorSummary: "Bank not configured for automated scraping",
       }),
     };
   }
-
-  return {
-    collect: async () => ({
-      status: "needs_admin_action" as const,
-      movements: [],
-      safeErrorSummary: "Bank portal navigation not configured yet",
-    }),
-  };
+  return adapter.createScraper();
 }
 
 /**
@@ -83,7 +89,7 @@ function createDefaultIngestionConsumer(): InMemoryIngestionConsumer | undefined
     transactions: defaultTransactionRepository,
     auditSink: defaultAuditSink,
     adminAlerts: resolveDefaultAlertSink(),
-    scraper: resolveDefaultScraper(),
+    resolveScraper: resolveDefaultScraper,
   });
   return createInMemoryIngestionConsumer({
     queue: defaultIngestionQueue,
@@ -110,3 +116,60 @@ function getOrCreateDefaultIngestionConsumer(): InMemoryIngestionConsumer | unde
 
 export const defaultIngestionConsumer: InMemoryIngestionConsumer | undefined =
   getOrCreateDefaultIngestionConsumer();
+
+// ---------------------------------------------------------------------------
+// defaultBrowserCapacityMonitor
+//
+// Env-gated wiring for the host-wide browser capacity monitor, mirroring
+// resolveDefaultSessionMonitor in src/app/api/bank-sessions/defaults.ts.
+//
+// Relevant env vars:
+//   RD_SYNC_BROWSER_CAPACITY_MONITOR              — "enabled" activates the monitor
+//   RD_SYNC_BROWSER_CAPACITY_CHECK_INTERVAL_MS    — poll interval ms (default 60000, min 30000)
+// ---------------------------------------------------------------------------
+
+const CAPACITY_MIN_INTERVAL_MS = 30_000;
+const CAPACITY_DEFAULT_INTERVAL_MS = 60_000;
+
+function resolveCapacityIntervalMs(): number {
+  const raw = process.env.RD_SYNC_BROWSER_CAPACITY_CHECK_INTERVAL_MS;
+  if (!raw) return CAPACITY_DEFAULT_INTERVAL_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return CAPACITY_DEFAULT_INTERVAL_MS;
+  return Math.max(parsed, CAPACITY_MIN_INTERVAL_MS);
+}
+
+/**
+ * Returns a browser capacity monitor wired to the real shared BrowserSemaphore
+ * singleton, the default alert sink, and the default audit sink — or null
+ * when RD_SYNC_BROWSER_CAPACITY_MONITOR !== "enabled".
+ */
+export function resolveDefaultBrowserCapacityMonitor(): BrowserCapacityMonitor | null {
+  if (process.env.RD_SYNC_BROWSER_CAPACITY_MONITOR !== "enabled") {
+    return null;
+  }
+
+  return createBrowserCapacityMonitor({
+    sample: getBrowserCapacitySnapshotFromEnv,
+    alertSink: resolveDefaultAlertSink(),
+    auditSink: defaultAuditSink,
+    intervalMs: resolveCapacityIntervalMs(),
+  });
+}
+
+const capacityGlobalRegistry = globalThis as typeof globalThis & {
+  __rdSyncBrowserCapacityMonitor?: BrowserCapacityMonitor | null;
+};
+
+// Sentinel distinguishes "not yet initialised" from "null (disabled)".
+if (!("__rdSyncBrowserCapacityMonitor" in capacityGlobalRegistry)) {
+  capacityGlobalRegistry.__rdSyncBrowserCapacityMonitor = resolveDefaultBrowserCapacityMonitor();
+}
+
+// This module already eagerly constructs defaultIngestionConsumer above at
+// load time, so the capacity monitor follows the same eager side-effecting
+// pattern — start() is idempotent (internal handle guard).
+export const defaultBrowserCapacityMonitor: BrowserCapacityMonitor | null =
+  capacityGlobalRegistry.__rdSyncBrowserCapacityMonitor ?? null;
+
+defaultBrowserCapacityMonitor?.start();

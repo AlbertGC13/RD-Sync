@@ -1,0 +1,33 @@
+# Compatibility mirror: canonical SDD artifacts live in Engram under sdd/multi-bank-auto-login/*. This file exists only to satisfy Gentle AI v1.42.0 native dispatcher until Engram status support is released.
+change: multi-bank-auto-login
+status: tasks-complete
+artifact_store: openspec
+source_of_truth: engram
+created_at: "2026-06-25"
+updated_at: "2026-06-26"
+phases:
+  init: completed
+  explore: completed
+  proposal: completed
+  specs: completed
+  design: completed
+  tasks: completed
+  apply: pending
+  verify: pending
+  archive: pending
+scope:
+  in:
+    - Bank adapter interface + registry routing by canonical bankCode (Popular, Banreservas, BHD)
+    - Per-bank browser profile/port/CDP isolation with runtime loopback validation and bounded concurrency
+    - Encrypted reversible credential store (AES-256-GCM full envelope per field) + admin set/rotate API + audit
+    - Secure read-only auto-login orchestration on expired session with MFA stop + per-bank circuit breaker (no half-open, manual reset only)
+    - Per-bank auto-login kill switch + read-only adapter kill switch (separate concerns)
+    - Redis-backed deterministic AutoLoginLock with fencing tokens + compare-and-set
+    - Canonical audit action names + per-bank observability metrics with concrete alert thresholds
+    - Portal drift fixtures for all 3 banks
+  out:
+    - Per-user bank credentials (shared institutional model only)
+    - Automated MFA/challenge solving (NEVER)
+    - Scraping products beyond transactions in this change
+    - KMS/HSM integration (env master key now; KMS is a documented follow-up)
+    - Full key rotation (minimal keyVersion forward-compat only)

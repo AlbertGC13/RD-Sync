@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createIngestionProcessor,
   createIngestionQueueOptions,
+  ingestionJobName,
   scheduleIngestionJob,
   type IngestionJobData,
+  type ResolveScraper,
   type ScrapeRunStatus,
 } from "./index";
 import type { BankMovement } from "../../modules/transactions";
@@ -331,6 +333,10 @@ describe("ingestion processor — audit events", () => {
 });
 
 describe("BullMQ ingestion scheduling", () => {
+  it("exports the exact ingestion job name used by the shared queue router", () => {
+    expect(ingestionJobName).toBe("bank-transaction-ingestion");
+  });
+
   it("uses stable job ids and retry/backoff options", async () => {
     const queue = new FakeQueue();
 
@@ -353,6 +359,400 @@ describe("BullMQ ingestion scheduling", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// resolveScraper routing — BLOCKER fix coverage.
+//
+// These tests prove the processor actually routes by job.data.bankId via
+// the resolveScraper dependency, NOT by a single scraper injected at
+// construction time. This is the runtime path the reviewer flagged: the
+// in-memory consumer and the BullMQ worker both call the processor with
+// job.data.bankId, so the processor must resolve the scraper per job.
+// ---------------------------------------------------------------------------
+
+describe("ingestion processor — resolveScraper routing", () => {
+  const popularMovements: BankMovement[] = [
+    {
+      bankId: "popular",
+      accountFingerprint: "acct-main",
+      postedAt: "2026-06-07T13:45:00.000Z",
+      amount: "100.00",
+      currency: "DOP",
+      direction: "credit",
+      reference: "REF-POP",
+    },
+  ];
+
+  it("resolves the scraper by job.data.bankId and processes with the bank-specific scraper", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const transactions = new FakeTransactionRepository({ inserted: 1, skipped: 0 });
+    const resolveScraper: ResolveScraper = (bankCode) => ({
+      collect: async () => ({
+        status: "collected" as const,
+        movements: popularMovements.map((m) => ({ ...m, bankId: bankCode ?? "popular" })),
+      }),
+    });
+
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions,
+      resolveScraper,
+    });
+
+    const result = await processor({
+      data: { runId: "run-routing", bankId: "popular", accountFingerprint: "acct-main" },
+    });
+
+    expect(result).toEqual({ status: "succeeded", inserted: 1, skipped: 0 });
+    expect(transactions.received[0]?.bankId).toBe("popular");
+  });
+
+  it("fails closed for an explicit unknown bankCode (needs_admin_action, no Popular fallback)", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const resolveScraper: ResolveScraper = (bankCode) => {
+      if (bankCode && bankCode !== "popular") {
+        return {
+          collect: async () => ({
+            status: "needs_admin_action" as const,
+            movements: [],
+            safeErrorSummary: "Bank not configured for automated scraping",
+          }),
+        };
+      }
+      return {
+        collect: async () => ({
+          status: "collected" as const,
+          movements: popularMovements,
+        }),
+      };
+    };
+
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      resolveScraper,
+    });
+
+    const result = await processor({
+      data: { runId: "run-unknown", bankId: "banreservas", accountFingerprint: "acct-main" },
+    });
+
+    expect(result).toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-unknown", status: "running" },
+      {
+        runId: "run-unknown",
+        status: "needs_admin_action",
+        safeErrorSummary: "Bank not configured for automated scraping",
+      },
+    ]);
+  });
+
+  it("defaults to Popular when job.data.bankId is empty (legacy/default run)", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const transactions = new FakeTransactionRepository({ inserted: 1, skipped: 0 });
+    const resolveScraper: ResolveScraper = (bankCode) => {
+      // Absent bankCode should default to popular
+      const code = bankCode && bankCode.trim() ? bankCode.trim() : "popular";
+      return {
+        collect: async () => ({
+          status: "collected" as const,
+          movements: popularMovements.map((m) => ({ ...m, bankId: code })),
+        }),
+      };
+    };
+
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions,
+      resolveScraper,
+    });
+
+    const result = await processor({
+      data: { runId: "run-legacy", bankId: "", accountFingerprint: "acct-main" },
+    });
+
+    expect(result).toEqual({ status: "succeeded", inserted: 1, skipped: 0 });
+    expect(transactions.received[0]?.bankId).toBe("popular");
+  });
+
+  it("throws when neither resolveScraper nor scraper is provided", () => {
+    expect(() =>
+      createIngestionProcessor({
+        scrapeRuns: new FakeScrapeRunRepository(),
+        transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      }),
+    ).toThrow("createIngestionProcessor requires either resolveScraper or scraper");
+  });
+
+  it("falls back to the legacy scraper when resolveScraper is absent", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const transactions = new FakeTransactionRepository({ inserted: 1, skipped: 0 });
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions,
+      scraper: { collect: async () => ({ status: "collected", movements: popularMovements }) },
+    });
+
+    const result = await processor({ data: jobData });
+
+    expect(result).toEqual({ status: "succeeded", inserted: 1, skipped: 0 });
+  });
+});
+
+describe("ingestion processor — scrape-time auto-login trigger", () => {
+  it("runs the scrape-time auto-login trigger before collection when the job carries an expired event", async () => {
+    const calls: string[] = [];
+    const processor = createIngestionProcessor({
+      scrapeRuns: new FakeScrapeRunRepository(),
+      transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      scraper: {
+        collect: async () => {
+          calls.push("collect");
+          return { status: "collected", movements: [] };
+        },
+      },
+      runScrapeTimeAutoLogin: async (job) => {
+        calls.push(`auto-login:${job.data.bankId}:${job.data.expiredEventId}`);
+        return { status: "succeeded" };
+      },
+    });
+
+    const result = await processor({
+      data: { ...jobData, expiredEventId: "expired-1" },
+    });
+
+    expect(result).toEqual({ status: "succeeded", inserted: 0, skipped: 0 });
+    expect(calls).toEqual(["auto-login:popular:expired-1", "collect"]);
+  });
+
+  it("does not run the scrape-time auto-login trigger without expiredEventId and still collects", async () => {
+    const collect = vi.fn(async () => ({ status: "collected" as const, movements: [] }));
+    const runScrapeTimeAutoLogin = vi.fn(async () => ({
+      status: "needs_admin_action" as const,
+      reason: "protected_flow" as const,
+      safeSummary: "Bank auto-login requires admin action",
+    }));
+    const processor = createIngestionProcessor({
+      scrapeRuns: new FakeScrapeRunRepository(),
+      transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      scraper: { collect },
+      runScrapeTimeAutoLogin,
+    });
+
+    const result = await processor({ data: jobData });
+
+    expect(result).toEqual({ status: "succeeded", inserted: 0, skipped: 0 });
+    expect(runScrapeTimeAutoLogin).not.toHaveBeenCalled();
+    expect(collect).toHaveBeenCalledOnce();
+  });
+
+  it("collects normally when expiredEventId is present but no scrape-time auto-login runner is wired", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const collect = vi.fn(async () => ({ status: "collected" as const, movements: [] }));
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      scraper: { collect },
+    });
+
+    const result = await processor({ data: { ...jobData, expiredEventId: "expired-no-runner" } });
+
+    expect(result).toEqual({ status: "succeeded", inserted: 0, skipped: 0 });
+    expect(collect).toHaveBeenCalledOnce();
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-1", status: "running" },
+      { runId: "run-1", status: "succeeded", insertedCount: 0, skippedCount: 0 },
+    ]);
+  });
+
+  it("collects normally when the scrape-time auto-login runner returns null", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const collect = vi.fn(async () => ({ status: "collected" as const, movements: [] }));
+    const runScrapeTimeAutoLogin = vi.fn(async () => null);
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      scraper: { collect },
+      runScrapeTimeAutoLogin,
+    });
+
+    const result = await processor({ data: { ...jobData, expiredEventId: "expired-null-runner" } });
+
+    expect(result).toEqual({ status: "succeeded", inserted: 0, skipped: 0 });
+    expect(runScrapeTimeAutoLogin).toHaveBeenCalledOnce();
+    expect(collect).toHaveBeenCalledOnce();
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-1", status: "running" },
+      { runId: "run-1", status: "succeeded", insertedCount: 0, skippedCount: 0 },
+    ]);
+  });
+
+  it("stops safely without collecting when auto-login requires admin action", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const transactions = new FakeTransactionRepository({ inserted: 0, skipped: 0 });
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions,
+      scraper: {
+        collect: async () => {
+          throw new Error("collect must not run after auto-login admin action");
+        },
+      },
+      runScrapeTimeAutoLogin: async () => ({
+        status: "needs_admin_action",
+        reason: "protected_flow",
+        safeSummary: "Bank auto-login requires admin action",
+      }),
+    });
+
+    const result = await processor({ data: { ...jobData, expiredEventId: "expired-2" } });
+
+    expect(result).toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-1", status: "running" },
+      {
+        runId: "run-1",
+        status: "needs_admin_action",
+        safeErrorSummary: "Bank auto-login requires admin action",
+      },
+    ]);
+    expect(transactions.received).toEqual([]);
+  });
+
+  it("persists throttled auto-login as deferred without collecting or alerting admins", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const transactions = new FakeTransactionRepository({ inserted: 0, skipped: 0 });
+    const adminAlerts = new FakeAdminAlertSink();
+    const auditSink = new InMemoryAuditSink();
+    const collect = vi.fn(async () => {
+      throw new Error("collect must not run after throttled auto-login");
+    });
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions,
+      adminAlerts,
+      auditSink,
+      scraper: { collect },
+      runScrapeTimeAutoLogin: async () => ({
+        status: "throttled",
+        safeSummary: "Bank browser capacity is temporarily unavailable",
+      }),
+    });
+
+    const result = await processor({ data: { ...jobData, expiredEventId: "expired-throttled" } });
+
+    expect(result).toEqual({ status: "throttled", inserted: 0, skipped: 0 });
+    expect(collect).not.toHaveBeenCalled();
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-1", status: "running" },
+      {
+        runId: "run-1",
+        status: "throttled",
+        safeErrorSummary: "Bank browser capacity is temporarily unavailable",
+      },
+    ]);
+    expect(transactions.received).toEqual([]);
+    expect(adminAlerts.events).toEqual([]);
+    const events = await auditSink.list();
+    expect(events.find((e) => e.action === "scrape_run.throttled")).toMatchObject({
+      targetId: "run-1",
+      metadata: {
+        bankId: "popular",
+        safeErrorSummary: "Bank browser capacity is temporarily unavailable",
+      },
+    });
+    expect(events.find((e) => e.action === "bank_autologin.skipped")).toMatchObject({
+      actorId: "system:auto-login",
+      actorRole: null,
+      target: "scrape_run",
+      targetId: "run-1",
+      metadata: { bankCode: "popular", reason: "throttled" },
+    });
+    const canonicalThrottledEvent = events.find((e) => e.action === "bank_autologin.skipped");
+    expect(JSON.stringify(canonicalThrottledEvent?.metadata)).not.toContain("capacity");
+    expect(events.find((e) => e.action === "scrape_run.needs_admin_action")).toBeUndefined();
+  });
+
+  it("maps thrown auto-login to safe admin action without leaking raw errors or collecting", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const transactions = new FakeTransactionRepository({ inserted: 0, skipped: 0 });
+    const adminAlerts = new FakeAdminAlertSink();
+    const auditSink = new InMemoryAuditSink();
+    const collect = vi.fn(async () => {
+      throw new Error("collect must not run after thrown auto-login");
+    });
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions,
+      adminAlerts,
+      auditSink,
+      scraper: { collect },
+      runScrapeTimeAutoLogin: async () => {
+        throw new Error("cdp unavailable token=secret password=abc cdp_url=internal-bank-host/session");
+      },
+    });
+
+    const result = await processor({ data: { ...jobData, expiredEventId: "expired-throw" } });
+
+    expect(result).toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+    expect(collect).not.toHaveBeenCalled();
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-1", status: "running" },
+      {
+        runId: "run-1",
+        status: "needs_admin_action",
+        safeErrorSummary: "Bank auto-login requires admin action",
+      },
+    ]);
+    expect(transactions.received).toEqual([]);
+    expect(adminAlerts.events).toEqual([
+      {
+        runId: "run-1",
+        bankId: "popular",
+        status: "needs_admin_action",
+        safeErrorSummary: "Bank auto-login requires admin action",
+      },
+    ]);
+    const events = await auditSink.list();
+    const needsAdminEvent = events.find((e) => e.action === "scrape_run.needs_admin_action");
+    expect(needsAdminEvent).toMatchObject({
+      targetId: "run-1",
+      metadata: { bankId: "popular", safeErrorSummary: "Bank auto-login requires admin action" },
+    });
+    const serializedTerminalState = JSON.stringify({
+      transitions: scrapeRuns.transitions,
+      alerts: adminAlerts.events,
+      auditMetadata: needsAdminEvent?.metadata,
+    });
+    expect(serializedTerminalState).not.toContain("secret");
+    expect(serializedTerminalState).not.toContain("abc");
+    expect(serializedTerminalState).not.toContain("internal-bank-host");
+  });
+
+  it("continues to manual scrape path when auto-login is manual_required and returns collection outcome", async () => {
+    const calls: string[] = [];
+    const processor = createIngestionProcessor({
+      scrapeRuns: new FakeScrapeRunRepository(),
+      transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      scraper: {
+        collect: async () => {
+          calls.push("collect");
+          return { status: "needs_admin_action", movements: [], safeErrorSummary: "Manual login required" };
+        },
+      },
+      runScrapeTimeAutoLogin: async () => {
+        calls.push("auto-login");
+        return { status: "manual_required", reason: "lock_busy", safeSummary: "Manual scrape required before retrying bank auto-login" };
+      },
+    });
+
+    const result = await processor({ data: { ...jobData, expiredEventId: "expired-3" } });
+
+    expect(result).toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+    expect(calls).toEqual(["auto-login", "collect"]);
+  });
+});
+
 class FakeScrapeRunRepository {
   readonly transitions: Array<{
     runId: string;
@@ -372,6 +772,10 @@ class FakeScrapeRunRepository {
 
   async markNeedsAdminAction(runId: string, safeErrorSummary: string): Promise<void> {
     this.transitions.push({ runId, status: "needs_admin_action", safeErrorSummary });
+  }
+
+  async markThrottled(runId: string, safeErrorSummary: string): Promise<void> {
+    this.transitions.push({ runId, status: "throttled", safeErrorSummary });
   }
 
   async markFailed(runId: string, safeErrorSummary: string): Promise<void> {

@@ -16,18 +16,22 @@ export class PrismaAuditSink implements AuditSink {
   }
 
   async record(event: AuditEvent): Promise<void> {
-    await this.prisma.auditEvent.create({
-      data: {
-        id: event.id,
-        actorId: event.actorId ?? null,
-        actorRole: event.actorRole ?? null,
-        action: event.action,
-        target: event.target,
-        targetId: event.targetId ?? null,
-        metadata: (event.metadata as Prisma.InputJsonValue | null) ?? undefined,
-        createdAt: event.createdAt,
-      },
-    });
+    try {
+      await this.prisma.auditEvent.create({
+        data: {
+          id: event.id,
+          actorId: event.actorId ?? null,
+          actorRole: event.actorRole ?? null,
+          action: event.action,
+          target: event.target,
+          targetId: event.targetId ?? null,
+          metadata: (event.metadata as Prisma.InputJsonValue | null) ?? undefined,
+          createdAt: event.createdAt,
+        },
+      });
+    } catch (error: unknown) {
+      if (!isPrismaUniqueViolation(error)) throw error;
+    }
   }
 
   /**
@@ -52,4 +56,9 @@ export class PrismaAuditSink implements AuditSink {
       createdAt: row.createdAt,
     }));
   }
+}
+
+function isPrismaUniqueViolation(error: unknown): boolean {
+  return typeof error === "object" && error !== null &&
+    "code" in error && (error as { code: unknown }).code === "P2002";
 }

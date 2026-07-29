@@ -52,24 +52,29 @@ export function getBankMeta(bankId: string): BankMeta {
 }
 
 /**
- * The only bank profiles currently wired for manual "Run now" triggers.
+ * Mirrored whitelist of bank codes currently wired for manual "Run now"
+ * triggers. This is NOT dynamically derived from the adapter registry at
+ * runtime — it is a hardcoded list kept in sync by parity tests
+ * (`banks.test.ts`). The backend run-now validation resolves through the
+ * server-side registry directly (authoritative); this list exists only so
+ * the client-side UI can render the correct affordance labels without
+ * bundling Node-only adapter registry deps.
  *
- * Adding a new bank here requires also implementing the bank adapter under
- * `src/modules/bank-adapters/` and the scraper profile — see HANDOFF.md
- * Hito 2 checklist. The backend enforces this whitelist so the UI can never
- * queue a job the worker cannot service.
+ * Adding a new bank here requires also registering its adapter in
+ * `src/modules/bank-adapters/registry.ts` (and implementing the scraper
+ * profile).
  */
-export const SUPPORTED_RUN_NOW_BANK_IDS = ["popular"] as const;
-export type SupportedRunNowBankId = (typeof SUPPORTED_RUN_NOW_BANK_IDS)[number];
+export const SUPPORTED_RUN_NOW_BANK_CODES = ["popular"] as const;
+export type SupportedRunNowBankCode = (typeof SUPPORTED_RUN_NOW_BANK_CODES)[number];
 
 /**
  * Bank the page-level "Run now" trigger targets when no card is selected.
  * Falls back to the only scraper currently shipping.
  */
-export const DEFAULT_RUN_NOW_BANK_ID: SupportedRunNowBankId = "popular";
+export const DEFAULT_RUN_NOW_BANK_CODE: SupportedRunNowBankCode = "popular";
 
-export function isSupportedRunNowBankId(value: string): value is SupportedRunNowBankId {
-  return (SUPPORTED_RUN_NOW_BANK_IDS as readonly string[]).includes(value);
+export function isSupportedRunNowBankCode(value: string): value is SupportedRunNowBankCode {
+  return (SUPPORTED_RUN_NOW_BANK_CODES as readonly string[]).includes(value);
 }
 
 /**
@@ -93,6 +98,7 @@ const SCRAPE_RUN_STATUS_LABELS: Record<ScrapeRunStatus, string> = {
   succeeded: "Completada",
   failed: "Fallida",
   needs_admin_action: "Necesita acción administrativa",
+  throttled: "Pospuesta temporalmente",
 };
 
 export function scrapeRunStatusLabel(status: ScrapeRunStatus): string {

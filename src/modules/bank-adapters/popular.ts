@@ -1,6 +1,14 @@
 import type { BankMovement, TransactionDirection } from "../transactions";
+import type { BankAdapter } from "./registry";
 
 const POPULAR_BANK_ID = "popular";
+
+/**
+ * Canonical immutable domain code for Popular (`Bank.code`). This is the
+ * adapter/job/API/credential identity — NOT the cuid `Bank.id` DB primary key.
+ * Exported so the registry and routing layer share one constant.
+ */
+export const popularBankCode = "popular" as const;
 const POPULAR_ACCOUNT_NUMBER = "0000000000";
 const POPULAR_ACCOUNT_FINGERPRINT = "popular-0000000000";
 const POPULAR_CURRENCY = "DOP";
@@ -155,4 +163,26 @@ function normalizeText(value: string): string {
 function normalizeOptionalText(value: string | null | undefined): string | null {
   const normalized = value?.trim();
   return normalized ? normalized : null;
+}
+
+// ---------------------------------------------------------------------------
+// Bank adapter — exposes Popular as a `BankAdapter` keyed by `bankCode`.
+//
+// The domain module stays free of worker/runtime coupling. Both factories are
+// injected by the server wiring layer, which owns CDP and login state machines.
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the Popular `BankAdapter` from server-owned factories. This module
+ * deliberately imports no worker module, avoiding a domain-to-worker cycle.
+ */
+export function createPopularBankAdapter(options: {
+  createScraper: BankAdapter["createScraper"];
+  createAutoLoginStrategy: BankAdapter["createAutoLoginStrategy"];
+}): BankAdapter {
+  return {
+    bankCode: popularBankCode,
+    createScraper: options.createScraper,
+    createAutoLoginStrategy: options.createAutoLoginStrategy,
+  };
 }

@@ -21,6 +21,7 @@ const GLOBAL_KEYS = [
   "__rdSyncAuditSink",
   "__rdSyncIngestionConsumer",
   "__rdSyncSessionMonitor",
+  "__rdSyncBrowserCapacityMonitor",
 ] as const;
 
 function clearGlobalSingletons() {
@@ -271,35 +272,76 @@ describe("defaultSessionMonitor — globalThis sharing and single-start guard", 
     expect(monitorB).toBeNull();
   });
 
-  it("startDefaultSessionMonitorIfEnabled is idempotent across two module graphs (no double timer)", async () => {
+  it("keeps the monitor dormant across module graphs even when the legacy env flag is enabled", async () => {
     process.env.RD_SYNC_SESSION_MONITOR = "enabled";
 
-    // We cannot inject the scheduler into the module-level singleton created at
-    // import time, so we test the guard via the globalThis anchor: a second
-    // import after resetModules must return THE SAME monitor instance (already
-    // started), meaning start() is a no-op on the second call.
-
-    // Import graph A — monitor instance is created and stored on globalThis
     const { defaultSessionMonitor: monitorA } =
       await import("./bank-sessions/defaults");
 
-    expect(monitorA).not.toBeNull();
-
-    // Manually start once using the real start() — which uses setInterval
-    // We'll observe idempotency by calling start twice on the same instance
-    // (the BankSessionMonitor.start() is already idempotent via handle guard)
-    monitorA?.start();
-    monitorA?.start(); // second call must be a no-op
-
     vi.resetModules();
 
-    // Graph B must reuse the same monitor from globalThis
     const { defaultSessionMonitor: monitorB } =
       await import("./bank-sessions/defaults");
 
     expect(monitorB).toBe(monitorA);
+    expect(monitorA).toBeNull();
+  });
+});
 
-    // Clean up the timer started above
+// ---------------------------------------------------------------------------
+// Browser capacity monitor — globalThis sharing + single-start guard
+// ---------------------------------------------------------------------------
+
+describe("defaultBrowserCapacityMonitor — globalThis sharing and single-start guard", () => {
+  beforeEach(() => {
+    clearGlobalSingletons();
+    vi.resetModules();
+    delete process.env.RD_SYNC_BROWSER_CAPACITY_MONITOR;
+  });
+
+  afterEach(() => {
+    clearGlobalSingletons();
+    vi.resetModules();
+    delete process.env.RD_SYNC_BROWSER_CAPACITY_MONITOR;
+  });
+
+  it("null monitor is shared across module graphs when disabled", async () => {
+    const { defaultBrowserCapacityMonitor: monitorA } = await import(
+      "./scrape-runs/consumer-defaults"
+    );
+
+    vi.resetModules();
+
+    const { defaultBrowserCapacityMonitor: monitorB } = await import(
+      "./scrape-runs/consumer-defaults"
+    );
+
+    expect(monitorA).toBeNull();
+    expect(monitorB).toBeNull();
+  });
+
+  it("is idempotent across two module graphs (no double timer)", async () => {
+    process.env.RD_SYNC_BROWSER_CAPACITY_MONITOR = "enabled";
+
+    // Same rationale as the session monitor test above: the module-level
+    // singleton is constructed and started at import time, so idempotency is
+    // observed via the globalThis anchor reusing the SAME (already-started)
+    // instance across a simulated second module graph.
+    const { defaultBrowserCapacityMonitor: monitorA } = await import(
+      "./scrape-runs/consumer-defaults"
+    );
+
+    expect(monitorA).not.toBeNull();
+    monitorA?.start(); // second call must be a no-op (handle guard)
+
+    vi.resetModules();
+
+    const { defaultBrowserCapacityMonitor: monitorB } = await import(
+      "./scrape-runs/consumer-defaults"
+    );
+
+    expect(monitorB).toBe(monitorA);
+
     monitorA?.stop();
   });
 });

@@ -124,6 +124,21 @@ export class PrismaScrapeRunRepository {
     return rows.map(mapRow);
   }
 
+  /**
+   * Read a single scrape run by id, or null when it does not exist.
+   *
+   * Uses findUnique on the primary key so it is an indexed lookup — never a
+   * full table scan. Mirrors InMemoryScrapeRunRepository.findById so the
+   * single-run status endpoint can switch back ends without code changes.
+   */
+  async findById(runId: string): Promise<ScrapeRunRecord | null> {
+    const row = await this.prisma.scrapeRun.findUnique({
+      where: { id: runId },
+      select: scrapeRunSelect,
+    });
+    return row ? mapRow(row) : null;
+  }
+
   async markRunning(runId: string, startedAt = new Date()): Promise<void> {
     await this.updateOrThrow(runId, {
       status: toDbScrapeRunStatus("running"),
@@ -156,6 +171,19 @@ export class PrismaScrapeRunRepository {
   ): Promise<void> {
     await this.updateOrThrow(runId, {
       status: toDbScrapeRunStatus("needs_admin_action"),
+      endedAt,
+      safeErrorSummary,
+      updatedAt: endedAt,
+    });
+  }
+
+  async markThrottled(
+    runId: string,
+    safeErrorSummary: string,
+    endedAt = new Date(),
+  ): Promise<void> {
+    await this.updateOrThrow(runId, {
+      status: toDbScrapeRunStatus("throttled"),
       endedAt,
       safeErrorSummary,
       updatedAt: endedAt,
