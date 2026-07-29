@@ -37,8 +37,8 @@ const manualExpiredEventId = `manual-${randomUUID()}`;
 const manualResolutionId = `resolution-${randomUUID()}`;
 const manualOutboxId = `outbox-${randomUUID()}`;
 const expiryAuditWhere = { action: "bank_session.expired", target: "bank_session", metadata: { path: ["expiredEventId"], equals: expiredEventId } } satisfies Prisma.AuditEventWhereInput;
-const terminalAuditWhere = { target: "bank_session_expiry_episode", targetId: `${bankCode}:${expiredEventId}:${runId}` } satisfies Prisma.AuditEventWhereInput;
-const manualAuditWhere = { action: "bank_autologin.manual_recovery_resolved", target: "manual_recovery_resolution", targetId: manualResolutionId } satisfies Prisma.AuditEventWhereInput;
+const terminalAuditWhere = { action: "bank_autologin.needs_admin_action", target: "bank_session_expiry_episode", AND: [{ metadata: { path: ["expiredEventId"], equals: expiredEventId } }, { metadata: { path: ["runId"], equals: runId } }] } satisfies Prisma.AuditEventWhereInput;
+const manualAuditWhere = { action: "bank_autologin.manual_recovery_resolved", target: "manual_recovery_resolution", AND: [{ metadata: { path: ["expiredEventId"], equals: manualExpiredEventId } }, { metadata: { path: ["runId"], equals: `manual-${runId}` } }] } satisfies Prisma.AuditEventWhereInput;
 let prisma: PrismaClient | undefined;
 let Queue: typeof import("bullmq").Queue;
 let Worker: typeof import("bullmq").Worker;
@@ -105,8 +105,8 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
     const ownersSeen = new Set<string>();
     const proposedTokens = new Map<string, string>();
     const alerts: Array<{ safeSummary: string }> = [];
-    const tickGate: { wait?: Promise<void>; release?: () => void; signalReplicaATick?: () => void } = {};
-    const localTickStats = new Map<string, { calls: number; active: number; max: number }>();
+    const runtimeTickGate: { wait?: Promise<void>; release?: () => void; signalReplicaATick?: () => void } = {};
+    const runtimeTickStats = new Map<string, { calls: number; active: number; max: number }>();
     let releaseClaimBarrier!: () => void;
     const claimBarrier = new Promise<void>((resolve) => { releaseClaimBarrier = resolve; });
 
@@ -114,7 +114,7 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
       const stats = { calls: 0, active: 0, max: 0 };
       const proposedToken = `publication-${owner}-${randomUUID()}`;
       proposedTokens.set(owner, proposedToken);
-      localTickStats.set(owner, stats);
+      runtimeTickStats.set(owner, stats);
       const publisher = {
         schedule: (envelope: { bankCode: string; expiredEventId: string; runId: string; token: string }) =>
           scheduleExpiryPublicationJob(queue, envelope),
@@ -122,16 +122,7 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
       };
       const monitor = createBankSessionMonitor({
         check: async () => {
-          stats.calls += 1;
-          stats.active += 1;
-          stats.max = Math.max(stats.max, stats.active);
-          try {
-            if (owner === "replica-a") tickGate.signalReplicaATick?.();
-            await tickGate.wait;
-            return { status: "expired", checkedAt: new Date().toISOString(), safeSummary: "Synthetic expiry" };
-          } finally {
-            stats.active -= 1;
-          }
+          return { status: "expired", checkedAt: new Date().toISOString(), safeSummary: "Synthetic expiry" };
         },
         intervalMs: 60_000,
         alertSink: { notifySessionAttention: async (alert) => { alerts.push(alert); } },
@@ -144,6 +135,20 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
           publish: (episode) => publishExpiryEpisode(episodes, episode, proposedToken, publisher).then(() => undefined),
         },
       });
+      const runtimeMonitor = {
+        async tick() {
+          stats.calls += 1;
+          stats.active += 1;
+          stats.max = Math.max(stats.max, stats.active);
+          try {
+            if (owner === "replica-a") runtimeTickGate.signalReplicaATick?.();
+            await runtimeTickGate.wait;
+            return await monitor.tick();
+          } finally {
+            stats.active -= 1;
+          }
+        },
+      };
       return createExpiryRuntime(
         {
           RD_SYNC_SESSION_MONITOR: "enabled",
@@ -151,7 +156,7 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
           RD_SYNC_REDIS_URL: TEST_REDIS_URL,
         },
         () => ({
-          monitor,
+          monitor: runtimeMonitor,
           episodes,
           publisher,
           auditSink,
@@ -252,12 +257,22 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
     })).toBe(1);
     expect(await prisma.auditEvent.count({ where: manualAuditWhere })).toBe(1);
     expect(await prisma.auditEvent.count({ where: terminalAuditWhere })).toBe(1);
+    await prisma.auditEvent.create({
+      data: {
+        id: `semantic-duplicate-${randomUUID()}`,
+        action: "bank_autologin.manual_recovery_resolved",
+        target: "manual_recovery_resolution",
+        targetId: `duplicate-${manualResolutionId}`,
+        metadata: { bankCode, expiredEventId: manualExpiredEventId, runId: `manual-${runId}` },
+      },
+    });
+    expect(await prisma.auditEvent.count({ where: manualAuditWhere })).toBe(2);
     expect(alerts.filter((alert) => alert.safeSummary === "Automatic session recovery requires administrative review")).toHaveLength(1);
     expect(JSON.stringify(alerts)).not.toMatch(/token|https?:\/\/|synthetic publication failure/i);
 
-    tickGate.wait = new Promise<void>((resolve) => { tickGate.release = resolve; });
-    const replicaATickEntered = new Promise<void>((resolve) => { tickGate.signalReplicaATick = resolve; });
-    const replicaAStats = localTickStats.get("replica-a")!;
+    runtimeTickGate.wait = new Promise<void>((resolve) => { runtimeTickGate.release = resolve; });
+    const replicaATickEntered = new Promise<void>((resolve) => { runtimeTickGate.signalReplicaATick = resolve; });
+    const replicaAStats = runtimeTickStats.get("replica-a")!;
     const callsBeforeFinalTick = replicaAStats.calls;
     const firstTick = runtimeA.tick();
     void runtimeA.tick();
@@ -272,7 +287,7 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
     await Promise.resolve();
     expect(shutdownAComplete).toBe(false);
     expect(new Set(clearedTimers)).toEqual(new Set([1, 2]));
-    tickGate.release?.();
+    runtimeTickGate.release?.();
     await Promise.all([firstTick, finalTick, stoppingA, stoppingB, runtimeA.shutdown(), runtimeB.shutdown()]);
     expect(new Set(clearedTimers)).toEqual(new Set([1, 2]));
     expect(closeCounts.get(queueA)).toBe(1);
