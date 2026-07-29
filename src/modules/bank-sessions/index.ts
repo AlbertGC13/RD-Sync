@@ -375,7 +375,7 @@ export function createBankSessionMonitor(
         if (createdEpisode) {
           expiryNotificationResult = candidate.observedResult;
         }
-        if (expiryAuditAcknowledged && (durableEpisode.publicationState === "pending" || durableEpisode.publicationState === "publishing")) await publishEpisode?.(durableEpisode);
+        if (expiryAuditAcknowledged && (durableEpisode.publicationState === "pending" || durableEpisode.publicationState === "publishing" || durableEpisode.publicationState === "published")) await publishEpisode?.(durableEpisode);
         pendingExpiryCandidate = null;
       } catch {
         // A durable election outage must not fall back to process-local side effects.
@@ -453,8 +453,7 @@ export function createBankSessionMonitor(
       await emitAudit(auditSink, result);
     }
 
-    // A failed durable close keeps the local state on the expired episode so a
-    // later tick retries the exact observed identity instead of forgetting it.
+    // mutation_started/manual_recovery_required retain; resolved closes and emits the normal active alert.
     if (transitionReady && (recoveryClosed || nextStatus !== "active")) {
       previousTransition = result;
     }
