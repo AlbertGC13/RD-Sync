@@ -1,5 +1,5 @@
+import { createHash } from "node:crypto";
 import {
-  assertConsumerClaimToken,
   type BankSessionExpiryEpisode,
   type BankSessionExpiryEpisodeRepository,
   type ExpiryPublicationEnvelope,
@@ -52,7 +52,8 @@ export type ExpiryPublicationClaimEligibility =
 export type ExpiryPublicationConsumerClaimReservation =
   | { status: "ignored_stale_envelope" }
   | { status: "ignored_already_claimed" }
-  | { status: "claim_acquired" };
+  | { status: "claim_acquired" }
+  | { status: "claim_resumed" };
 
 /**
  * Determines whether a queue delivery may proceed to PR4p2's durable claim.
@@ -84,14 +85,15 @@ export async function evaluateExpiryPublicationClaimEligibility(
 export async function reserveExpiryPublicationConsumerClaim(
   episodes: Pick<BankSessionExpiryEpisodeRepository, "findByBankCode" | "claimConsumerAttempt">,
   queuedHint: unknown,
-  consumerClaimToken: string,
   gate: ExpiryPublicationPreClaimGate,
 ): Promise<ExpiryPublicationConsumerClaimReservation> {
   const queuedEnvelope = parseExpiryPublicationEnvelope(queuedHint);
-  assertConsumerClaimToken(consumerClaimToken);
+  const consumerClaimToken = createHash("sha256")
+    .update(JSON.stringify([queuedEnvelope.bankCode, queuedEnvelope.expiredEventId, queuedEnvelope.runId, queuedEnvelope.token]))
+    .digest("hex");
 
   const durable = await episodes.findByBankCode(queuedEnvelope.bankCode);
-  const initialStatus = classifyCurrentConsumerReservation(durable, queuedEnvelope);
+  const initialStatus = classifyCurrentConsumerReservation(durable, queuedEnvelope, consumerClaimToken);
   if (initialStatus) return initialStatus;
 
   const gateOutcome = await gate.check(queuedEnvelope);
@@ -105,6 +107,7 @@ export async function reserveExpiryPublicationConsumerClaim(
   return classifyFailedConsumerReservation(
     await episodes.findByBankCode(queuedEnvelope.bankCode),
     queuedEnvelope,
+    consumerClaimToken,
   );
 }
 
@@ -152,16 +155,20 @@ function isCurrentPublishedEnvelope(
 function classifyCurrentConsumerReservation(
   durable: BankSessionExpiryEpisode | null,
   queuedEnvelope: ExpiryPublicationEnvelope,
+  consumerClaimToken: string,
 ): Exclude<ExpiryPublicationConsumerClaimReservation, { status: "claim_acquired" }> | null {
   if (!isCurrentPublishedEnvelope(durable, queuedEnvelope)) return { status: "ignored_stale_envelope" };
+  if (durable?.consumerAttemptState === "reserved" && durable.consumerClaimToken === consumerClaimToken) return { status: "claim_resumed" };
   return hasNonblankConsumerClaim(durable) ? { status: "ignored_already_claimed" } : null;
 }
 
 function classifyFailedConsumerReservation(
   durable: BankSessionExpiryEpisode | null,
   queuedEnvelope: ExpiryPublicationEnvelope,
+  consumerClaimToken: string,
 ): Exclude<ExpiryPublicationConsumerClaimReservation, { status: "claim_acquired" }> {
   if (!isCurrentPublishedEnvelope(durable, queuedEnvelope)) return { status: "ignored_stale_envelope" };
+  if (durable?.consumerAttemptState === "reserved" && durable.consumerClaimToken === consumerClaimToken) return { status: "claim_resumed" };
   if (hasNonblankConsumerClaim(durable)) return { status: "ignored_already_claimed" };
   throw new UnexpectedExpiryPublicationClaimResultError();
 }

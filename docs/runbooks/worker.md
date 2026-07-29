@@ -110,7 +110,51 @@ The following scenarios are only verifiable with a live Redis instance and are
 - [ ] Worker picks up the job, calls the processor, logs the run ID and status.
 - [ ] Restarting the worker mid-queue does not lose the pending job.
 - [ ] With `RD_SYNC_TEST_REDIS_URL=redis://localhost:6379 pnpm test`, the
-      integration test suite passes.
+       integration test suite passes.
+
+---
+
+## Two-replica expiry runtime proof
+
+Run the gated runtime proof only against a dedicated database with committed
+migrations and a dedicated Redis instance:
+
+```bash
+RD_SYNC_TEST_DATABASE_URL="postgresql://test-user:test-password@localhost:5432/rd_sync_test" \
+RD_SYNC_TEST_REDIS_URL="redis://localhost:6379" \
+RD_SYNC_REQUIRE_INTEGRATION=true pnpm exec vitest run src/worker/expiry-runtime.integration.test.ts
+```
+
+This command fails if either service URL is absent. Without
+`RD_SYNC_REQUIRE_INTEGRATION=true`, the normal full suite still skips this
+integration proof when services are unavailable. Until the required command
+completes successfully against both dedicated services, the proof remains
+blocked and B2.5 remains pending.
+
+Expected evidence:
+
+- Two independently constructed runtimes use distinct lease owners, timer
+  handles, and BullMQ queue clients.
+- Concurrent expiry observations persist one episode, one expiry audit, and
+  one publication job.
+- A test-only worker forces that synthetic job to retained `failed`; concurrent
+  terminal observation emits one durable reconciliation audit and one fixed,
+  safe operator alert.
+- A pending manual-recovery audit outbox row is leased once and becomes one
+  delivered row with one resolution audit.
+- Shutdown waits for blocked ticks, clears both timers, closes each owned queue
+  once, and is idempotent.
+
+Cleanup is scoped to the test UUID queue through BullMQ `obliterate` and to
+the test's UUID database records. The test never calls Redis `FLUSHALL`.
+
+Safety boundaries:
+
+- Both variables must target disposable test services, never `DATABASE_URL`,
+  developer data, or production data.
+- The proof creates no ingestion, scraper, browser, CDP, credential, bank URL,
+  or login activity.
+- `unavailableScrapeTimeAutoLoginBrowserOpener` remains unchanged.
 
 ---
 
