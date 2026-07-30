@@ -188,6 +188,40 @@ describe("createPopularCdpScraper — happy path", () => {
       safeErrorSummary: SAFE_SUMMARY_POPULAR_PAGINATION_LIMIT_REACHED,
     });
   });
+
+  it("propagates only a navigation-observed session expiry cause", async () => {
+    const browser = new FakeCdpBrowser(() => makeFakeCdpPage());
+    const scraper = createPopularCdpScraper({
+      cdpUrl: "http://127.0.0.1:9222",
+      connect: async () => browser,
+      collectRows: async () => ({
+        kind: "needs_admin_action" as const,
+        safeErrorSummary: "Bank session expired or requires verification",
+        cause: "session_expired" as const,
+      }),
+    });
+
+    await expect(scraper.collect()).resolves.toMatchObject({
+      status: "needs_admin_action",
+      cause: "session_expired",
+    });
+  });
+
+  it("does not infer session expiry from an admin summary string", async () => {
+    const browser = new FakeCdpBrowser(() => makeFakeCdpPage());
+    const scraper = createPopularCdpScraper({
+      cdpUrl: "http://127.0.0.1:9222",
+      connect: async () => browser,
+      collectRows: async () => ({
+        kind: "needs_admin_action" as const,
+        safeErrorSummary: "Bank session expired or requires verification",
+      }),
+    });
+
+    const result = await scraper.collect();
+    expect(result.status).toBe("needs_admin_action");
+    expect(result).not.toHaveProperty("cause");
+  });
 });
 
 describe("createPopularCdpScraper — lookback window", () => {
@@ -283,6 +317,7 @@ describe("createPopularCdpScraper — connect failure", () => {
     expect(result.status).toBe("needs_admin_action");
     expect(result.movements).toEqual([]);
     expect(result.safeErrorSummary).toBe("Bank browser session is not available");
+    expect(result.cause).toBeUndefined();
   });
 
   it("rejects non-loopback CDP URLs before ensureBrowser or connect can run", async () => {
@@ -405,6 +440,7 @@ describe("createPopularCdpScraper — browser backpressure seam", () => {
       movements: [],
       safeErrorSummary: SAFE_SUMMARY_BROWSER_CAPACITY_THROTTLED,
     });
+    expect(throttledResult.cause).toBeUndefined();
     expect(blockedCalls).toEqual([]);
 
     let releaseCount = 0;

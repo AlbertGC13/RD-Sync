@@ -1,4 +1,6 @@
 import type { ManualRecoveryResolutionCommand, ManualRecoveryResolutionResult } from "./manual-recovery-resolution";
+import { createAuditEvent, type AuditSink } from "../audit";
+import { BANK_SESSION_ACTIONS } from "../audit/bank-actions";
 import {
   createManualRecoveryReplayAuthorizedAudit,
   type ManualRecoveryReplayAuthorizationCandidate,
@@ -130,6 +132,79 @@ export async function publishExpiryEpisode(
   }
   return episodes.markPublicationPublished(episode, token);
 }
+
+const EPISODE_AUDIT_ACTOR = "system:session-monitor";
+
+export async function deliverExpiryEpisodeAudit(
+  auditSink: Pick<AuditSink, "record"> | undefined,
+  episodes: BankSessionExpiryEpisodeRepository,
+  episode: BankSessionExpiryEpisode,
+  kind: SessionEpisodeAuditKind,
+  checkedAt: string,
+): Promise<boolean> {
+  try {
+    if (await episodes.isAuditDelivered(episode, kind)) return true;
+    if (!auditSink) return false;
+    const action = kind === "expired" ? BANK_SESSION_ACTIONS.EXPIRED : BANK_SESSION_ACTIONS.RESTORED;
+    await auditSink.record(createAuditEvent({
+      id: `bank-session-${action}:${episode.bankCode}:${episode.expiredEventId}`,
+      actorId: EPISODE_AUDIT_ACTOR,
+      actorRole: "system",
+      action,
+      target: "bank_session",
+      targetId: null,
+      metadata: { bankCode: episode.bankCode, expiredEventId: episode.expiredEventId, checkedAt },
+    }));
+    const marked = await episodes.markAuditDelivered(episode, kind);
+    return marked || await episodes.isAuditDelivered(episode, kind);
+  } catch {
+    return false;
+  }
+}
+
+export type ExpiryEpisodeRestorationResult = "closed" | "retained" | "missing_or_replaced";
+
+/**
+ * Restores one durable expiry episode without ever closing a replacement.
+ * Audit delivery deliberately precedes publication cancellation and close.
+ */
+export async function restoreExpiryEpisode(
+  auditSink: Pick<AuditSink, "record"> | undefined,
+  episodes: BankSessionExpiryEpisodeRepository,
+  episode: BankSessionExpiryEpisode,
+  checkedAt: string,
+): Promise<ExpiryEpisodeRestorationResult> {
+  if (!await deliverExpiryEpisodeAudit(auditSink, episodes, episode, "expired", checkedAt)) {
+    return reconcileRestorationEpisode(episodes, episode);
+  }
+  if (!await deliverExpiryEpisodeAudit(auditSink, episodes, episode, "restored", checkedAt)) {
+    return reconcileRestorationEpisode(episodes, episode);
+  }
+  try {
+    await episodes.cancelPublication(episode);
+    if (await episodes.close(episode) === "closed") return "closed";
+  } catch {
+    // A durable lookup below decides whether this exact episode remains retryable.
+  }
+  return reconcileRestorationEpisode(episodes, episode);
+}
+
+async function reconcileRestorationEpisode(
+  episodes: Pick<BankSessionExpiryEpisodeRepository, "findByBankCode">,
+  observed: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">,
+): Promise<"retained" | "missing_or_replaced"> {
+  try {
+    const current = await episodes.findByBankCode(observed.bankCode);
+    return current
+      && current.runId === observed.runId
+      && current.expiredEventId === observed.expiredEventId
+      ? "retained"
+      : "missing_or_replaced";
+  } catch {
+    return "retained";
+  }
+}
+
 export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionExpiryEpisodeRepository, ManualRecoveryReplayAuthorizationRepository {
   private readonly episodes = new Map<string, BankSessionExpiryEpisode>();
   private readonly resolutions: ManualRecoveryResolutionResult[] = [];

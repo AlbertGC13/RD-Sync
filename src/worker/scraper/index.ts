@@ -36,11 +36,11 @@ export interface PlaywrightPageLike {
   };
 }
 
-export interface ScrapeCollectionResult {
-  status: ScrapeCollectionStatus;
-  movements: BankMovement[];
-  safeErrorSummary?: string;
-}
+export type ScrapeCollectionResult =
+  | { status: "collected"; movements: BankMovement[]; safeErrorSummary?: string; cause?: never }
+  | { status: "needs_admin_action"; movements: BankMovement[]; safeErrorSummary?: string; cause?: never }
+  /** Present only when navigation directly observed a login/session redirect. */
+  | { status: "needs_admin_action"; movements: BankMovement[]; safeErrorSummary?: string; cause: "session_expired" };
 
 export interface ReadOnlyBankScraper {
   collect(page: ReadOnlyBankPage): Promise<ScrapeCollectionResult>;

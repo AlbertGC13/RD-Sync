@@ -105,7 +105,8 @@ export interface PopularPortalPage {
 
 export type CollectPopularPortalRowsResult =
   | { kind: "rows"; rows: PopularTransactionRow[] }
-  | { kind: "needs_admin_action"; safeErrorSummary: string };
+  | { kind: "needs_admin_action"; safeErrorSummary: string; cause?: never }
+  | { kind: "needs_admin_action"; safeErrorSummary: string; cause: "session_expired" };
 
 // ---------------------------------------------------------------------------
 // buildPopularTransactionsUrl
@@ -312,6 +313,7 @@ export async function collectPopularPortalRows(
     return {
       kind: "needs_admin_action",
       safeErrorSummary: "Bank session expired or requires verification",
+      cause: "session_expired",
     };
   }
 
@@ -349,6 +351,7 @@ export async function collectPopularPortalRows(
       return {
         kind: "needs_admin_action",
         safeErrorSummary: "Bank session expired or requires verification",
+        cause: "session_expired",
       };
     }
 
