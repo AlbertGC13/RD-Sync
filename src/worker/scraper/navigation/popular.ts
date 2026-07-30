@@ -20,6 +20,14 @@ const DEFAULT_WARMUP_PAUSE_MS = 6_000;
 const DEFAULT_SETTLE_INTERVAL_MS = 1_500;
 const DEFAULT_SETTLE_FLOOR_MS = 8_000;
 const DEFAULT_SETTLE_MAX_MS = 25_000;
+const SANTO_DOMINGO_TIME_ZONE = "America/Santo_Domingo";
+const DAY_MS = 24 * 60 * 60 * 1_000;
+
+export const DEFAULT_SCRAPE_LOOKBACK_DAYS = 7;
+const MIN_SCRAPE_LOOKBACK_DAYS = 1;
+const MAX_SCRAPE_LOOKBACK_DAYS = 31;
+export const SAFE_SUMMARY_POPULAR_PAGINATION_LIMIT_REACHED =
+  "La consulta alcanzó el límite de páginas. Intente nuevamente con un rango de fechas más corto.";
 
 // These values come from the profile so the profile stops being dead code.
 const ACCOUNT_TYPE = "Corriente";
@@ -116,18 +124,57 @@ export interface BuildPopularTransactionsUrlOptions {
  * computed in the America/Santo_Domingo timezone (UTC-04:00, no DST).
  */
 export function formatPopularPortalDate(date: Date): string {
+  const { day, month, year } = getPopularPortalDateParts(date);
+  return `${day}/${month}/${year}`;
+}
+
+export function parseScrapeLookbackDays(value: string | undefined): number {
+  const normalized = value?.trim();
+  if (!normalized) return DEFAULT_SCRAPE_LOOKBACK_DAYS;
+
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) return DEFAULT_SCRAPE_LOOKBACK_DAYS;
+
+  return Math.min(
+    MAX_SCRAPE_LOOKBACK_DAYS,
+    Math.max(MIN_SCRAPE_LOOKBACK_DAYS, Math.trunc(parsed)),
+  );
+}
+
+export function resolveScrapeWindow(
+  now: Date,
+  lookbackDays: number,
+): { sDate: Date; eDate: Date } {
+  const { day, month, year } = getPopularPortalDateParts(now);
+  const eDate = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), 12));
+  const normalizedLookbackDays = Number.isFinite(lookbackDays)
+    ? Math.min(
+      MAX_SCRAPE_LOOKBACK_DAYS,
+      Math.max(MIN_SCRAPE_LOOKBACK_DAYS, Math.trunc(lookbackDays)),
+    )
+    : DEFAULT_SCRAPE_LOOKBACK_DAYS;
+
+  return {
+    sDate: new Date(eDate.getTime() - (normalizedLookbackDays - 1) * DAY_MS),
+    eDate,
+  };
+}
+
+function getPopularPortalDateParts(date: Date): {
+  day: string;
+  month: string;
+  year: string;
+} {
   const fmt = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Santo_Domingo",
+    timeZone: SANTO_DOMINGO_TIME_ZONE,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   });
 
-  // en-CA produces YYYY-MM-DD; split and re-order to dd/mm/yyyy.
   const parts = fmt.formatToParts(date);
   const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? "00";
-
-  return `${get("day")}/${get("month")}/${get("year")}`;
+  return { day: get("day"), month: get("month"), year: get("year") };
 }
 
 /**
@@ -327,6 +374,13 @@ export async function collectPopularPortalRows(
 
     const pageRows = extractRowsFromSnapshot(snapshot);
     allRows.push(...pageRows);
+
+    if (pageRows.length === itemsPerPage && pageNumber === maxPages) {
+      return {
+        kind: "needs_admin_action",
+        safeErrorSummary: SAFE_SUMMARY_POPULAR_PAGINATION_LIMIT_REACHED,
+      };
+    }
 
     // Stop when fewer than a full page was returned
     if (pageRows.length < itemsPerPage) {

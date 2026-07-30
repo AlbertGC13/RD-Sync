@@ -18,6 +18,8 @@ import type { IngestionScraper } from "../../queues";
 import type { ScrapeCollectionResult } from "../../scraper";
 import {
   collectPopularPortalRows,
+  parseScrapeLookbackDays,
+  resolveScrapeWindow,
   type CollectPopularPortalRowsResult,
   type PopularPortalPage,
   type PortalTableSnapshot,
@@ -328,11 +330,14 @@ export function createPopularCdpScraper(options: PopularCdpScraperOptions = {}):
         cdpPage = await openCdpPageInDefaultContext(browser);
         const portalPage = new CdpPopularPortalPage(cdpPage);
 
-        const today = clock();
+        const scrapeWindow = resolveScrapeWindow(
+          clock(),
+          parseScrapeLookbackDays(process.env.RD_SYNC_SCRAPE_LOOKBACK_DAYS),
+        );
         const collectResult = await collectRows(portalPage, {
           baseUrl,
-          sDate: today,
-          eDate: today,
+          sDate: scrapeWindow.sDate,
+          eDate: scrapeWindow.eDate,
           itemsPerPage,
           maxPages,
           warmupPauseMs,

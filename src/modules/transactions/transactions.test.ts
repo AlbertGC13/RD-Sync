@@ -125,6 +125,21 @@ describe("filterTransactions", () => {
     expect(result.map((record) => record.id)).toEqual(["tx-2"]);
   });
 
+  it("sorts transactions by postedAt descending", () => {
+    const result = filterTransactions([
+      normalizeBankMovement(
+        { ...baseMovement, postedAt: "2026-06-07T08:45:00-04:00" },
+        { id: "tx-earlier" },
+      ),
+      normalizeBankMovement(
+        { ...baseMovement, postedAt: "2026-06-07T10:45:00-04:00" },
+        { id: "tx-later" },
+      ),
+    ], {});
+
+    expect(result.map((record) => record.id)).toEqual(["tx-later", "tx-earlier"]);
+  });
+
   it("returns an empty result for non-matching filters after evaluating data", () => {
     const result = filterTransactions(records, {
       bankId: "popular",
@@ -249,5 +264,4 @@ describe("InMemoryTransactionRepository", () => {
     expect(creditAfter?.reviewState).toBe("new");
   });
 });
-
 
