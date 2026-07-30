@@ -842,6 +842,53 @@ describe("createScrapeTimeAutoLoginRunner", () => {
     expect(acquire).toHaveBeenCalledWith("popular", "E1");
     expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
   });
+
+  it("records only executed unknown post-submit failures and skips after the breaker opens", async () => {
+    let breakerState: "closed" | "open" = "closed";
+    const recordFailure = vi.fn(async () => { if (recordFailure.mock.calls.length === 3) breakerState = "open"; });
+    const outcomes = [
+      { status: "needs_admin_action" as const, reason: "protected_flow" as const, safeSummary: "MFA required" },
+      ...Array.from({ length: 3 }, () => ({ status: "needs_admin_action" as const, reason: "unknown_post_submit_state" as const, safeSummary: "Unknown state" })),
+    ];
+    const autoLogin = vi.fn(async () => outcomes.shift()!);
+    const run = createScrapeTimeAutoLoginRunner({
+      adapterRegistry: { get: () => ({ bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin }) }) },
+      autoLoginConfigs: { getByBankCode: async () => ({ autoLoginEnabled: true, breakerState }) },
+      credentials: { findByBankCode: async () => encryptedCredentialRecord() }, keyResolver,
+      lock: { acquire: async () => ({ leaseToken: "lease", fencingToken: 1, expiresAt: 1 }), release: async () => true },
+      cdpUrlForBankCode: () => "http://127.0.0.1:9222", ensureBrowser: async () => readyBrowser(makePage()), recordFailure,
+    });
+
+    await run({ data: { bankId: "popular", expiredEventId: "event-mfa" } });
+    await run({ data: { bankId: "popular", expiredEventId: "event-1" } });
+    await run({ data: { bankId: "popular", expiredEventId: "event-2" } });
+    await run({ data: { bankId: "popular", expiredEventId: "event-3" } });
+    await run({ data: { bankId: "popular", expiredEventId: "event-open" } });
+
+    expect(recordFailure).toHaveBeenCalledTimes(3);
+    expect(autoLogin).toHaveBeenCalledTimes(4);
+  });
+
+  it("fails closed without leaking persistence errors when an executed failure cannot update the breaker", async () => {
+    const rawRejection = "database token=secret password=bank-password unavailable";
+    const autoLogin = vi.fn().mockResolvedValue({ status: "needs_admin_action" as const, reason: "unknown_post_submit_state" as const, safeSummary: "Unknown state" });
+    const recordFailure = vi.fn().mockRejectedValue(new Error(rawRejection));
+    const run = createScrapeTimeAutoLoginRunner({
+      adapterRegistry: { get: () => ({ bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin }) }) },
+      autoLoginConfigs: { getByBankCode: async () => ({ autoLoginEnabled: true, breakerState: "closed" }) },
+      credentials: { findByBankCode: async () => encryptedCredentialRecord() }, keyResolver,
+      lock: { acquire: async () => ({ leaseToken: "lease", fencingToken: 1, expiresAt: 1 }), release: async () => true },
+      cdpUrlForBankCode: () => "http://127.0.0.1:9222", ensureBrowser: async () => readyBrowser(makePage()), recordFailure,
+    });
+
+    const result = await run({ data: { bankId: "popular", expiredEventId: "event-persist-failure" } });
+
+    expect(result).toEqual({ status: "needs_admin_action", reason: "portal_state_unavailable", safeSummary: "Bank auto-login requires admin action" });
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(autoLogin).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(result)).not.toContain("secret");
+    expect(JSON.stringify(result)).not.toContain("bank-password");
+  });
 });
 
 describe("createScrapeTimeAutoLoginBrowserOpener", () => {
@@ -885,6 +932,18 @@ describe("createScrapeTimeAutoLoginBrowserOpener", () => {
     browser.contexts.mockReturnValue([{ newPage: vi.fn().mockRejectedValue(new Error("page creation failed")) }]);
     await expect(open({ connect: vi.fn().mockResolvedValue(browser), acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "acquired", release }) })).rejects.toThrow("page creation failed");
     expect({ browser: browser.close.mock.calls.length, browserSlot: release.mock.calls.length }).toEqual({ browser: 1, browserSlot: 1 });
+  });
+  it("returns throttled without connecting when shared browser capacity is unavailable", async () => {
+    const connect = vi.fn();
+    await expect(open({ connect, acquireBrowserSlot: vi.fn().mockResolvedValue({ kind: "throttled" }) })).resolves.toEqual({ status: "throttled" });
+    expect(connect).not.toHaveBeenCalled();
+  });
+  it("rejects non-loopback CDP before acquiring capacity or connecting", async () => {
+    const connect = vi.fn();
+    const acquireBrowserSlot = vi.fn();
+    await expect(createScrapeTimeAutoLoginBrowserOpener({ trustedLoginUrl: POPULAR_LOGIN_URL, connect, acquireBrowserSlot })("popular", "http://10.0.0.5:9222")).rejects.toThrow("loopback");
+    expect(acquireBrowserSlot).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
   });
   it("cleans up the page, browser, and slot after trusted navigation rejects", async () => {
     const release = vi.fn().mockResolvedValue(undefined);
