@@ -125,16 +125,32 @@ export class BankAutoLoginConfigRepository {
     return mapRow(row);
   }
 
+  /**
+   * Sets the auto-login kill switch, provisioning the config row on first use.
+   *
+   * A bank that exists in `Bank` but has never been configured has no
+   * `BankAutoLoginConfig` row — nothing provisions one. An update-only
+   * implementation therefore returned `null` forever, which the route maps to
+   * 404, making auto-login impossible to enable on a fresh install.
+   *
+   * The upsert mirrors `BankAdapterConfig.setScrapingEnabled`. Fail-closed
+   * behaviour for a genuinely unknown bank is preserved by the `bankCode`
+   * foreign key: Prisma raises P2003 and this returns `null` (still 404), so no
+   * row is ever created for a bank that does not exist.
+   */
   async setAutoLoginEnabled(bankCode: string, enabled: boolean, updatedBy: string): Promise<BankAutoLoginConfigRecord | null> {
-    const existing = await this.prisma.bankAutoLoginConfig.findUnique({ where: { bankCode }, select: { bankCode: true } });
-    if (!existing) return null;
-
-    const row = await this.prisma.bankAutoLoginConfig.update({
-      where: { bankCode },
-      data: { autoLoginEnabled: enabled, updatedBy },
-      select: RECORD_SELECT,
-    });
-    return mapRow(row);
+    try {
+      const row = await this.prisma.bankAutoLoginConfig.upsert({
+        where: { bankCode },
+        update: { autoLoginEnabled: enabled, updatedBy },
+        create: { bankCode, autoLoginEnabled: enabled, updatedBy },
+        select: RECORD_SELECT,
+      });
+      return mapRow(row);
+    } catch (error: unknown) {
+      if (hasPrismaCode(error, "P2003")) return null;
+      throw error;
+    }
   }
 
   private async runSerializableWithRetry<T>(operation: (tx: BankAutoLoginConfigTx) => Promise<T>): Promise<T> {

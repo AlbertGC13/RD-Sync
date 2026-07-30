@@ -219,15 +219,30 @@ describe("BankAutoLoginConfigRepository", () => {
   });
 
   describe("setAutoLoginEnabled", () => {
-    it("is a no-op for unknown bankCode and updates only known rows", async () => {
-      const unknown = makeRepo({ findUnique: null });
-      await expect(unknown.repo.setAutoLoginEnabled("unknown", true, "admin-1")).resolves.toBeNull();
-      expectFindUnique(unknown.bankAutoLoginConfig.findUnique, "unknown", BANK_CODE_SELECT);
-      expect(unknown.bankAutoLoginConfig.update).not.toHaveBeenCalled();
+    it("provisions the row on first use so a never-configured bank can be enabled", async () => {
+      const created = makeRepo({ upsert: row({ autoLoginEnabled: true, updatedBy: "admin-1" }) });
 
-      const known = makeRepo({ findUnique: row(), update: row({ autoLoginEnabled: true, updatedBy: "admin-1" }) });
-      await expect(known.repo.setAutoLoginEnabled("popular", true, "admin-1")).resolves.toMatchObject({ autoLoginEnabled: true, updatedBy: "admin-1" });
-      expectUpdate(known.bankAutoLoginConfig.update, "popular", { autoLoginEnabled: true, updatedBy: "admin-1" });
+      await expect(created.repo.setAutoLoginEnabled("popular", true, "admin-1")).resolves.toMatchObject({ autoLoginEnabled: true, updatedBy: "admin-1" });
+      expect(created.bankAutoLoginConfig.upsert).toHaveBeenCalledWith({
+        where: { bankCode: "popular" },
+        update: { autoLoginEnabled: true, updatedBy: "admin-1" },
+        create: { bankCode: "popular", autoLoginEnabled: true, updatedBy: "admin-1" },
+        select: RECORD_SELECT,
+      });
+    });
+
+    it("fails closed for an unknown bankCode without creating a row", async () => {
+      const unknown = makeRepo();
+      unknown.bankAutoLoginConfig.upsert.mockRejectedValue({ code: "P2003" });
+
+      await expect(unknown.repo.setAutoLoginEnabled("unknown", true, "admin-1")).resolves.toBeNull();
+    });
+
+    it("propagates unexpected repository errors instead of masking them as not-found", async () => {
+      const failing = makeRepo();
+      failing.bankAutoLoginConfig.upsert.mockRejectedValue(new Error("connection lost"));
+
+      await expect(failing.repo.setAutoLoginEnabled("popular", true, "admin-1")).rejects.toThrow("connection lost");
     });
   });
 });
