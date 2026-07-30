@@ -244,13 +244,8 @@ async function recoverExpiredSession(
   }
   if (autoLoginOutcome?.status !== "succeeded") {
     await requireManualRecovery(dependencies.expiryEpisodes, reservation);
-    if (autoLoginOutcome) {
-      await emitAutoLoginOutcomeAuditEvent(dependencies.auditSink, job.data.runId, durable.episode.expiredEventId, durable.episode.bankCode, autoLoginOutcome);
-    }
     return autoLoginOutcome ?? initialResult;
   }
-
-  await emitAutoLoginOutcomeAuditEvent(dependencies.auditSink, job.data.runId, durable.episode.expiredEventId, durable.episode.bankCode, autoLoginOutcome);
 
   const recollected = await scraper.collect();
   if (recollected.status !== "collected") {

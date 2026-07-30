@@ -51,6 +51,7 @@ import { defaultScrapeRunRepository } from "../app/api/scrape-runs/defaults";
 import { defaultTransactionRepository } from "../app/api/transactions/defaults";
 import { defaultAuditSink } from "../app/api/audit/defaults";
 import { createIngestionProcessor } from "./queues";
+import { createProductionAutoLoginOutcomeHook } from "./auto-login-composition";
 
 // ---------------------------------------------------------------------------
 // Fail fast if required env vars are absent
@@ -137,6 +138,7 @@ const runScrapeTimeAutoLogin = createScrapeTimeAutoLoginRunner({
       metadata: { bankCode, keyVersion },
     }));
   },
+  afterAutoLoginOutcome: createProductionAutoLoginOutcomeHook(defaultAuditSink),
 });
 
 const processor = createIngestionProcessor({

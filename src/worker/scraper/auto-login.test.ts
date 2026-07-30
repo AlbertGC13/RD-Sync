@@ -340,8 +340,21 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
       lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn().mockResolvedValue(true) },
       ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(page)), afterAutoLoginOutcome: uncertainOutcome,
     })).resolves.toMatchObject({ status: "needs_admin_action", reason: "portal_state_unavailable" });
-    expect(uncertainOutcome).toHaveBeenCalledWith({ bankCode: "popular", expiredEventId: "E1", outcome: { status: "needs_admin_action", reason: "portal_state_unavailable" } });
+    expect(uncertainOutcome).toHaveBeenCalledWith({ bankCode: "popular", expiredEventId: "E1", outcome: { status: "needs_admin_action", reason: "portal_state_unavailable", safeSummary: "Bank auto-login requires admin action" } });
     expect(uncertainOutcome.mock.calls).not.toContainEqual(expect.arrayContaining([expect.objectContaining({ outcome: { status: "succeeded" } })]));
+  });
+
+  it("preserves the protected-flow outcome when outcome persistence fails", async () => {
+    const afterAutoLoginOutcome = vi.fn().mockRejectedValue(new Error("audit token=secret unavailable"));
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular", expiredEventId: "E1", credential, cdpUrl: "http://127.0.0.1:9222",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => createBankAutoLoginStrategy(portalConfig) },
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn().mockResolvedValue(true) },
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(makePage())), afterAutoLoginOutcome,
+    })).resolves.toEqual({ status: "succeeded" });
+
+    expect(afterAutoLoginOutcome).toHaveBeenCalledTimes(1);
   });
 
   it("does not call the mutation hook before lock, browser, throttle, or guard rejections", async () => {
@@ -720,6 +733,7 @@ describe("createScrapeTimeAutoLoginRunner", () => {
   it("skips auto-login safely when the per-bank kill switch is off", async () => {
     const findByBankCode = vi.fn();
     const acquire = vi.fn();
+    const afterAutoLoginOutcome = vi.fn();
     const run = createScrapeTimeAutoLoginRunner({
       adapterRegistry: { get: vi.fn().mockReturnValue({ bankCode: "popular", createAutoLoginStrategy: vi.fn() }) },
       autoLoginConfigs: { getByBankCode: vi.fn().mockResolvedValue({ autoLoginEnabled: false, breakerState: "closed" }) },
@@ -728,12 +742,18 @@ describe("createScrapeTimeAutoLoginRunner", () => {
       lock: { acquire, release: vi.fn() },
       cdpUrlForBankCode: vi.fn(),
       ensureBrowser: vi.fn(),
+      afterAutoLoginOutcome,
     });
     await expect(run({ data: { bankId: "popular", expiredEventId: "E1" } })).resolves.toEqual({
       status: "skipped", reason: "disabled", safeSummary: "Manual scrape required before retrying bank auto-login",
     });
     expect(findByBankCode).not.toHaveBeenCalled();
     expect(acquire).not.toHaveBeenCalled();
+    expect(afterAutoLoginOutcome).toHaveBeenCalledWith({
+      bankCode: "popular",
+      expiredEventId: "E1",
+      outcome: { status: "skipped", reason: "disabled", safeSummary: "Manual scrape required before retrying bank auto-login" },
+    });
   });
 
   it("fails closed when the stored credential belongs to a different bank", async () => {
@@ -885,7 +905,7 @@ describe("createScrapeTimeAutoLoginRunner", () => {
 
     const result = await run({ data: { bankId: "popular", expiredEventId: "event-persist-failure" } });
 
-    expect(result).toEqual({ status: "needs_admin_action", reason: "portal_state_unavailable", safeSummary: "Bank auto-login requires admin action" });
+    expect(result).toEqual({ status: "needs_admin_action", reason: "unknown_post_submit_state", safeSummary: "Unknown state" });
     expect(recordFailure).toHaveBeenCalledTimes(1);
     expect(autoLogin).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(result)).not.toContain("secret");

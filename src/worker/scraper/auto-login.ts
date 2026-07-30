@@ -74,6 +74,7 @@ export type ScrapeTimeAutoLoginOutcome =
 export interface ScrapeTimeAutoLoginTriggerContext {
   bankCode: string;
   expiredEventId: string;
+  runId?: string;
   adapter: { readonly bankCode: string; createAutoLoginStrategy(): BankAutoLoginStrategy };
   credential: BankAutoLoginCredential;
   cdpUrl: string;
@@ -90,13 +91,15 @@ export interface AutoLoginMutationHookMetadata {
 }
 
 export interface AutoLoginOutcomeHookMetadata extends AutoLoginMutationHookMetadata {
-  outcome: { status: "succeeded" } | { status: "needs_admin_action"; reason: BankAutoLoginAdminActionReason };
+  runId?: string;
+  outcome: ScrapeTimeAutoLoginOutcome;
 }
 
 export interface ScrapeTimeAutoLoginRunnerJob {
   data: {
     bankId: string; // Canonical bank code from IngestionJobData, not a database id.
     expiredEventId?: string;
+    runId?: string;
   };
 }
 
@@ -320,6 +323,33 @@ export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerD
     const expiredEventId = job.data.expiredEventId;
     if (!expiredEventId) return null;
 
+    const outcome = await resolveScrapeTimeAutoLoginOutcome(deps, job, expiredEventId);
+    if (outcome.status === "needs_admin_action" && outcome.reason === "unknown_post_submit_state") {
+      try {
+        await deps.recordFailure?.(job.data.bankId, new Date());
+      } catch {
+        // Breaker persistence must not replace the protected-flow outcome.
+      }
+    }
+    try {
+      await deps.afterAutoLoginOutcome?.({
+        bankCode: job.data.bankId,
+        expiredEventId,
+        runId: job.data.runId,
+        outcome,
+      });
+    } catch {
+      // Outcome observability must not replace the protected-flow outcome.
+    }
+    return outcome;
+  };
+}
+
+async function resolveScrapeTimeAutoLoginOutcome(
+  deps: ScrapeTimeAutoLoginRunnerDependencies,
+  job: ScrapeTimeAutoLoginRunnerJob,
+  expiredEventId: string,
+): Promise<ScrapeTimeAutoLoginOutcome> {
     const bankCode = job.data.bankId;
     const adapter = safelyResolveAdapter(deps, bankCode);
     if (isAdminActionOutcome(adapter)) return adapter;
@@ -350,14 +380,7 @@ export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerD
       ensureBrowser: (url) => deps.ensureBrowser(bankCode, url),
       recordLockReleaseFailure: deps.recordLockReleaseFailure,
       beforeAutoLoginMutation: deps.beforeAutoLoginMutation,
-      afterAutoLoginOutcome: async (metadata) => {
-        if (metadata.outcome.status === "needs_admin_action" && metadata.outcome.reason === "unknown_post_submit_state") {
-          await deps.recordFailure?.(metadata.bankCode, new Date());
-        }
-        await deps.afterAutoLoginOutcome?.(metadata);
-      },
     });
-  };
 }
 
 function safelyResolveAdapter(
@@ -514,10 +537,11 @@ async function runOwnedAutoLogin(context: ScrapeTimeAutoLoginTriggerContext, cdp
     await context.afterAutoLoginOutcome?.({
       bankCode: context.bankCode,
       expiredEventId: context.expiredEventId,
-      outcome: outcome.status === "succeeded" ? outcome : { status: outcome.status, reason: outcome.reason },
+      ...(context.runId ? { runId: context.runId } : {}),
+      outcome,
     });
   } catch {
-    return needsAdminAction("portal_state_unavailable");
+    // Outcome observability must not replace the protected-flow outcome.
   }
   return outcome;
 }
