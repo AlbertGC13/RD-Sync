@@ -34,7 +34,7 @@ export interface PopularParseOptions {
 export const popularScraperProfile = {
   bankId: POPULAR_BANK_ID,
   accountFingerprint: POPULAR_ACCOUNT_FINGERPRINT,
-  defaultSearchMode: "current-day",
+  defaultSearchMode: "recent-lookback-window",
   selectors: {
     accountNumberText: POPULAR_ACCOUNT_NUMBER,
     accountTypeText: "Corriente",
@@ -62,7 +62,7 @@ export const popularPortalFixture = {
     currency: POPULAR_CURRENCY,
   },
   search: {
-    defaultSearchMode: "current-day",
+    defaultSearchMode: "recent-lookback-window",
     fromDate: "01/enero/2025",
     toDate: "01/enero/2025",
   },

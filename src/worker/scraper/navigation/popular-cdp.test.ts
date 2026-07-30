@@ -14,6 +14,10 @@ import {
   SAFE_SUMMARY_BROWSER_CAPACITY_THROTTLED,
 } from "../browser-runtime";
 import type { PopularTransactionRow } from "../../../modules/bank-adapters/popular";
+import {
+  formatPopularPortalDate,
+  SAFE_SUMMARY_POPULAR_PAGINATION_LIMIT_REACHED,
+} from "./popular";
 
 // ---------------------------------------------------------------------------
 // Synthetic fixture rows (same values as the brief fixture)
@@ -164,7 +168,7 @@ describe("createPopularCdpScraper — happy path", () => {
     expect(result.movements[1].direction).toBe("credit");
   });
 
-  it("returns status needs_admin_action when collectRows returns needs_admin_action", async () => {
+  it("propagates the pagination-limit signal without returning partial movements", async () => {
     const browser = new FakeCdpBrowser(() => makeFakeCdpPage());
     const scraper = createPopularCdpScraper({
       cdpUrl: "http://127.0.0.1:9222",
@@ -172,15 +176,50 @@ describe("createPopularCdpScraper — happy path", () => {
       connect: async (cdpEndpoint: string) => { void cdpEndpoint; return browser; },
       collectRows: async () => ({
         kind: "needs_admin_action" as const,
-        safeErrorSummary: "Bank session expired or requires verification",
+        safeErrorSummary: SAFE_SUMMARY_POPULAR_PAGINATION_LIMIT_REACHED,
       }),
     });
 
     const result = await scraper.collect();
 
-    expect(result.status).toBe("needs_admin_action");
-    expect(result.movements).toEqual([]);
-    expect(result.safeErrorSummary).toBe("Bank session expired or requires verification");
+    expect(result).toEqual({
+      status: "needs_admin_action",
+      movements: [],
+      safeErrorSummary: SAFE_SUMMARY_POPULAR_PAGINATION_LIMIT_REACHED,
+    });
+  });
+});
+
+describe("createPopularCdpScraper — lookback window", () => {
+  it("passes the configured Santo Domingo calendar window to portal collection", async () => {
+    const originalLookbackDays = process.env.RD_SYNC_SCRAPE_LOOKBACK_DAYS;
+    const browser = new FakeCdpBrowser(() => makeFakeCdpPage());
+    let scrapeWindow: { sDate: Date; eDate: Date } | undefined;
+
+    process.env.RD_SYNC_SCRAPE_LOOKBACK_DAYS = "7";
+    try {
+      const scraper = createPopularCdpScraper({
+        cdpUrl: "http://127.0.0.1:9222",
+        clock: () => new Date("2026-01-01T01:00:00Z"),
+        connect: async () => browser,
+        collectRows: async (_page, options) => {
+          scrapeWindow = { sDate: options.sDate, eDate: options.eDate };
+          return { kind: "rows" as const, rows: [] };
+        },
+      });
+
+      await scraper.collect();
+    } finally {
+      if (originalLookbackDays === undefined) {
+        delete process.env.RD_SYNC_SCRAPE_LOOKBACK_DAYS;
+      } else {
+        process.env.RD_SYNC_SCRAPE_LOOKBACK_DAYS = originalLookbackDays;
+      }
+    }
+
+    if (!scrapeWindow) throw new Error("collectRows was not called");
+    expect(formatPopularPortalDate(scrapeWindow.sDate)).toBe("25/12/2025");
+    expect(formatPopularPortalDate(scrapeWindow.eDate)).toBe("31/12/2025");
   });
 });
 

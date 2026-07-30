@@ -63,6 +63,25 @@ describe("filterScrapeRuns", () => {
 
     expect(result.map((run) => run.id)).toEqual(["run-newest", "run-middle"]);
   });
+
+  it("sorts runs by updatedAt descending", () => {
+    const result = filterScrapeRuns([
+      {
+        ...baseRun,
+        id: "run-updated-earlier",
+        createdAt: new Date("2026-06-08T15:00:00.000Z"),
+        updatedAt: new Date("2026-06-08T12:00:00.000Z"),
+      },
+      {
+        ...baseRun,
+        id: "run-updated-later",
+        createdAt: new Date("2026-06-08T11:00:00.000Z"),
+        updatedAt: new Date("2026-06-08T13:00:00.000Z"),
+      },
+    ], {});
+
+    expect(result.map((run) => run.id)).toEqual(["run-updated-later", "run-updated-earlier"]);
+  });
 });
 
 describe("toDashboardScrapeRun", () => {

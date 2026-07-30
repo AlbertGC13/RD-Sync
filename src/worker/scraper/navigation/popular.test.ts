@@ -4,6 +4,10 @@ import {
   formatPopularPortalDate,
   buildPopularTransactionsUrl,
   collectPopularPortalRows,
+  DEFAULT_SCRAPE_LOOKBACK_DAYS,
+  parseScrapeLookbackDays,
+  resolveScrapeWindow,
+  SAFE_SUMMARY_POPULAR_PAGINATION_LIMIT_REACHED,
   type PopularPortalPage,
   type PortalTableSnapshot,
 } from "./popular";
@@ -37,6 +41,28 @@ describe("formatPopularPortalDate", () => {
   });
 });
 
+describe("Popular scrape lookback window", () => {
+  it("defaults invalid values and clamps numeric values to the supported range", () => {
+    expect(parseScrapeLookbackDays(undefined)).toBe(DEFAULT_SCRAPE_LOOKBACK_DAYS);
+    expect(parseScrapeLookbackDays("")).toBe(DEFAULT_SCRAPE_LOOKBACK_DAYS);
+    expect(parseScrapeLookbackDays("not-a-number")).toBe(DEFAULT_SCRAPE_LOOKBACK_DAYS);
+    expect(parseScrapeLookbackDays("0")).toBe(1);
+    expect(parseScrapeLookbackDays("-3")).toBe(1);
+    expect(parseScrapeLookbackDays("32")).toBe(31);
+  });
+
+  it("resolves calendar dates in Santo Domingo across a UTC-near-midnight year boundary", () => {
+    const now = new Date("2026-01-01T01:00:00Z");
+    const oneDay = resolveScrapeWindow(now, 1);
+    const sevenDays = resolveScrapeWindow(now, 7);
+
+    expect(formatPopularPortalDate(oneDay.sDate)).toBe("31/12/2025");
+    expect(formatPopularPortalDate(oneDay.eDate)).toBe("31/12/2025");
+    expect(formatPopularPortalDate(sevenDays.sDate)).toBe("25/12/2025");
+    expect(formatPopularPortalDate(sevenDays.eDate)).toBe("31/12/2025");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // buildPopularTransactionsUrl
 // ---------------------------------------------------------------------------
@@ -51,9 +77,10 @@ describe("buildPopularTransactionsUrl", () => {
   });
 
   it("encodes dates as dd%2Fmm%2Fyyyy (slash URL-encoded as %2F)", () => {
-    const date = new Date("2026-06-12T04:00:00Z");
-    const url = buildPopularTransactionsUrl({ baseUrl, sDate: date, eDate: date });
-    expect(url).toContain("sDate=12%2F06%2F2026");
+    const sDate = new Date("2026-06-06T04:00:00Z");
+    const eDate = new Date("2026-06-12T04:00:00Z");
+    const url = buildPopularTransactionsUrl({ baseUrl, sDate, eDate });
+    expect(url).toContain("sDate=06%2F06%2F2026");
     expect(url).toContain("eDate=12%2F06%2F2026");
   });
 
@@ -132,10 +159,11 @@ describe("collectPopularPortalRows — pagination URL construction", () => {
     expect(page.operations.find((op) => op.includes("itemsPerPage=100"))).toBeTruthy();
   });
 
-  it("paginates to page 2 when page 1 is full (itemsPerPage rows returned)", async () => {
+  it("does not report truncation when the final allowed page is short", async () => {
     const date = new Date("2026-06-12T04:00:00Z");
     const baseUrl = "https://ib.bpd.com.do";
     const itemsPerPage = 2;
+    const maxPages = 2;
     const page1Rows = [SYNTHETIC_ROW_1, SYNTHETIC_ROW_2];
     const page2Rows = [SYNTHETIC_ROW_3];
 
@@ -150,7 +178,7 @@ describe("collectPopularPortalRows — pagination URL construction", () => {
       ],
     });
 
-    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, itemsPerPage, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, itemsPerPage, maxPages, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
 
     expect(result.kind).toBe("rows");
     if (result.kind !== "rows") throw new Error("unreachable");
@@ -182,7 +210,7 @@ describe("collectPopularPortalRows — pagination URL construction", () => {
     expect(page.operations.some((op) => op.includes("pageNumber=2"))).toBe(false);
   });
 
-  it("enforces maxPages cap and stops before reading page maxPages+1", async () => {
+  it("reports a safe operator-visible signal when a full final allowed page may be truncated", async () => {
     const date = new Date("2026-06-12T04:00:00Z");
     const baseUrl = "https://ib.bpd.com.do";
     const itemsPerPage = 1;
@@ -202,9 +230,10 @@ describe("collectPopularPortalRows — pagination URL construction", () => {
 
     const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, itemsPerPage, maxPages, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
 
-    expect(result.kind).toBe("rows");
-    if (result.kind !== "rows") throw new Error("unreachable");
-    expect(result.rows).toHaveLength(2); // only 2 pages read
+    expect(result).toEqual({
+      kind: "needs_admin_action",
+      safeErrorSummary: SAFE_SUMMARY_POPULAR_PAGINATION_LIMIT_REACHED,
+    });
     // No page 3
     expect(page.operations.some((op) => op.includes("pageNumber=3"))).toBe(false);
   });

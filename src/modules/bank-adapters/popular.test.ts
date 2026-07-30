@@ -23,7 +23,10 @@ describe("popularScraperProfile", () => {
       searchButtonText: "Buscar",
       resultsTable: "table:has-text('Fecha posteo')",
     });
-    expect(popularScraperProfile.defaultSearchMode).toBe("current-day");
+    expect(popularScraperProfile.defaultSearchMode).toBe("recent-lookback-window");
+    expect(popularPortalFixture.search.defaultSearchMode).toBe(
+      popularScraperProfile.defaultSearchMode,
+    );
   });
 });
 
