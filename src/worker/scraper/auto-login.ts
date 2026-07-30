@@ -127,6 +127,7 @@ export interface ScrapeTimeAutoLoginRunnerDependencies {
   ensureBrowser(bankCode: string, cdpUrl: string): Promise<ScrapeTimeAutoLoginBrowserResult>;
   recordLockReleaseFailure?(metadata: { bankCode: string; expiredEventId: string }): void | Promise<void>;
   recordCredentialDecryptUse?(metadata: { bankCode: string; keyVersion: number }): void | Promise<void>;
+  recordFailure?(bankCode: string, occurredAt: Date): void | Promise<void>;
   beforeAutoLoginMutation?(metadata: AutoLoginMutationHookMetadata): boolean | Promise<boolean>;
   afterAutoLoginOutcome?(metadata: AutoLoginOutcomeHookMetadata): void | Promise<void>;
 }
@@ -330,7 +331,12 @@ export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerD
       ensureBrowser: (url) => deps.ensureBrowser(bankCode, url),
       recordLockReleaseFailure: deps.recordLockReleaseFailure,
       beforeAutoLoginMutation: deps.beforeAutoLoginMutation,
-      afterAutoLoginOutcome: deps.afterAutoLoginOutcome,
+      afterAutoLoginOutcome: async (metadata) => {
+        if (metadata.outcome.status === "needs_admin_action" && metadata.outcome.reason === "unknown_post_submit_state") {
+          await deps.recordFailure?.(metadata.bankCode, new Date());
+        }
+        await deps.afterAutoLoginOutcome?.(metadata);
+      },
     });
   };
 }
@@ -492,7 +498,7 @@ async function runOwnedAutoLogin(context: ScrapeTimeAutoLoginTriggerContext, cdp
       outcome: outcome.status === "succeeded" ? outcome : { status: outcome.status, reason: outcome.reason },
     });
   } catch {
-    if (outcome.status === "succeeded") return needsAdminAction("portal_state_unavailable");
+    return needsAdminAction("portal_state_unavailable");
   }
   return outcome;
 }

@@ -1,7 +1,10 @@
 import type { JobsOptions } from "bullmq";
+import { randomUUID } from "node:crypto";
 
 import { createAuditEvent, type AuditSink } from "../../modules/audit";
 import { BANK_AUTOLOGIN_ACTIONS } from "../../modules/audit/bank-actions";
+import { createExpiredSessionRunId } from "../../modules/bank-sessions";
+import { restoreExpiryEpisode, type BankSessionExpiryEpisode, type BankSessionExpiryEpisodeRepository, type ExpiryPublicationEnvelope } from "../../modules/bank-sessions/expiry-episodes";
 import { type BankMovement, type TransactionRecord, normalizeBankMovement } from "../../modules/transactions";
 import type { ScrapeTimeAutoLoginOutcome } from "../scraper/auto-login";
 import { redactDiagnosticText, type ScrapeCollectionResult } from "../scraper";
@@ -102,6 +105,8 @@ export interface IngestionProcessorDependencies {
   auditSink?: Pick<AuditSink, "record">;
   now?: () => Date;
   runScrapeTimeAutoLogin?: (job: IngestionJob) => Promise<ScrapeTimeAutoLoginOutcome | null>;
+  expiryEpisodes?: BankSessionExpiryEpisodeRepository;
+  createExpiredEventId?: () => string;
 }
 
 export interface QueueLike {
@@ -137,28 +142,26 @@ export function createIngestionProcessor(dependencies: IngestionProcessorDepende
     });
 
     try {
-      const autoLoginOutcome = await runScrapeTimeAutoLoginIfNeeded(job, dependencies.runScrapeTimeAutoLogin);
-      if (autoLoginOutcome?.status === "needs_admin_action") {
-        return markNeedsAdminActionTerminal(
+      let scrapeResult = await scraper.collect();
+      if (scrapeResult.status === "needs_admin_action" && scrapeResult.cause === "session_expired") {
+        const recoveryResult = await recoverExpiredSession(
+          job,
           dependencies,
-          job.data,
-          requestedBankCode,
-          autoLoginOutcome.safeSummary,
+          scraper,
+          scrapeResult,
           now,
         );
+        if (isAutoLoginOutcome(recoveryResult)) {
+          if (recoveryResult.status === "throttled") {
+            return markThrottledDeferred(dependencies, job.data, requestedBankCode, recoveryResult.safeSummary, now);
+          }
+          if (recoveryResult.status === "needs_admin_action") {
+            return markNeedsAdminActionTerminal(dependencies, job.data, requestedBankCode, recoveryResult.safeSummary, now);
+          }
+        } else {
+          scrapeResult = recoveryResult;
+        }
       }
-
-      if (autoLoginOutcome?.status === "throttled") {
-        return markThrottledDeferred(
-          dependencies,
-          job.data,
-          requestedBankCode,
-          autoLoginOutcome.safeSummary,
-          now,
-        );
-      }
-
-      const scrapeResult = await scraper.collect();
 
       if (scrapeResult.status === "needs_admin_action") {
         const safeErrorSummary = scrapeResult.safeErrorSummary ?? "Bank session requires admin action";
@@ -202,20 +205,87 @@ export function createIngestionProcessor(dependencies: IngestionProcessorDepende
   };
 }
 
-async function runScrapeTimeAutoLoginIfNeeded(
+async function recoverExpiredSession(
   job: IngestionJob,
-  runScrapeTimeAutoLogin: IngestionProcessorDependencies["runScrapeTimeAutoLogin"],
-): Promise<ScrapeTimeAutoLoginOutcome | null> {
-  if (!job.data.expiredEventId || !runScrapeTimeAutoLogin) return null;
+  dependencies: Pick<IngestionProcessorDependencies, "auditSink" | "createExpiredEventId" | "expiryEpisodes" | "runScrapeTimeAutoLogin">,
+  scraper: IngestionScraper,
+  initialResult: Extract<ScrapeCollectionResult, { status: "needs_admin_action"; cause: "session_expired" }>,
+  now: () => Date,
+): Promise<ScrapeCollectionResult | ScrapeTimeAutoLoginOutcome> {
+  if (!dependencies.expiryEpisodes || !dependencies.runScrapeTimeAutoLogin) return initialResult;
+
+  const expiredEventId = (dependencies.createExpiredEventId ?? randomUUID)();
+  const durable = await dependencies.expiryEpisodes.getOrCreate({
+    bankCode: job.data.bankId,
+    expiredEventId,
+    runId: createExpiredSessionRunId(job.data.bankId, expiredEventId),
+  });
+  const reservation = await reserveAutoLoginAttempt(dependencies.expiryEpisodes, durable.episode);
+  if (!reservation) return { status: "manual_required", reason: "lock_busy", safeSummary: "Manual scrape required before retrying bank auto-login" };
+
+  let autoLoginOutcome: ScrapeTimeAutoLoginOutcome | null;
   try {
-    return await runScrapeTimeAutoLogin(job);
+    autoLoginOutcome = await dependencies.runScrapeTimeAutoLogin({
+      data: { ...job.data, expiredEventId: durable.episode.expiredEventId },
+    });
   } catch {
-    return {
-      status: "needs_admin_action",
-      reason: "browser_unavailable",
-      safeSummary: "Bank auto-login requires admin action",
-    };
+    await requireManualRecovery(dependencies.expiryEpisodes, reservation);
+    return { status: "needs_admin_action", reason: "browser_unavailable", safeSummary: "Bank auto-login requires admin action" };
   }
+  if (autoLoginOutcome?.status !== "succeeded") {
+    await requireManualRecovery(dependencies.expiryEpisodes, reservation);
+    return autoLoginOutcome ?? initialResult;
+  }
+
+  const recollected = await scraper.collect();
+  if (recollected.status !== "collected") {
+    await requireManualRecovery(dependencies.expiryEpisodes, reservation);
+    return recollected;
+  }
+  if (!await dependencies.expiryEpisodes.markConsumerResolved(reservation.envelope, reservation.consumerClaimToken)) {
+    return { status: "needs_admin_action", reason: "browser_unavailable", safeSummary: "Bank auto-login requires admin action" };
+  }
+  await restoreExpiryEpisode(
+    dependencies.auditSink,
+    dependencies.expiryEpisodes,
+    durable.episode,
+    now().toISOString(),
+  );
+  return recollected;
+}
+
+async function reserveAutoLoginAttempt(
+  episodes: BankSessionExpiryEpisodeRepository,
+  episode: BankSessionExpiryEpisode,
+): Promise<{ envelope: ExpiryPublicationEnvelope; consumerClaimToken: string } | null> {
+  const token = episode.publicationClaimToken ?? randomUUID();
+  const envelope = { bankCode: episode.bankCode, expiredEventId: episode.expiredEventId, runId: episode.runId, token };
+  try {
+    if (episode.publicationState !== "published") {
+      if (!await episodes.claimPublication(episode, token) || !await episodes.markPublicationPublished(episode, token)) return null;
+    }
+    const consumerClaimToken = randomUUID();
+    if (!await episodes.claimConsumerAttempt(envelope, consumerClaimToken)) return null;
+    if (!await episodes.markConsumerMutationStarted(envelope, consumerClaimToken)) return null;
+    return { envelope, consumerClaimToken };
+  } catch {
+    return null;
+  }
+}
+
+async function requireManualRecovery(
+  episodes: BankSessionExpiryEpisodeRepository,
+  reservation: { envelope: ExpiryPublicationEnvelope; consumerClaimToken: string },
+): Promise<void> {
+  try {
+    await episodes.markConsumerManualRecoveryRequired(reservation.envelope, reservation.consumerClaimToken);
+  } catch {
+    // The durable mutation_started marker remains fail-closed if the transition cannot persist.
+  }
+}
+
+function isAutoLoginOutcome(value: ScrapeCollectionResult | ScrapeTimeAutoLoginOutcome): value is ScrapeTimeAutoLoginOutcome {
+  return !("movements" in value);
 }
 
 async function markNeedsAdminActionTerminal(

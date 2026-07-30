@@ -42,9 +42,10 @@ import { createAuditEvent } from "../modules/audit";
 import { BANK_AUTOLOGIN_ACTIONS, BANK_CREDENTIAL_ACTIONS } from "../modules/audit/bank-actions";
 import { getPrismaClient } from "../modules/persistence/prisma-client";
 import { PrismaBankSessionExpiryEpisodeRepository } from "../modules/persistence/prisma-bank-session-expiry-episode-repository";
-import { popularScraperProfile } from "../modules/bank-adapters/popular";
-import { resolveBankBrowserEnv } from "./scraper/browser-runtime";
-import { createScrapeTimeAutoLoginRunner, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginStrategy } from "./scraper/auto-login";
+import { popularBankCode, popularScraperProfile } from "../modules/bank-adapters/popular";
+import { popularPortalConfig } from "../modules/bank-adapters/popular-portal";
+import { createAcquireBrowserSlotFromEnv, createEnsureBrowserForBank, resolveBankBrowserEnv } from "./scraper/browser-runtime";
+import { createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, type BankAutoLoginStrategy } from "./scraper/auto-login";
 import { resolveDefaultScraper } from "../app/api/scrape-runs/consumer-defaults";
 import { defaultScrapeRunRepository } from "../app/api/scrape-runs/defaults";
 import { defaultTransactionRepository } from "../app/api/transactions/defaults";
@@ -72,6 +73,8 @@ const expiryRuntime = createDefaultExpiryRuntime();
 
 const connection = buildRedisConnectionOptions(redisUrl);
 const prisma = getPrismaClient();
+const expiryEpisodes = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+const autoLoginConfigs = new BankAutoLoginConfigRepository(prisma);
 
 function toScrapeTimeAutoLoginStrategy(strategy: unknown, bankCode: string): BankAutoLoginStrategy {
   if (isScrapeTimeAutoLoginStrategy(strategy)) return strategy;
@@ -100,12 +103,19 @@ const runScrapeTimeAutoLogin = createScrapeTimeAutoLoginRunner({
       };
     },
   },
-  autoLoginConfigs: new BankAutoLoginConfigRepository(prisma),
+  autoLoginConfigs,
   credentials: new BankCredentialRepository(prisma),
   keyResolver: resolveCredentialKey,
   lock: defaultAutoLoginLock,
   cdpUrlForBankCode: (bankCode) => resolveBankBrowserEnv(bankCode, process.env).cdpUrl || undefined,
-  ensureBrowser: unavailableScrapeTimeAutoLoginBrowserOpener,
+  ensureBrowser: createScrapeTimeAutoLoginBrowserOpener({
+    trustedLoginUrl: popularPortalConfig.baseUrl,
+    ensureBrowserRuntime: createEnsureBrowserForBank(popularBankCode, process.env),
+    acquireBrowserSlot: createAcquireBrowserSlotFromEnv(process.env),
+  }),
+  recordFailure: async (bankCode, occurredAt) => {
+    await autoLoginConfigs.recordFailure(bankCode, occurredAt);
+  },
   async recordLockReleaseFailure({ bankCode, expiredEventId }) {
     await defaultAuditSink.record(createAuditEvent({
       actorId: "system:auto-login",
@@ -135,10 +145,11 @@ const processor = createIngestionProcessor({
   auditSink: defaultAuditSink,
   resolveScraper: resolveDefaultScraper,
   runScrapeTimeAutoLogin,
+  expiryEpisodes,
 });
 
 const expiryPublicationConsumer = createExpiryPublicationConsumer({
-  episodes: new PrismaBankSessionExpiryEpisodeRepository(prisma),
+  episodes: expiryEpisodes,
   gate: { check: async () => "eligible" },
   ingest: processor,
   resolveAccountFingerprint(bankCode) {

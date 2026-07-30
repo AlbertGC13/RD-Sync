@@ -11,6 +11,7 @@ import {
 } from "./index";
 import type { BankMovement } from "../../modules/transactions";
 import { InMemoryAuditSink } from "../../modules/audit";
+import { InMemoryBankSessionExpiryEpisodeRepository } from "../../modules/bank-sessions/expiry-episodes";
 
 const jobData: IngestionJobData = {
   runId: "run-1",
@@ -500,29 +501,34 @@ describe("ingestion processor — resolveScraper routing", () => {
 });
 
 describe("ingestion processor — scrape-time auto-login trigger", () => {
-  it("runs the scrape-time auto-login trigger before collection when the job carries an expired event", async () => {
+  it("recovers only after structured session expiry, then recollects exactly once", async () => {
     const calls: string[] = [];
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
     const processor = createIngestionProcessor({
       scrapeRuns: new FakeScrapeRunRepository(),
       transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
       scraper: {
         collect: async () => {
           calls.push("collect");
-          return { status: "collected", movements: [] };
+          return calls.length === 1
+            ? { status: "needs_admin_action" as const, cause: "session_expired" as const, movements: [] }
+            : { status: "collected" as const, movements: [] };
         },
       },
       runScrapeTimeAutoLogin: async (job) => {
         calls.push(`auto-login:${job.data.bankId}:${job.data.expiredEventId}`);
         return { status: "succeeded" };
       },
+      expiryEpisodes: episodes,
+      createExpiredEventId: () => "durable-expiry",
+      auditSink: new InMemoryAuditSink(),
     });
 
-    const result = await processor({
-      data: { ...jobData, expiredEventId: "expired-1" },
-    });
+    const result = await processor({ data: jobData });
 
     expect(result).toEqual({ status: "succeeded", inserted: 0, skipped: 0 });
-    expect(calls).toEqual(["auto-login:popular:expired-1", "collect"]);
+    expect(calls).toEqual(["collect", "auto-login:popular:durable-expiry", "collect"]);
+    expect(await episodes.findByBankCode("popular")).toBeNull();
   });
 
   it("does not run the scrape-time auto-login trigger without expiredEventId and still collects", async () => {
@@ -579,7 +585,7 @@ describe("ingestion processor — scrape-time auto-login trigger", () => {
     const result = await processor({ data: { ...jobData, expiredEventId: "expired-null-runner" } });
 
     expect(result).toEqual({ status: "succeeded", inserted: 0, skipped: 0 });
-    expect(runScrapeTimeAutoLogin).toHaveBeenCalledOnce();
+    expect(runScrapeTimeAutoLogin).not.toHaveBeenCalled();
     expect(collect).toHaveBeenCalledOnce();
     expect(scrapeRuns.transitions).toEqual([
       { runId: "run-1", status: "running" },
@@ -594,15 +600,15 @@ describe("ingestion processor — scrape-time auto-login trigger", () => {
       scrapeRuns,
       transactions,
       scraper: {
-        collect: async () => {
-          throw new Error("collect must not run after auto-login admin action");
-        },
+        collect: async () => ({ status: "needs_admin_action", cause: "session_expired", movements: [] }),
       },
       runScrapeTimeAutoLogin: async () => ({
         status: "needs_admin_action",
         reason: "protected_flow",
         safeSummary: "Bank auto-login requires admin action",
       }),
+      expiryEpisodes: new InMemoryBankSessionExpiryEpisodeRepository(),
+      createExpiredEventId: () => "expired-2",
     });
 
     const result = await processor({ data: { ...jobData, expiredEventId: "expired-2" } });
@@ -624,9 +630,7 @@ describe("ingestion processor — scrape-time auto-login trigger", () => {
     const transactions = new FakeTransactionRepository({ inserted: 0, skipped: 0 });
     const adminAlerts = new FakeAdminAlertSink();
     const auditSink = new InMemoryAuditSink();
-    const collect = vi.fn(async () => {
-      throw new Error("collect must not run after throttled auto-login");
-    });
+    const collect = vi.fn(async () => ({ status: "needs_admin_action" as const, cause: "session_expired" as const, movements: [] }));
     const processor = createIngestionProcessor({
       scrapeRuns,
       transactions,
@@ -637,12 +641,14 @@ describe("ingestion processor — scrape-time auto-login trigger", () => {
         status: "throttled",
         safeSummary: "Bank browser capacity is temporarily unavailable",
       }),
+      expiryEpisodes: new InMemoryBankSessionExpiryEpisodeRepository(),
+      createExpiredEventId: () => "expired-throttled",
     });
 
     const result = await processor({ data: { ...jobData, expiredEventId: "expired-throttled" } });
 
     expect(result).toEqual({ status: "throttled", inserted: 0, skipped: 0 });
-    expect(collect).not.toHaveBeenCalled();
+    expect(collect).toHaveBeenCalledOnce();
     expect(scrapeRuns.transitions).toEqual([
       { runId: "run-1", status: "running" },
       {
@@ -678,9 +684,7 @@ describe("ingestion processor — scrape-time auto-login trigger", () => {
     const transactions = new FakeTransactionRepository({ inserted: 0, skipped: 0 });
     const adminAlerts = new FakeAdminAlertSink();
     const auditSink = new InMemoryAuditSink();
-    const collect = vi.fn(async () => {
-      throw new Error("collect must not run after thrown auto-login");
-    });
+    const collect = vi.fn(async () => ({ status: "needs_admin_action" as const, cause: "session_expired" as const, movements: [] }));
     const processor = createIngestionProcessor({
       scrapeRuns,
       transactions,
@@ -690,12 +694,14 @@ describe("ingestion processor — scrape-time auto-login trigger", () => {
       runScrapeTimeAutoLogin: async () => {
         throw new Error("cdp unavailable token=secret password=abc cdp_url=internal-bank-host/session");
       },
+      expiryEpisodes: new InMemoryBankSessionExpiryEpisodeRepository(),
+      createExpiredEventId: () => "expired-throw",
     });
 
     const result = await processor({ data: { ...jobData, expiredEventId: "expired-throw" } });
 
     expect(result).toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
-    expect(collect).not.toHaveBeenCalled();
+    expect(collect).toHaveBeenCalledOnce();
     expect(scrapeRuns.transitions).toEqual([
       { runId: "run-1", status: "running" },
       {
@@ -737,19 +743,62 @@ describe("ingestion processor — scrape-time auto-login trigger", () => {
       scraper: {
         collect: async () => {
           calls.push("collect");
-          return { status: "needs_admin_action", movements: [], safeErrorSummary: "Manual login required" };
+          return { status: "needs_admin_action", cause: "session_expired", movements: [], safeErrorSummary: "Manual login required" };
         },
       },
       runScrapeTimeAutoLogin: async () => {
         calls.push("auto-login");
         return { status: "manual_required", reason: "lock_busy", safeSummary: "Manual scrape required before retrying bank auto-login" };
       },
+      expiryEpisodes: new InMemoryBankSessionExpiryEpisodeRepository(),
+      createExpiredEventId: () => "expired-3",
     });
 
     const result = await processor({ data: { ...jobData, expiredEventId: "expired-3" } });
 
     expect(result).toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
-    expect(calls).toEqual(["auto-login", "collect"]);
+    expect(calls).toEqual(["collect", "auto-login"]);
+  });
+
+  it("runs one durable attempt when sequential jobs reuse an episode after a non-success outcome", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    const runScrapeTimeAutoLogin = vi.fn(async () => ({ status: "needs_admin_action" as const, reason: "unknown_post_submit_state" as const, safeSummary: "Bank auto-login requires admin action" }));
+    const processor = createIngestionProcessor({
+      scrapeRuns: new FakeScrapeRunRepository(), transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      scraper: { collect: async () => ({ status: "needs_admin_action" as const, cause: "session_expired" as const, movements: [] }) },
+      expiryEpisodes: episodes, createExpiredEventId: () => "shared-expiry", runScrapeTimeAutoLogin,
+    });
+
+    await expect(processor({ data: { ...jobData, runId: "run-first" } })).resolves.toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+    await expect(processor({ data: { ...jobData, runId: "run-second" } })).resolves.toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+
+    expect(runScrapeTimeAutoLogin).toHaveBeenCalledTimes(1);
+    expect(await episodes.findByBankCode("popular")).toMatchObject({ consumerAttemptState: "manual_recovery_required" });
+  });
+
+  it("converges concurrent expiry jobs on one durable reservation before invoking the runner", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    let releaseLogin: () => void = () => undefined;
+    let signalLoginStarted: () => void = () => undefined;
+    const loginMayFinish = new Promise<void>((resolve) => { releaseLogin = resolve; });
+    const loginStarted = new Promise<void>((resolve) => { signalLoginStarted = resolve; });
+    const runScrapeTimeAutoLogin = vi.fn(async () => { signalLoginStarted(); await loginMayFinish; return { status: "succeeded" as const }; });
+    const makeProcessor = () => createIngestionProcessor({
+      scrapeRuns: new FakeScrapeRunRepository(), transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      scraper: { collect: vi.fn().mockResolvedValueOnce({ status: "needs_admin_action", cause: "session_expired", movements: [] }).mockResolvedValue({ status: "collected", movements: [] }) },
+      expiryEpisodes: episodes, createExpiredEventId: () => "shared-expiry", auditSink: new InMemoryAuditSink(),
+      runScrapeTimeAutoLogin,
+    });
+    const first = makeProcessor()({ data: { ...jobData, runId: "run-concurrent-1" } });
+    await loginStarted;
+    const second = makeProcessor()({ data: { ...jobData, runId: "run-concurrent-2" } });
+    releaseLogin();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { status: "succeeded", inserted: 0, skipped: 0 },
+      { status: "needs_admin_action", inserted: 0, skipped: 0 },
+    ]);
+    expect(runScrapeTimeAutoLogin).toHaveBeenCalledTimes(1);
   });
 });
 
