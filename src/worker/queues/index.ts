@@ -158,6 +158,10 @@ export function createIngestionProcessor(dependencies: IngestionProcessorDepende
           if (recoveryResult.status === "needs_admin_action") {
             return markNeedsAdminActionTerminal(dependencies, job.data, requestedBankCode, recoveryResult.safeSummary, now);
           }
+          if (recoveryResult.status === "succeeded") {
+            return markNeedsAdminActionTerminal(dependencies, job.data, requestedBankCode, "Bank auto-login requires admin action", now);
+          }
+          return markNeedsAdminActionTerminal(dependencies, job.data, requestedBankCode, recoveryResult.safeSummary, now);
         } else {
           scrapeResult = recoveryResult;
         }
@@ -221,7 +225,11 @@ async function recoverExpiredSession(
     runId: createExpiredSessionRunId(job.data.bankId, expiredEventId),
   });
   const reservation = await reserveAutoLoginAttempt(dependencies.expiryEpisodes, durable.episode);
-  if (!reservation) return { status: "manual_required", reason: "lock_busy", safeSummary: "Manual scrape required before retrying bank auto-login" };
+  if (!reservation) {
+    const outcome = { status: "manual_required", reason: "lock_busy", safeSummary: "Manual scrape required before retrying bank auto-login" } as const;
+    await emitAutoLoginOutcomeAuditEvent(dependencies.auditSink, job.data.runId, durable.episode.expiredEventId, durable.episode.bankCode, outcome);
+    return outcome;
+  }
 
   let autoLoginOutcome: ScrapeTimeAutoLoginOutcome | null;
   try {
@@ -230,7 +238,9 @@ async function recoverExpiredSession(
     });
   } catch {
     await requireManualRecovery(dependencies.expiryEpisodes, reservation);
-    return { status: "needs_admin_action", reason: "browser_unavailable", safeSummary: "Bank auto-login requires admin action" };
+    const outcome = { status: "needs_admin_action", reason: "auto_login_execution_failed", safeSummary: "Bank auto-login requires admin action" } as const;
+    await emitAutoLoginOutcomeAuditEvent(dependencies.auditSink, job.data.runId, durable.episode.expiredEventId, durable.episode.bankCode, outcome);
+    return outcome;
   }
   if (autoLoginOutcome?.status !== "succeeded") {
     await requireManualRecovery(dependencies.expiryEpisodes, reservation);
@@ -325,12 +335,6 @@ async function markThrottledDeferred(
     bankId: requestedBankCode,
     metadata: { safeErrorSummary },
   });
-  await emitAutoLoginThrottledAuditEvent(
-    dependencies.auditSink,
-    jobData.runId,
-    requestedBankCode,
-  );
-
   return { status: "throttled", inserted: 0, skipped: 0 };
 }
 
@@ -390,21 +394,29 @@ async function emitAuditEvent(
   }
 }
 
-async function emitAutoLoginThrottledAuditEvent(
+async function emitAutoLoginOutcomeAuditEvent(
   auditSink: Pick<AuditSink, "record"> | undefined,
   runId: string,
+  expiredEventId: string,
   bankCode: string,
+  outcome: ScrapeTimeAutoLoginOutcome,
 ): Promise<void> {
   if (!auditSink) return;
+  const action = outcome.status === "succeeded"
+    ? BANK_AUTOLOGIN_ACTIONS.SUCCEEDED
+    : outcome.status === "needs_admin_action"
+      ? BANK_AUTOLOGIN_ACTIONS.NEEDS_ADMIN_ACTION
+      : BANK_AUTOLOGIN_ACTIONS.SKIPPED;
+  const reason = outcome.status === "succeeded" ? "succeeded" : outcome.status === "throttled" ? "throttled" : outcome.reason;
   try {
     await auditSink.record(
       createAuditEvent({
         actorId: SYSTEM_AUTOLOGIN_ACTOR,
         actorRole: null,
-        action: BANK_AUTOLOGIN_ACTIONS.SKIPPED,
+        action,
         target: "scrape_run",
         targetId: runId,
-        metadata: { bankCode, reason: "throttled" },
+        metadata: { bankCode, expiredEventId, runId, reason },
       }),
     );
   } catch {

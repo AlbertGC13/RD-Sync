@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { encryptCredentialField } from "../../modules/bank-credentials/crypto";
-import { createBankAutoLoginStrategy, createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginTrigger, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
+import { DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS, createBankAutoLoginStrategy, createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginTrigger, parseAutoLoginSelectorTimeoutMs, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
 import type { BankPortalConfig } from "./login-mutation-guard";
 
 const portalConfig: BankPortalConfig = {
@@ -340,8 +340,21 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
       lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn().mockResolvedValue(true) },
       ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(page)), afterAutoLoginOutcome: uncertainOutcome,
     })).resolves.toMatchObject({ status: "needs_admin_action", reason: "portal_state_unavailable" });
-    expect(uncertainOutcome).toHaveBeenCalledWith({ bankCode: "popular", expiredEventId: "E1", outcome: { status: "needs_admin_action", reason: "portal_state_unavailable" } });
+    expect(uncertainOutcome).toHaveBeenCalledWith({ bankCode: "popular", expiredEventId: "E1", outcome: { status: "needs_admin_action", reason: "portal_state_unavailable", safeSummary: "Bank auto-login requires admin action" } });
     expect(uncertainOutcome.mock.calls).not.toContainEqual(expect.arrayContaining([expect.objectContaining({ outcome: { status: "succeeded" } })]));
+  });
+
+  it("preserves the protected-flow outcome when outcome persistence fails", async () => {
+    const afterAutoLoginOutcome = vi.fn().mockRejectedValue(new Error("audit token=secret unavailable"));
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular", expiredEventId: "E1", credential, cdpUrl: "http://127.0.0.1:9222",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => createBankAutoLoginStrategy(portalConfig) },
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn().mockResolvedValue(true) },
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(makePage())), afterAutoLoginOutcome,
+    })).resolves.toEqual({ status: "succeeded" });
+
+    expect(afterAutoLoginOutcome).toHaveBeenCalledTimes(1);
   });
 
   it("does not call the mutation hook before lock, browser, throttle, or guard rejections", async () => {
@@ -720,6 +733,7 @@ describe("createScrapeTimeAutoLoginRunner", () => {
   it("skips auto-login safely when the per-bank kill switch is off", async () => {
     const findByBankCode = vi.fn();
     const acquire = vi.fn();
+    const afterAutoLoginOutcome = vi.fn();
     const run = createScrapeTimeAutoLoginRunner({
       adapterRegistry: { get: vi.fn().mockReturnValue({ bankCode: "popular", createAutoLoginStrategy: vi.fn() }) },
       autoLoginConfigs: { getByBankCode: vi.fn().mockResolvedValue({ autoLoginEnabled: false, breakerState: "closed" }) },
@@ -728,10 +742,18 @@ describe("createScrapeTimeAutoLoginRunner", () => {
       lock: { acquire, release: vi.fn() },
       cdpUrlForBankCode: vi.fn(),
       ensureBrowser: vi.fn(),
+      afterAutoLoginOutcome,
     });
-    await expect(run({ data: { bankId: "popular", expiredEventId: "E1" } })).resolves.toBeNull();
+    await expect(run({ data: { bankId: "popular", expiredEventId: "E1" } })).resolves.toEqual({
+      status: "skipped", reason: "disabled", safeSummary: "Manual scrape required before retrying bank auto-login",
+    });
     expect(findByBankCode).not.toHaveBeenCalled();
     expect(acquire).not.toHaveBeenCalled();
+    expect(afterAutoLoginOutcome).toHaveBeenCalledWith({
+      bankCode: "popular",
+      expiredEventId: "E1",
+      outcome: { status: "skipped", reason: "disabled", safeSummary: "Manual scrape required before retrying bank auto-login" },
+    });
   });
 
   it("fails closed when the stored credential belongs to a different bank", async () => {
@@ -883,7 +905,7 @@ describe("createScrapeTimeAutoLoginRunner", () => {
 
     const result = await run({ data: { bankId: "popular", expiredEventId: "event-persist-failure" } });
 
-    expect(result).toEqual({ status: "needs_admin_action", reason: "portal_state_unavailable", safeSummary: "Bank auto-login requires admin action" });
+    expect(result).toEqual({ status: "needs_admin_action", reason: "unknown_post_submit_state", safeSummary: "Unknown state" });
     expect(recordFailure).toHaveBeenCalledTimes(1);
     expect(autoLogin).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(result)).not.toContain("secret");
@@ -926,6 +948,39 @@ describe("createScrapeTimeAutoLoginBrowserOpener", () => {
     if (stage === "newPage") browser.contexts.mockReturnValue([{ newPage: vi.fn(() => pendingSetup.then(() => page)) }]); else page.goto.mockImplementation(() => pendingSetup);
     return { page, browser, release: vi.fn().mockResolvedValue(undefined), resolveSetup };
   }
+  it.each([
+    [undefined, DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS], ["", DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS], ["  ", DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS],
+    ["invalid", DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS], ["Infinity", DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS], ["-1", 1_000],
+    ["999", 1_000], ["30001", 30_000], ["1200.9", 1_200], ["7000", 7_000],
+  ])("parses selector timeout %j safely", (value, expected) => {
+    expect(parseAutoLoginSelectorTimeoutMs(value)).toBe(expected);
+  });
+  it("never exposes the raw selector timeout environment value", () => {
+    const rawValue = "1200 token=secret";
+    expect(JSON.stringify(parseAutoLoginSelectorTimeoutMs(rawValue))).not.toContain(rawValue);
+  });
+  it("waits for a selector visible at 700ms by default but honors a 500ms test injection", async () => {
+    const page = makeCdpPage();
+    page.waitForSelector.mockImplementation((_selector: string, options?: { timeout?: number }) =>
+      options?.timeout && options.timeout >= 700
+        ? Promise.resolve({})
+        : Promise.reject(Object.assign(new Error("not visible"), { name: "TimeoutError" })),
+    );
+    const browser = makeBrowser(page);
+    const original = process.env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS;
+    delete process.env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS;
+    try {
+      const defaultBrowser = await openReadyBrowser({ connect: vi.fn().mockResolvedValue(browser) });
+      await expect(defaultBrowser.page.hasVisibleSelector("#delayed")).resolves.toBe(true);
+      await defaultBrowser.close();
+      const injectedBrowser = await openReadyBrowser({ connect: vi.fn().mockResolvedValue(makeBrowser(page)), visibleSelectorTimeoutMs: 500 });
+      await expect(injectedBrowser.page.hasVisibleSelector("#delayed")).resolves.toBe(false);
+      await injectedBrowser.close();
+    } finally {
+      if (original === undefined) delete process.env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS;
+      else process.env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS = original;
+    }
+  });
   it("cleans up the slot and browser after an immediate default-context page rejection", async () => {
     const release = vi.fn().mockResolvedValue(undefined);
     const browser = makeBrowser(makeCdpPage());
