@@ -351,6 +351,7 @@ export function createPopularCdpScraper(options: PopularCdpScraperOptions = {}):
             status: "needs_admin_action",
             movements: [],
             safeErrorSummary: collectResult.safeErrorSummary,
+            ...(collectResult.cause === "session_expired" ? { cause: "session_expired" as const } : {}),
           };
         }
 

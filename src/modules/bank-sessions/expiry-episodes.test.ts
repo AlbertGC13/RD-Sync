@@ -7,6 +7,7 @@ import {
   parseConsumerAttemptState,
   parseEpisodePublicationState,
   publishExpiryEpisode,
+  restoreExpiryEpisode,
   type BankSessionExpiryEpisode,
   type BankSessionExpiryEpisodeRepository,
   type ExpiryPublicationPublisher,
@@ -158,6 +159,75 @@ describe("Bank session expiry episodes", () => {
     expect(publish).toHaveBeenCalledTimes(1);
     expect(await episodes.findByBankCode("popular")).toBeNull();
     expect(await auditIdentities(audit)).toEqual([expect.objectContaining({ action: "bank_session.expired" }), expect.objectContaining({ action: "bank_session.restored" })]);
+  });
+
+  it("restores one exact episode through durable audits, cancellation, and identity-safe close", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    const episode = (await episodes.getOrCreate({
+      bankCode: "popular", expiredEventId: "event-restoration-operation", runId: "popular-expiry-event-restoration-operation",
+    })).episode;
+    const steps: string[] = [];
+    const auditSink: Pick<AuditSink, "record"> = {
+      record: async (event) => { steps.push(event.action); },
+    };
+    const cancel = vi.spyOn(episodes, "cancelPublication").mockImplementation(async (current) => {
+      steps.push(`cancel:${current.expiredEventId}`);
+      return true;
+    });
+    const close = vi.spyOn(episodes, "close").mockImplementation(async (current) => {
+      steps.push(`close:${current.expiredEventId}`);
+      return "closed";
+    });
+
+    await expect(restoreExpiryEpisode(auditSink, episodes, episode, "2026-07-30T00:00:00.000Z"))
+      .resolves.toBe("closed");
+
+    expect(steps).toEqual([
+      "bank_session.expired",
+      "bank_session.restored",
+      "cancel:event-restoration-operation",
+      "close:event-restoration-operation",
+    ]);
+    expect(cancel).toHaveBeenCalledWith(episode);
+    expect(close).toHaveBeenCalledWith(episode);
+  });
+
+  it("retains manual recovery evidence when reusable restoration cannot close it", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    const episode = (await episodes.getOrCreate({
+      bankCode: "popular", expiredEventId: "event-retained-operation", runId: "popular-expiry-event-retained-operation",
+    })).episode;
+    const envelope = await requireManualRecovery(episodes, episode);
+
+    await expect(restoreExpiryEpisode(new InMemoryAuditSink(), episodes, episode, "2026-07-30T00:00:00.000Z"))
+      .resolves.toBe("retained");
+
+    await expect(episodes.findByBankCode("popular")).resolves.toMatchObject({
+      expiredEventId: envelope.expiredEventId,
+      consumerAttemptState: "manual_recovery_required",
+      restoredAuditDelivered: true,
+    });
+  });
+
+  it("reports a replacement without allowing the reusable operation to close it", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    const original = (await episodes.getOrCreate({
+      bankCode: "popular", expiredEventId: "event-original-operation", runId: "popular-expiry-event-original-operation",
+    })).episode;
+    const replacement = {
+      bankCode: "popular", expiredEventId: "event-replacement-operation", runId: "popular-expiry-event-replacement-operation",
+    };
+    const closeOriginal = episodes.close.bind(episodes);
+    vi.spyOn(episodes, "close").mockImplementation(async (episode) => {
+      await closeOriginal(episode);
+      await episodes.getOrCreate(replacement);
+      return "missing_or_stale";
+    });
+
+    await expect(restoreExpiryEpisode(new InMemoryAuditSink(), episodes, original, "2026-07-30T00:00:00.000Z"))
+      .resolves.toBe("missing_or_replaced");
+
+    await expect(episodes.findByBankCode("popular")).resolves.toMatchObject(replacement);
   });
 
   it("observes retained and evicted published jobs without scheduling another attempt", async () => {

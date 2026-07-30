@@ -261,6 +261,7 @@ describe("collectPopularPortalRows — state detection", () => {
     expect(result.kind).toBe("needs_admin_action");
     if (result.kind !== "needs_admin_action") throw new Error("unreachable");
     expect(result.safeErrorSummary).toBe("Bank session expired or requires verification");
+    expect(result.cause).toBe("session_expired");
   });
 
   it("returns needs_admin_action when dashboard never renders (Producto wait times out)", async () => {
@@ -279,6 +280,7 @@ describe("collectPopularPortalRows — state detection", () => {
     expect(result.kind).toBe("needs_admin_action");
     if (result.kind !== "needs_admin_action") throw new Error("unreachable");
     expect(result.safeErrorSummary).toBe("Bank dashboard did not render");
+    expect(result.cause).toBeUndefined();
   });
 
   it("returns needs_admin_action when openDashboardAccount returns false (row not found)", async () => {
@@ -315,6 +317,7 @@ describe("collectPopularPortalRows — state detection", () => {
     expect(result.kind).toBe("needs_admin_action");
     if (result.kind !== "needs_admin_action") throw new Error("unreachable");
     expect(result.safeErrorSummary).toBe("Bank portal did not render transaction results");
+    expect(result.cause).toBeUndefined();
   });
 
   it("returns kind rows with empty array when table is present but has zero data rows", async () => {
