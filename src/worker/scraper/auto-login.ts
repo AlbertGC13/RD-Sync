@@ -53,7 +53,8 @@ export type BankAutoLoginAdminActionReason =
   | "malformed_url"
   | "unauthorized_login_page"
   | "unknown_post_submit_state"
-  | "browser_unavailable";
+  | "browser_unavailable"
+  | "auto_login_execution_failed";
 
 export type BankAutoLoginOutcome =
   | { status: "succeeded" }
@@ -67,6 +68,7 @@ export interface BankAutoLoginStrategy {
 export type ScrapeTimeAutoLoginOutcome =
   | BankAutoLoginOutcome
   | { status: "manual_required"; reason: "lock_busy" | "lock_unavailable"; safeSummary: string }
+  | { status: "skipped"; reason: "disabled" | "breaker_open" | "credential_unavailable"; safeSummary: string }
   | { status: "throttled"; safeSummary: string };
 
 export interface ScrapeTimeAutoLoginTriggerContext {
@@ -147,7 +149,9 @@ export const unavailableScrapeTimeAutoLoginBrowserOpener: ScrapeTimeAutoLoginRun
   throw new Error("Scrape-time auto-login browser page opener is not wired yet");
 };
 
-const DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS = 500;
+export const DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS = 10_000;
+const MIN_VISIBLE_SELECTOR_TIMEOUT_MS = 1_000;
+const MAX_VISIBLE_SELECTOR_TIMEOUT_MS = 30_000;
 const DEFAULT_BROWSER_CLEANUP_TIMEOUT_MS = 1_000;
 const DEFAULT_BROWSER_PAGE_SETUP_TIMEOUT_MS = 15_000;
 const PAGE_SETUP_TIMEOUT_ERROR = "Timed out while preparing the trusted bank login page";
@@ -161,7 +165,7 @@ export function createScrapeTimeAutoLoginBrowserOpener(options: ScrapeTimeAutoLo
     acquireBrowserSlot, recordCleanupFailure,
     cleanupTimeoutMs = DEFAULT_BROWSER_CLEANUP_TIMEOUT_MS,
     pageSetupTimeoutMs = DEFAULT_BROWSER_PAGE_SETUP_TIMEOUT_MS,
-    visibleSelectorTimeoutMs = DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS,
+    visibleSelectorTimeoutMs = parseAutoLoginSelectorTimeoutMs(process.env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS),
   } = options;
   return async (bankCode, cdpUrl) => {
     assertCdpLoopback(cdpUrl);
@@ -194,6 +198,20 @@ export function createScrapeTimeAutoLoginBrowserOpener(options: ScrapeTimeAutoLo
       throw error;
     }
   };
+}
+
+/** Fractions truncate toward zero, matching parseScrapeLookbackDays. */
+export function parseAutoLoginSelectorTimeoutMs(value: string | undefined): number {
+  const normalized = value?.trim();
+  if (!normalized) return DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS;
+
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) return DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS;
+
+  return Math.min(
+    MAX_VISIBLE_SELECTOR_TIMEOUT_MS,
+    Math.max(MIN_VISIBLE_SELECTOR_TIMEOUT_MS, Math.trunc(parsed)),
+  );
 }
 type OpenTrustedLoginPageOptions = { browser: AutoLoginCdpBrowserLike; trustedLoginUrl: string; timeoutMs: number; cleanupTimeoutMs: number; onPageCloseFailure(): Promise<void> };
 
@@ -309,7 +327,8 @@ export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerD
 
     const config = await safelyResolveConfig(deps, bankCode);
     if (isAdminActionOutcome(config)) return config;
-    if (!config?.autoLoginEnabled || config.breakerState === "open") return null;
+    if (!config?.autoLoginEnabled) return skipped("disabled");
+    if (config.breakerState === "open") return skipped("breaker_open");
 
     if (!deps.lock) return manualRequired("lock_unavailable");
 
@@ -318,7 +337,7 @@ export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerD
     if (!cdpUrl) return needsAdminAction("browser_unavailable");
 
     const credentialResolution = await resolveAutoLoginCredential(deps, bankCode);
-    if (credentialResolution.status === "not_found") return null;
+    if (credentialResolution.status === "not_found") return skipped("credential_unavailable");
     if (isAdminActionOutcome(credentialResolution)) return credentialResolution;
 
     return executeScrapeTimeAutoLoginTrigger({
@@ -523,6 +542,10 @@ function withAutoLoginMutationHook(page: BankAutoLoginPage, context: ScrapeTimeA
 
 function manualRequired(reason: "lock_busy" | "lock_unavailable"): ScrapeTimeAutoLoginOutcome {
   return { status: "manual_required", reason, safeSummary: SAFE_MANUAL_REQUIRED_SUMMARY };
+}
+
+function skipped(reason: "disabled" | "breaker_open" | "credential_unavailable"): ScrapeTimeAutoLoginOutcome {
+  return { status: "skipped", reason, safeSummary: SAFE_MANUAL_REQUIRED_SUMMARY };
 }
 
 export function createBankAutoLoginStrategy(

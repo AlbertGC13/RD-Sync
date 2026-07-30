@@ -45,7 +45,7 @@ import { PrismaBankSessionExpiryEpisodeRepository } from "../modules/persistence
 import { popularBankCode, popularScraperProfile } from "../modules/bank-adapters/popular";
 import { popularPortalConfig } from "../modules/bank-adapters/popular-portal";
 import { createAcquireBrowserSlotFromEnv, createEnsureBrowserForBank, resolveBankBrowserEnv } from "./scraper/browser-runtime";
-import { createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, type BankAutoLoginStrategy } from "./scraper/auto-login";
+import { createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, parseAutoLoginSelectorTimeoutMs, type BankAutoLoginStrategy } from "./scraper/auto-login";
 import { resolveDefaultScraper } from "../app/api/scrape-runs/consumer-defaults";
 import { defaultScrapeRunRepository } from "../app/api/scrape-runs/defaults";
 import { defaultTransactionRepository } from "../app/api/transactions/defaults";
@@ -110,6 +110,7 @@ const runScrapeTimeAutoLogin = createScrapeTimeAutoLoginRunner({
   cdpUrlForBankCode: (bankCode) => resolveBankBrowserEnv(bankCode, process.env).cdpUrl || undefined,
   ensureBrowser: createScrapeTimeAutoLoginBrowserOpener({
     trustedLoginUrl: popularPortalConfig.baseUrl,
+    visibleSelectorTimeoutMs: parseAutoLoginSelectorTimeoutMs(process.env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS),
     ensureBrowserRuntime: createEnsureBrowserForBank(popularBankCode, process.env),
     acquireBrowserSlot: createAcquireBrowserSlotFromEnv(process.env),
   }),
