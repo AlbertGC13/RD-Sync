@@ -283,6 +283,61 @@ describe("collectPopularPortalRows — state detection", () => {
     expect(result.cause).toBeUndefined();
   });
 
+  // Observed in production: an expired session is redirected away from
+  // /dashboard, but the redirect can land AFTER the first currentUrl() check.
+  // Classifying that as a render failure drops `cause`, and the worker only
+  // triggers auto-login recovery when cause === "session_expired" — so the
+  // session was never recovered and the operator saw a dead end instead.
+  it("classifies a redirect that lands after the URL check as an expired session, not a render failure", async () => {
+    const date = new Date("2026-06-12T04:00:00Z");
+    const baseUrl = "https://ib.bpd.com.do";
+    const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
+      dashboardUrlAfterRedirect: `${baseUrl}/`,
+      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
+      waitForVisibleTextResults: { Produto: false },
+      openDashboardAccountResult: false,
+      pageSnapshots: [],
+    });
+
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
+
+    expect(result.kind).toBe("needs_admin_action");
+    if (result.kind !== "needs_admin_action") throw new Error("unreachable");
+    expect(result.safeErrorSummary).toBe("Bank session expired or requires verification");
+    expect(result.cause).toBe("session_expired");
+  });
+
+  // Recovery must require POSITIVE evidence of the login page. Treating any
+  // non-dashboard URL as expiry would let a maintenance or error page start an
+  // auto-login attempt: credentials stay safe (the guard refuses to fill off
+  // the login page) but the episode burns its single attempt and the breaker
+  // advances, so repeated downtime could lock auto-login out entirely.
+  it.each([
+    ["a maintenance page", "https://ib.bpd.com.do/maintenance"],
+    ["an error page", "https://ib.bpd.com.do/error?code=500"],
+    ["a foreign origin", "https://evil.example.com/"],
+    ["a malformed url", "not-a-url"],
+  ])("does not claim session expiry when the page settles on %s", async (_label, settledUrl) => {
+    const date = new Date("2026-06-12T04:00:00Z");
+    const baseUrl = "https://ib.bpd.com.do";
+    const page = new FakePopularPortalPage({
+      dashboardUrl: `${baseUrl}/dashboard`,
+      dashboardUrlAfterRedirect: settledUrl,
+      currentUrl: "https://ib.bpd.com.do/accountdetails/transactions",
+      waitForVisibleTextResults: { Produto: false },
+      openDashboardAccountResult: false,
+      pageSnapshots: [],
+    });
+
+    const result = await collectPopularPortalRows(page, { baseUrl, sDate: date, eDate: date, warmupPauseMs: 0, settleIntervalMs: 0, settleFloorMs: 0, settleMaxMs: 0 });
+
+    expect(result.kind).toBe("needs_admin_action");
+    if (result.kind !== "needs_admin_action") throw new Error("unreachable");
+    expect(result.safeErrorSummary).toBe("Bank dashboard did not render");
+    expect(result.cause).toBeUndefined();
+  });
+
   it("returns needs_admin_action when openDashboardAccount returns false (row not found)", async () => {
     const date = new Date("2026-06-12T04:00:00Z");
     const baseUrl = "https://ib.bpd.com.do";
@@ -766,6 +821,12 @@ class FakePopularPortalPage implements PopularPortalPage {
       /** URL returned by currentUrl() at all other times (transactions path) */
       currentUrl: string;
       /**
+       * Models the expired-session redirect race: when set, the FIRST dashboard
+       * currentUrl() still reports the dashboard (the redirect has not landed
+       * yet) and every later one reports this URL instead.
+       */
+      dashboardUrlAfterRedirect?: string;
+      /**
        * Per-text results for waitForVisibleText.
        * Key "Produto" matches "Producto" (prefix match for brevity in tests).
        * Any missing key defaults to true.
@@ -785,6 +846,10 @@ class FakePopularPortalPage implements PopularPortalPage {
     // If the last goto was to a dashboard-like URL, return dashboardUrl
     const lastGoto = [...this.operations].reverse().find((op) => op.startsWith("goto:"));
     if (lastGoto !== undefined && lastGoto.includes("/dashboard")) {
+      const dashboardReads = this.operations.filter((op) => op === "currentUrl").length;
+      if (this.state.dashboardUrlAfterRedirect !== undefined && dashboardReads > 1) {
+        return this.state.dashboardUrlAfterRedirect;
+      }
       return this.state.dashboardUrl;
     }
     return this.state.currentUrl;
