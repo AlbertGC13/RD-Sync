@@ -31,6 +31,7 @@ import { PrismaBankSessionExpiryEpisodeRepository } from "./prisma-bank-session-
 import { PrismaManualRecoveryResolutionAuditOutboxRepository } from "./prisma-manual-recovery-resolution-audit-outbox-repository";
 import { deliverManualRecoveryResolutionAudit } from "../bank-sessions/manual-recovery-resolution-audit-delivery";
 import { createSetAutoLoginEnabledAndAudit } from "../../app/api/bank-credentials/[bankCode]/auto-login/defaults";
+import { BankAutoLoginConfigRepository } from "../bank-auto-login-config/repository";
 import { PUBLICATION_CLAIM_TIMEOUT_MS, publishExpiryEpisode, type ExpiryPublicationPublisher } from "../bank-sessions/expiry-episodes";
 import { createBankSessionMonitor } from "../bank-sessions";
 import { createManualRecoveryReplayAuthorization } from "../bank-sessions/manual-recovery-replay-authorization";
@@ -919,6 +920,40 @@ describe.skipIf(!hasTestDb)("Prisma atomic auto-login contract (requires RD_SYNC
     await expect(command({ bankCode, enabled: true, adminId: "admin-atomic-contract" })).rejects.toThrow("audit write failed");
     await expect(prisma.bankAutoLoginConfig.findUnique({ where: { bankCode } })).resolves.toMatchObject({ autoLoginEnabled: false });
     await expect(prisma.auditEvent.count({ where: { targetId: bankCode } })).resolves.toBe(0);
+  });
+
+  // A fresh install has a Bank row but no BankAutoLoginConfig row — nothing
+  // provisions one. This is the exact state that made the admin toggle return
+  // 404 forever in production; the previous fake-Prisma unit tests could not
+  // catch it because they pre-seeded the row.
+  it("provisions the config row on first enable when the bank has never been configured", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const bankCode = "auto-login-provisioning-contract";
+    await prisma.bank.create({ data: { code: bankCode, name: "Auto Login Provisioning Contract" } });
+    await expect(prisma.bankAutoLoginConfig.findUnique({ where: { bankCode } })).resolves.toBeNull();
+
+    const repo = new BankAutoLoginConfigRepository(prisma);
+
+    await expect(repo.setAutoLoginEnabled(bankCode, true, "admin-provisioning")).resolves.toMatchObject({
+      bankCode,
+      autoLoginEnabled: true,
+      breakerState: "closed",
+      breakerFailureCount: 0,
+      updatedBy: "admin-provisioning",
+    });
+    await expect(prisma.bankAutoLoginConfig.findUnique({ where: { bankCode } })).resolves.toMatchObject({ autoLoginEnabled: true });
+
+    // Idempotent: a second call updates the same row instead of failing.
+    await expect(repo.setAutoLoginEnabled(bankCode, false, "admin-provisioning")).resolves.toMatchObject({ autoLoginEnabled: false });
+    await expect(prisma.bankAutoLoginConfig.count({ where: { bankCode } })).resolves.toBe(1);
+  });
+
+  it("still fails closed for a bank that does not exist, creating no row", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new BankAutoLoginConfigRepository(prisma);
+
+    await expect(repo.setAutoLoginEnabled("bank-that-does-not-exist", true, "admin-provisioning")).resolves.toBeNull();
+    await expect(prisma.bankAutoLoginConfig.count({ where: { bankCode: "bank-that-does-not-exist" } })).resolves.toBe(0);
   });
 });
 

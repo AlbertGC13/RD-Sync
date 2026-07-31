@@ -108,6 +108,29 @@ export type CollectPopularPortalRowsResult =
   | { kind: "needs_admin_action"; safeErrorSummary: string; cause?: never }
   | { kind: "needs_admin_action"; safeErrorSummary: string; cause: "session_expired" };
 
+/** Paths the portal serves its login form on; mirrors popularPortalConfig.loginPathAllowlist. */
+const POPULAR_LOGIN_PATHS = new Set(["/"]);
+
+/**
+ * Positive check that the page is sitting on the portal's own login screen.
+ *
+ * Deliberately conservative: it must be the SAME ORIGIN as the configured portal
+ * and a known login path. Callers use this to decide whether a failed dashboard
+ * render is an expired session (which starts auto-login recovery), so anything
+ * unrecognised — maintenance pages, error pages, foreign origins, malformed
+ * URLs — must answer `false` and be treated as a plain render failure.
+ */
+async function isPortalLoginPage(page: Pick<PopularPortalPage, "currentUrl">, baseUrl: string): Promise<boolean> {
+  try {
+    const current = new URL(await page.currentUrl());
+    const portal = new URL(baseUrl);
+    if (current.origin !== portal.origin) return false;
+    return POPULAR_LOGIN_PATHS.has(current.pathname);
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // buildPopularTransactionsUrl
 // ---------------------------------------------------------------------------
@@ -319,6 +342,30 @@ export async function collectPopularPortalRows(
 
   const dashboardReady = await page.waitForVisibleText(DASHBOARD_WAIT_TEXT, DASHBOARD_WAIT_TIMEOUT_MS);
   if (!dashboardReady) {
+    // The portal redirects an expired session away from /dashboard, but that
+    // redirect can land AFTER the currentUrl() check above — a race the first
+    // check loses roughly half the time. Re-read the URL before classifying:
+    // without this, an expired session is reported as a render failure, which
+    // carries no `cause` and therefore silently skips auto-login recovery
+    // (see the `cause === "session_expired"` guard in worker/queues).
+    //
+    // Requires POSITIVE evidence of the portal's login page — same origin and a
+    // known login path. "Anything that is not the dashboard" is not enough: a
+    // maintenance page, an error page or an unrelated redirect would then be
+    // reported as an expired session, and `cause: "session_expired"` starts a
+    // recovery attempt. That attempt cannot leak credentials (LoginMutationGuard
+    // still refuses to fill or submit off the login page) but it consumes the
+    // episode's single attempt and trips the circuit breaker, so a maintenance
+    // window could lock auto-login out until an admin resets it. Anything we
+    // cannot positively identify stays a render failure with no cause.
+    if (await isPortalLoginPage(page, baseUrl)) {
+      return {
+        kind: "needs_admin_action",
+        safeErrorSummary: "Bank session expired or requires verification",
+        cause: "session_expired",
+      };
+    }
+
     return {
       kind: "needs_admin_action",
       safeErrorSummary: "Bank dashboard did not render",
