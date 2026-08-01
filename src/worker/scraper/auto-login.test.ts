@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { encryptCredentialField } from "../../modules/bank-credentials/crypto";
 import { DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS, createBankAutoLoginStrategy, createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginTrigger, parseAutoLoginSelectorTimeoutMs, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
-import type { BankPortalConfig } from "./login-mutation-guard";
+import { MIN_PROTECTED_STATE_DETECTION_WINDOW_MS, type BankPortalConfig } from "./login-mutation-guard";
 
 const portalConfig: BankPortalConfig = {
   bankCode: "popular",
@@ -70,6 +70,55 @@ function readyBrowser(page: BankAutoLoginPage) {
 }
 
 describe("createBankAutoLoginStrategy", () => {
+  // Guarding the composition, not just the guard, and asserting the EFFECTIVE
+  // wait that reaches the page rather than the argument a call site passes. An
+  // earlier version asserted `undefined` at the submit boundary, which proved
+  // only that the call site declined to override — it could not tell a 10s
+  // detection window from a 1s one.
+  async function recordAbsenceProbes(declaredWindowMs?: number): Promise<Array<number | undefined>> {
+    const probes: Array<number | undefined> = [];
+    const page = makePage();
+    const recordingPage = {
+      ...page,
+      protectedStateDetectionWindowMs: declaredWindowMs,
+      hasVisibleSelector: async (selector: string, timeoutMs?: number) => {
+        if (selector === portalConfig.mfaIndicatorSelector || selector === portalConfig.incompatibleFlowSelector) probes.push(timeoutMs);
+        return page.hasVisibleSelector(selector);
+      },
+    };
+
+    await expect(createBankAutoLoginStrategy(portalConfig, { supportedBankCodes: ["popular"] })
+      .autoLogin({ credential, page: recordingPage })).resolves.toEqual({ status: "succeeded" });
+
+    // Three pre-submit passes, two absence selectors each.
+    return probes.slice(0, 6);
+  }
+
+  // Every boundary, not just the submit. A shortened wait before the fills is
+  // what let credentials reach the DOM ahead of a late overlay.
+  it("gives all three mutation boundaries the full detection window", async () => {
+    const preSubmit = await recordAbsenceProbes();
+
+    expect(preSubmit).toEqual(Array<number>(6).fill(MIN_PROTECTED_STATE_DETECTION_WINDOW_MS));
+  });
+
+  // The page's visibility timeout is environment-configurable down to 1s. That
+  // knob must not be able to collapse the window protecting the submit.
+  it("clamps a page-declared detection window narrower than the safety floor", async () => {
+    const preSubmit = await recordAbsenceProbes(1_000);
+
+    expect(preSubmit.slice(4)).toEqual([
+      MIN_PROTECTED_STATE_DETECTION_WINDOW_MS, MIN_PROTECTED_STATE_DETECTION_WINDOW_MS,
+    ]);
+  });
+
+  it("honors a page-declared detection window wider than the safety floor", async () => {
+    const widened = MIN_PROTECTED_STATE_DETECTION_WINDOW_MS * 2;
+    const preSubmit = await recordAbsenceProbes(widened);
+
+    expect(preSubmit.slice(4)).toEqual([widened, widened]);
+  });
+
   it("fills and submits only after the guard authorizes all three mutation boundaries", async () => {
     const fill = vi.fn();
     const page = makePage({ onFill: fill });
@@ -304,6 +353,32 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
 
     expect(beforeAutoLoginMutation).toHaveBeenCalledTimes(1);
     expect(events).toEqual(["before", "fill:#username", "fill:#password"]);
+  });
+
+  // The mutation hook wraps the page. An adapter that declares fewer parameters
+  // than the interface stays assignable in TypeScript, so a dropped `timeoutMs`
+  // silently reverts every probe to the page default and discards the guard's
+  // choice without a compile error or a failing behavioural test.
+  it("forwards the probe timeout through the mutation-hook page wrapper", async () => {
+    const probes: Array<number | undefined> = [];
+    const page = makePage();
+    const recordingPage = {
+      ...page,
+      hasVisibleSelector: async (selector: string, timeoutMs?: number) => {
+        probes.push(timeoutMs);
+        return page.hasVisibleSelector(selector);
+      },
+    };
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular", expiredEventId: "E1", credential, cdpUrl: "http://127.0.0.1:9222",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => createBankAutoLoginStrategy(portalConfig) },
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn().mockResolvedValue(true) },
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(recordingPage)),
+      beforeAutoLoginMutation: vi.fn().mockResolvedValue(true),
+    })).resolves.toEqual({ status: "succeeded" });
+
+    expect(probes.some((timeoutMs) => timeoutMs === MIN_PROTECTED_STATE_DETECTION_WINDOW_MS)).toBe(true);
   });
 
   it("fails closed when the mutation hook rejects or denies the compare-and-set", async () => {

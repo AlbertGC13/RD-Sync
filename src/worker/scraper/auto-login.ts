@@ -269,13 +269,27 @@ async function openTrustedLoginPage(options: OpenTrustedLoginPageOptions): Promi
   }
 }
 class CdpBankAutoLoginPage implements BankAutoLoginPage {
-  constructor(private readonly page: AutoLoginCdpPageLike, private readonly visibleSelectorTimeoutMs: number) {}
+  /**
+   * Advisory only: the guard clamps this to its own safety floor, so a lowered
+   * `RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS` can speed up form-visibility waits
+   * without narrowing the protected-state detection window.
+   */
+  readonly protectedStateDetectionWindowMs: number;
+
+  constructor(private readonly page: AutoLoginCdpPageLike, private readonly visibleSelectorTimeoutMs: number) {
+    this.protectedStateDetectionWindowMs = visibleSelectorTimeoutMs;
+  }
+
   async currentUrl(): Promise<string> { return this.page.url(); }
   async fill(selector: string, value: string): Promise<void> { await this.page.fill(selector, value); }
   async click(selector: string): Promise<void> { await this.page.click(selector); }
-  async hasVisibleSelector(selector: string): Promise<boolean> {
+  async hasVisibleSelector(selector: string, timeoutMs?: number): Promise<boolean> {
+    // `timeoutMs` lets the guard probe for states expected to be ABSENT without
+    // paying the full visibility wait; omitted, it keeps the long default used
+    // when waiting for the login form to render.
+    const timeout = timeoutMs ?? this.visibleSelectorTimeoutMs;
     try {
-      await this.page.waitForSelector(selector, { timeout: this.visibleSelectorTimeoutMs, state: "visible" });
+      await this.page.waitForSelector(selector, { timeout, state: "visible" });
       return true;
     } catch (error) {
       if (isExpectedSelectorTimeout(error)) return false;
@@ -551,7 +565,14 @@ function withAutoLoginMutationHook(page: BankAutoLoginPage, context: ScrapeTimeA
   let mutationAuthorized = false;
   return {
     currentUrl: () => page.currentUrl(),
-    hasVisibleSelector: (selector) => page.hasVisibleSelector(selector),
+    // Forward timeoutMs. Dropping it silently restores the long default and
+    // undoes the caller's probe choice; TypeScript cannot catch that, because a
+    // function declaring fewer parameters stays assignable.
+    hasVisibleSelector: (selector, timeoutMs) => page.hasVisibleSelector(selector, timeoutMs),
+    // Forward the declared detection window too. Dropping it is fail-safe (the
+    // guard falls back to its floor) but would silently discard an operator's
+    // deliberately widened window.
+    protectedStateDetectionWindowMs: page.protectedStateDetectionWindowMs,
     async fill(selector, value) {
       if (!mutationAuthorized) {
         const permitted = await context.beforeAutoLoginMutation?.({ bankCode: context.bankCode, expiredEventId: context.expiredEventId });
@@ -590,6 +611,11 @@ export function createBankAutoLoginStrategy(
       if (guardResult.outcome) return guardResult.outcome;
       const { guard } = guardResult;
 
+      // Every mutation boundary gets the same full detection window. Shortening
+      // the two fill guards was measurably faster, but it let credentials reach
+      // the DOM before a late overlay was seen, and `fill` raises browser events
+      // the portal's own scripts may react to — so "nothing is transmitted yet"
+      // was never a property this code could guarantee. The window stays whole.
       const beforeUsernameFill = await runGuard(() => guard.assertMutationAuthorized(page));
       if (beforeUsernameFill) return beforeUsernameFill;
       const usernameFill = await runBrowserMutation(() => page.fill(portalConfig.usernameSelector, credential.username));
