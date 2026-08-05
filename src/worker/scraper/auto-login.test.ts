@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { encryptCredentialField } from "../../modules/bank-credentials/crypto";
-import { DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS, createBankAutoLoginStrategy, createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginTrigger, parseAutoLoginSelectorTimeoutMs, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
-import type { BankPortalConfig } from "./login-mutation-guard";
+import { CREDENTIAL_SCRUB_TIMEOUT_MS, DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS, createBankAutoLoginStrategy, createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginTrigger, parseAutoLoginSelectorTimeoutMs, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
+import { MIN_PROTECTED_STATE_DETECTION_WINDOW_MS, type BankPortalConfig } from "./login-mutation-guard";
 
 const portalConfig: BankPortalConfig = {
   bankCode: "popular",
@@ -52,7 +52,11 @@ function makeMutationBoundaryDriftPage(driftBefore: MutationPhase) {
       }
       return visible.has(selector as (typeof loginControls)[number]);
     },
-    async fill(selector) {
+    // Records credential-bearing fills only. The abort path also clears the
+    // inputs with an empty value; that is cleanup, not a mutation crossing a
+    // boundary, and counting it would blur what these cases assert.
+    async fill(selector, value) {
+      if (value === "") return;
       mutations.push(selector);
       phase = selector === portalConfig.usernameSelector ? "password" : "submit";
     },
@@ -70,6 +74,124 @@ function readyBrowser(page: BankAutoLoginPage) {
 }
 
 describe("createBankAutoLoginStrategy", () => {
+  // Guarding the composition, not just the guard, and asserting the EFFECTIVE
+  // wait that reaches the page rather than the argument a call site passes. An
+  // earlier version asserted `undefined` at the submit boundary, which proved
+  // only that the call site declined to override — it could not tell a 10s
+  // detection window from a 1s one.
+  async function recordAbsenceProbes(declaredWindowMs?: number): Promise<Array<number | undefined>> {
+    const probes: Array<number | undefined> = [];
+    const page = makePage();
+    const recordingPage = {
+      ...page,
+      protectedStateDetectionWindowMs: declaredWindowMs,
+      hasVisibleSelector: async (selector: string, timeoutMs?: number) => {
+        if (selector === portalConfig.mfaIndicatorSelector || selector === portalConfig.incompatibleFlowSelector) probes.push(timeoutMs);
+        return page.hasVisibleSelector(selector);
+      },
+    };
+
+    await expect(createBankAutoLoginStrategy(portalConfig, { supportedBankCodes: ["popular"] })
+      .autoLogin({ credential, page: recordingPage })).resolves.toEqual({ status: "succeeded" });
+
+    // Three pre-submit passes, two absence selectors each.
+    return probes.slice(0, 6);
+  }
+
+  // Every boundary, not just the submit. A shortened wait before the fills is
+  // what let credentials reach the DOM ahead of a late overlay.
+  it("gives all three mutation boundaries the full detection window", async () => {
+    const preSubmit = await recordAbsenceProbes();
+
+    expect(preSubmit).toEqual(Array<number>(6).fill(MIN_PROTECTED_STATE_DETECTION_WINDOW_MS));
+  });
+
+  // The page's visibility timeout is environment-configurable down to 1s. That
+  // knob must not be able to collapse the window protecting the submit.
+  it("clamps a page-declared detection window narrower than the safety floor", async () => {
+    const preSubmit = await recordAbsenceProbes(1_000);
+
+    expect(preSubmit.slice(4)).toEqual([
+      MIN_PROTECTED_STATE_DETECTION_WINDOW_MS, MIN_PROTECTED_STATE_DETECTION_WINDOW_MS,
+    ]);
+  });
+
+  it("honors a page-declared detection window wider than the safety floor", async () => {
+    const widened = MIN_PROTECTED_STATE_DETECTION_WINDOW_MS * 2;
+    const preSubmit = await recordAbsenceProbes(widened);
+
+    expect(preSubmit.slice(4)).toEqual([widened, widened]);
+  });
+
+  // The detection window closes the gap BETWEEN guard passes; it cannot close
+  // the instant between a pass and the fill that follows it. An overlay landing
+  // there is caught by the next boundary, but the password is already in the
+  // page by then - and must not be left there.
+  it("clears the credential inputs when a protected state appears after the password fill", async () => {
+    let reveal: (selector: string) => void = () => undefined;
+    const fills: Array<{ selector: string; value: string }> = [];
+    const page = makePage({
+      onFill: (selector, value) => {
+        fills.push({ selector, value });
+        if (selector === portalConfig.passwordSelector && value !== "") reveal(portalConfig.mfaIndicatorSelector);
+      },
+    });
+    reveal = page.show;
+
+    await expect(createBankAutoLoginStrategy(portalConfig, { supportedBankCodes: ["popular"] })
+      .autoLogin({ credential, page })).resolves.toMatchObject({ status: "needs_admin_action", reason: "protected_flow" });
+
+    expect(fills.map((entry) => entry.value)).toEqual([credential.username, credential.password, "", ""]);
+    // Password first: it is the value that matters most if clearing is cut short.
+    expect(fills.slice(2).map((entry) => entry.selector)).toEqual([portalConfig.passwordSelector, portalConfig.usernameSelector]);
+  });
+
+  it("reports the abort reason even when clearing the credential inputs fails", async () => {
+    let reveal: (selector: string) => void = () => undefined;
+    const page = makePage({
+      onFill: (selector, value) => {
+        if (value === "") throw new Error("detached frame");
+        if (selector === portalConfig.passwordSelector) reveal(portalConfig.mfaIndicatorSelector);
+      },
+    });
+    reveal = page.show;
+
+    await expect(createBankAutoLoginStrategy(portalConfig, { supportedBankCodes: ["popular"] })
+      .autoLogin({ credential, page })).resolves.toMatchObject({ status: "needs_admin_action", reason: "protected_flow" });
+  });
+
+  // Swallowing rejections is not enough to make cleanup non-blocking. A fill
+  // that never settles would hold the abort outcome forever, and with it the
+  // browser close and the lock release, so each clear carries its own deadline.
+  it("does not hold the abort outcome when clearing an input never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      let reveal: (selector: string) => void = () => undefined;
+      const cleared: string[] = [];
+      const page = makePage({
+        onFill: (selector, value) => {
+          if (value === "") {
+            cleared.push(selector);
+            return new Promise<void>(() => undefined); // never settles
+          }
+          if (selector === portalConfig.passwordSelector) reveal(portalConfig.mfaIndicatorSelector);
+        },
+      });
+      reveal = page.show;
+
+      const pending = createBankAutoLoginStrategy(portalConfig, { supportedBankCodes: ["popular"] })
+        .autoLogin({ credential, page });
+
+      await vi.advanceTimersByTimeAsync(CREDENTIAL_SCRUB_TIMEOUT_MS * 2 + 50);
+
+      await expect(pending).resolves.toMatchObject({ status: "needs_admin_action", reason: "protected_flow" });
+      // A hung password clear must not cost the username its own attempt.
+      expect(cleared).toEqual([portalConfig.passwordSelector, portalConfig.usernameSelector]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fills and submits only after the guard authorizes all three mutation boundaries", async () => {
     const fill = vi.fn();
     const page = makePage({ onFill: fill });
@@ -128,7 +250,7 @@ describe("createBankAutoLoginStrategy", () => {
 
   it("re-checks the guard before password fill so redirects cannot receive passwords", async () => {
     let setPageUrl: (nextUrl: string) => void = () => undefined;
-    const fill = vi.fn((selector: string) => {
+    const fill = vi.fn<(selector: string, value: string) => void>((selector) => {
       if (selector === portalConfig.usernameSelector) setPageUrl("https://evil.example/login");
     });
     const page = makePage({ onFill: fill });
@@ -139,13 +261,14 @@ describe("createBankAutoLoginStrategy", () => {
       status: "needs_admin_action",
       reason: "unauthorized_login_page",
     });
-    expect(fill.mock.calls).toEqual([["#username", "bank-user"]]);
+    const credentialFills = fill.mock.calls.filter(([, value]) => value !== "");
+    expect(credentialFills).toEqual([["#username", "bank-user"]]);
     expect(click).not.toHaveBeenCalled();
   });
 
   it("re-checks the guard before submit so redirects after password fill cannot submit credentials", async () => {
     let setPageUrl: (nextUrl: string) => void = () => undefined;
-    const fill = vi.fn((selector: string) => {
+    const fill = vi.fn<(selector: string, value: string) => void>((selector) => {
       if (selector === portalConfig.passwordSelector) setPageUrl("https://evil.example/login");
     });
     const page = makePage({ onFill: fill });
@@ -156,7 +279,10 @@ describe("createBankAutoLoginStrategy", () => {
       status: "needs_admin_action",
       reason: "unauthorized_login_page",
     });
-    expect(fill.mock.calls).toEqual([["#username", "bank-user"], ["#password", "bank-password"]]);
+    const credentialFills = fill.mock.calls.filter(([, value]) => value !== "");
+    expect(credentialFills).toEqual([["#username", "bank-user"], ["#password", "bank-password"]]);
+    // Aborting after the password landed must also clear it.
+    expect(fill.mock.calls.slice(credentialFills.length)).toEqual([["#password", ""], ["#username", ""]]);
     expect(click).not.toHaveBeenCalled();
   });
 
@@ -304,6 +430,32 @@ describe("executeScrapeTimeAutoLoginTrigger", () => {
 
     expect(beforeAutoLoginMutation).toHaveBeenCalledTimes(1);
     expect(events).toEqual(["before", "fill:#username", "fill:#password"]);
+  });
+
+  // The mutation hook wraps the page. An adapter that declares fewer parameters
+  // than the interface stays assignable in TypeScript, so a dropped `timeoutMs`
+  // silently reverts every probe to the page default and discards the guard's
+  // choice without a compile error or a failing behavioural test.
+  it("forwards the probe timeout through the mutation-hook page wrapper", async () => {
+    const probes: Array<number | undefined> = [];
+    const page = makePage();
+    const recordingPage = {
+      ...page,
+      hasVisibleSelector: async (selector: string, timeoutMs?: number) => {
+        probes.push(timeoutMs);
+        return page.hasVisibleSelector(selector);
+      },
+    };
+
+    await expect(executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular", expiredEventId: "E1", credential, cdpUrl: "http://127.0.0.1:9222",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => createBankAutoLoginStrategy(portalConfig) },
+      lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 }), release: vi.fn().mockResolvedValue(true) },
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(recordingPage)),
+      beforeAutoLoginMutation: vi.fn().mockResolvedValue(true),
+    })).resolves.toEqual({ status: "succeeded" });
+
+    expect(probes.some((timeoutMs) => timeoutMs === MIN_PROTECTED_STATE_DETECTION_WINDOW_MS)).toBe(true);
   });
 
   it("fails closed when the mutation hook rejects or denies the compare-and-set", async () => {

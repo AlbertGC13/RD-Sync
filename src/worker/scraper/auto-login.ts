@@ -269,13 +269,27 @@ async function openTrustedLoginPage(options: OpenTrustedLoginPageOptions): Promi
   }
 }
 class CdpBankAutoLoginPage implements BankAutoLoginPage {
-  constructor(private readonly page: AutoLoginCdpPageLike, private readonly visibleSelectorTimeoutMs: number) {}
+  /**
+   * Advisory only: the guard clamps this to its own safety floor, so a lowered
+   * `RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS` can speed up form-visibility waits
+   * without narrowing the protected-state detection window.
+   */
+  readonly protectedStateDetectionWindowMs: number;
+
+  constructor(private readonly page: AutoLoginCdpPageLike, private readonly visibleSelectorTimeoutMs: number) {
+    this.protectedStateDetectionWindowMs = visibleSelectorTimeoutMs;
+  }
+
   async currentUrl(): Promise<string> { return this.page.url(); }
   async fill(selector: string, value: string): Promise<void> { await this.page.fill(selector, value); }
   async click(selector: string): Promise<void> { await this.page.click(selector); }
-  async hasVisibleSelector(selector: string): Promise<boolean> {
+  async hasVisibleSelector(selector: string, timeoutMs?: number): Promise<boolean> {
+    // `timeoutMs` lets the guard probe for states expected to be ABSENT without
+    // paying the full visibility wait; omitted, it keeps the long default used
+    // when waiting for the login form to render.
+    const timeout = timeoutMs ?? this.visibleSelectorTimeoutMs;
     try {
-      await this.page.waitForSelector(selector, { timeout: this.visibleSelectorTimeoutMs, state: "visible" });
+      await this.page.waitForSelector(selector, { timeout, state: "visible" });
       return true;
     } catch (error) {
       if (isExpectedSelectorTimeout(error)) return false;
@@ -551,7 +565,14 @@ function withAutoLoginMutationHook(page: BankAutoLoginPage, context: ScrapeTimeA
   let mutationAuthorized = false;
   return {
     currentUrl: () => page.currentUrl(),
-    hasVisibleSelector: (selector) => page.hasVisibleSelector(selector),
+    // Forward timeoutMs. Dropping it silently restores the long default and
+    // undoes the caller's probe choice; TypeScript cannot catch that, because a
+    // function declaring fewer parameters stays assignable.
+    hasVisibleSelector: (selector, timeoutMs) => page.hasVisibleSelector(selector, timeoutMs),
+    // Forward the declared detection window too. Dropping it is fail-safe (the
+    // guard falls back to its floor) but would silently discard an operator's
+    // deliberately widened window.
+    protectedStateDetectionWindowMs: page.protectedStateDetectionWindowMs,
     async fill(selector, value) {
       if (!mutationAuthorized) {
         const permitted = await context.beforeAutoLoginMutation?.({ bankCode: context.bankCode, expiredEventId: context.expiredEventId });
@@ -590,24 +611,80 @@ export function createBankAutoLoginStrategy(
       if (guardResult.outcome) return guardResult.outcome;
       const { guard } = guardResult;
 
+      // Every mutation boundary gets the same full detection window. Shortening
+      // the two fill guards was measurably faster, but it let credentials reach
+      // the DOM before a late overlay was seen, and `fill` raises browser events
+      // the portal's own scripts may react to — so "nothing is transmitted yet"
+      // was never a property this code could guarantee. The window stays whole.
+      //
+      // The window closes the gap between guard passes, not the gap between a
+      // pass and the fill that follows it. An overlay landing in that instant is
+      // still caught by the NEXT boundary, but by then a value is in the page,
+      // so aborts after a fill scrub the inputs (see scrubCredentialFields).
       const beforeUsernameFill = await runGuard(() => guard.assertMutationAuthorized(page));
       if (beforeUsernameFill) return beforeUsernameFill;
       const usernameFill = await runBrowserMutation(() => page.fill(portalConfig.usernameSelector, credential.username));
+      // Not scrubbed, and not because the DOM is known to be clean: a fill can
+      // write a value and then fail on navigation, detach, or a later event, so
+      // whether the username landed is undeterminable from here. The reason is
+      // narrower — a failure here may mean the mutation hook denied
+      // authorization, and scrubbing would re-enter that operator callback. The
+      // password is only ever filled after this call succeeds, so the secret
+      // stays covered below; a possibly-partial username is the accepted cost.
       if (usernameFill) return usernameFill;
 
       const beforePasswordFill = await runGuard(() => guard.assertMutationAuthorized(page));
-      if (beforePasswordFill) return beforePasswordFill;
+      if (beforePasswordFill) return scrubCredentialFields(page, portalConfig, beforePasswordFill);
       const passwordFill = await runBrowserMutation(() => page.fill(portalConfig.passwordSelector, credential.password));
-      if (passwordFill) return passwordFill;
+      if (passwordFill) return scrubCredentialFields(page, portalConfig, passwordFill);
 
       const beforeSubmit = await runGuard(() => guard.assertMutationAuthorized(page));
-      if (beforeSubmit) return beforeSubmit;
+      if (beforeSubmit) return scrubCredentialFields(page, portalConfig, beforeSubmit);
 
       const submit = await runBrowserMutation(() => page.click(portalConfig.submitSelector));
-      if (submit) return submit;
+      if (submit) return scrubCredentialFields(page, portalConfig, submit);
       return detectPostSubmitOutcome(page, portalConfig, guard);
     },
   };
+}
+
+/**
+ * Best-effort clearing of the credential inputs when the flow aborts after a
+ * successful fill.
+ *
+ * This does not undo a fill and does not pretend to: the portal's scripts may
+ * already have read the values or reacted to the events, and nothing here can
+ * reach into that. What it bounds is the residual exposure of leaving a
+ * password sitting in a DOM the operator may drive by hand during manual
+ * recovery.
+ *
+ * Failures are swallowed on purpose. The abort outcome is what the caller must
+ * act on, and letting a cleanup error replace it would hide the real reason the
+ * flow stopped. Only called once a fill has succeeded, so the mutation hook has
+ * already authorized and is not re-entered.
+ *
+ * Each clear is bounded by its own deadline. Swallowing rejections is not
+ * enough to make cleanup non-blocking: a `fill` that never settles would hold
+ * the abort outcome forever, and with it the browser close and the lock
+ * release — a secondary cleanup taking the primary path hostage. The deadline
+ * is per field rather than shared so a hung password clear cannot also cost the
+ * username its turn.
+ */
+export const CREDENTIAL_SCRUB_TIMEOUT_MS = 1_000;
+
+async function scrubCredentialFields(
+  page: BankAutoLoginPage,
+  portalConfig: BankPortalConfig,
+  outcome: BankAutoLoginOutcome,
+): Promise<BankAutoLoginOutcome> {
+  for (const selector of [portalConfig.passwordSelector, portalConfig.usernameSelector]) {
+    await runBoundedCleanup(
+      async () => { await page.fill(selector, ""); },
+      CREDENTIAL_SCRUB_TIMEOUT_MS,
+      async () => undefined,
+    );
+  }
+  return outcome;
 }
 
 type GuardResult = { guard: LoginMutationGuard; outcome?: never } | { guard?: never; outcome: BankAutoLoginOutcome };

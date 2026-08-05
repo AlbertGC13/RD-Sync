@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { LOGIN_MUTATION_GUARD_ERROR_SUMMARIES, LoginMutationGuard, LoginMutationGuardError, type BankPortalConfig, type LoginMutationPage } from "./login-mutation-guard";
+import { LOGIN_MUTATION_GUARD_ERROR_SUMMARIES, MIN_PROTECTED_STATE_DETECTION_WINDOW_MS, LoginMutationGuard, LoginMutationGuardError, type BankPortalConfig, type LoginMutationPage } from "./login-mutation-guard";
 
 const portalConfig: BankPortalConfig = {
   bankCode: "popular",
@@ -30,6 +30,100 @@ async function guardedSubmit(guard: LoginMutationGuard, page: LoginMutationPage,
   await guard.assertMutationAuthorized(page);
   submit();
 }
+
+describe("LoginMutationGuard absence probes", () => {
+  // Absence probes resolve by EXPIRING, so every happy-path pass pays the full
+  // window. That cost is accepted: it is the interval in which a protected flow
+  // can still be caught, and it is not negotiable per call site.
+  function makeTimeoutRecordingPage(url: string, visibleSelectors: readonly string[]) {
+    const probes: Array<{ selector: string; timeoutMs?: number }> = [];
+    const page: LoginMutationPage = {
+      async currentUrl() { return url; },
+      async hasVisibleSelector(selector, timeoutMs) {
+        probes.push({ selector, timeoutMs });
+        return visibleSelectors.includes(selector);
+      },
+    };
+    return { page, probes };
+  }
+
+  // Not merely the default — the only option. Callers cannot trade detection
+  // latency for speed at a mutation boundary, because the parameter that once
+  // allowed it no longer exists.
+  it("gives every caller the clamped detection window", async () => {
+    const { page, probes } = makeTimeoutRecordingPage("https://ib.bpd.com.do/login", allLoginControlSelectors);
+
+    await new LoginMutationGuard(portalConfig).assertMutationAuthorized(page);
+
+    const absenceProbes = probes.filter((probe) =>
+      probe.selector === portalConfig.mfaIndicatorSelector || probe.selector === portalConfig.incompatibleFlowSelector);
+    expect(absenceProbes).toHaveLength(2);
+    for (const probe of absenceProbes) expect(probe.timeoutMs).toBe(MIN_PROTECTED_STATE_DETECTION_WINDOW_MS);
+  });
+
+  it("keeps the page default wait for required controls, which must be given time to render", async () => {
+    const { page, probes } = makeTimeoutRecordingPage("https://ib.bpd.com.do/login", allLoginControlSelectors);
+
+    await new LoginMutationGuard(portalConfig).assertMutationAuthorized(page);
+
+    const controlProbes = probes.filter((probe) => allLoginControlSelectors.includes(probe.selector as (typeof allLoginControlSelectors)[number]));
+    expect(controlProbes.length).toBeGreaterThan(0);
+    for (const probe of controlProbes) expect(probe.timeoutMs).toBeUndefined();
+  });
+
+  // The wait is not idle time — it IS the detection window. An overlay that
+  // renders seconds after the form is exactly what it exists to catch.
+  it("catches an overlay that renders late but inside the detection window", async () => {
+    const page: LoginMutationPage = {
+      async currentUrl() { return "https://ib.bpd.com.do/login"; },
+      async hasVisibleSelector(selector, timeoutMs) {
+        if (allLoginControlSelectors.includes(selector as (typeof allLoginControlSelectors)[number])) return true;
+        if (selector !== portalConfig.incompatibleFlowSelector) return false;
+        // Stands in for an overlay that renders a few seconds after the form: a
+        // wait shorter than the window would return false and miss it.
+        return (timeoutMs ?? 0) >= MIN_PROTECTED_STATE_DETECTION_WINDOW_MS;
+      },
+    };
+
+    // The very first boundary rejects, so no credential is ever written.
+    await expect(new LoginMutationGuard(portalConfig).assertMutationAuthorized(page))
+      .rejects.toBeInstanceOf(LoginMutationGuardError);
+  });
+
+  it("keeps the full detection window post-submit, where the bank's MFA screen legitimately appears", async () => {
+    const { page, probes } = makeTimeoutRecordingPage("https://ib.bpd.com.do/dashboard", []);
+
+    await new LoginMutationGuard(portalConfig).assertNoProtectedOrIncompatibleState(page);
+
+    expect(probes).toHaveLength(2);
+    for (const probe of probes) expect(probe.timeoutMs).toBe(MIN_PROTECTED_STATE_DETECTION_WINDOW_MS);
+  });
+
+  // The floor is the guard's, not the page's: a page that declares a narrower
+  // window cannot shrink the protection, but may widen it.
+  it.each([
+    [undefined, MIN_PROTECTED_STATE_DETECTION_WINDOW_MS],
+    [1_000, MIN_PROTECTED_STATE_DETECTION_WINDOW_MS],
+    [Number.NaN, MIN_PROTECTED_STATE_DETECTION_WINDOW_MS],
+    [Number.POSITIVE_INFINITY, MIN_PROTECTED_STATE_DETECTION_WINDOW_MS],
+    [-1, MIN_PROTECTED_STATE_DETECTION_WINDOW_MS],
+    [MIN_PROTECTED_STATE_DETECTION_WINDOW_MS * 3, MIN_PROTECTED_STATE_DETECTION_WINDOW_MS * 3],
+  ])("clamps a page-declared detection window of %j to %j", async (declared, expected) => {
+    const { page, probes } = makeTimeoutRecordingPage("https://ib.bpd.com.do/dashboard", []);
+    const declaringPage: LoginMutationPage = { ...page, protectedStateDetectionWindowMs: declared };
+
+    await new LoginMutationGuard(portalConfig).assertNoProtectedOrIncompatibleState(declaringPage);
+
+    expect(probes).toHaveLength(2);
+    for (const probe of probes) expect(probe.timeoutMs).toBe(expected);
+  });
+
+  it("detects an MFA indicator that is already visible", async () => {
+    const { page } = makeTimeoutRecordingPage("https://ib.bpd.com.do/login", [...allLoginControlSelectors, portalConfig.mfaIndicatorSelector]);
+
+    await expect(new LoginMutationGuard(portalConfig).assertMutationAuthorized(page)).rejects.toBeInstanceOf(LoginMutationGuardError);
+  });
+});
 
 describe("LoginMutationGuard", () => {
   it.each([

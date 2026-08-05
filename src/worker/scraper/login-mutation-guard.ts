@@ -13,8 +13,41 @@ export interface BankPortalConfig {
 
 export interface LoginMutationPage {
   currentUrl(): string | Promise<string>;
-  hasVisibleSelector(selector: string): boolean | Promise<boolean>;
+  /**
+   * Resolves true once the selector is visible, false if it is still absent
+   * when the wait expires. `timeoutMs` overrides the page's default wait; the
+   * guard uses a short override for absence probes, where expiry IS the
+   * expected answer rather than a failure.
+   */
+  hasVisibleSelector(selector: string, timeoutMs?: number): boolean | Promise<boolean>;
+  /**
+   * The page's preferred detection window for absence probes, in milliseconds.
+   * Advisory only: the guard clamps it to
+   * `MIN_PROTECTED_STATE_DETECTION_WINDOW_MS`, so a page can widen this window
+   * but never shrink it below the safe floor.
+   */
+  readonly protectedStateDetectionWindowMs?: number;
 }
+
+/**
+ * Floor for the window the guard keeps open while probing for a state that is
+ * normally ABSENT (an MFA prompt or an incompatible-flow overlay). Such an
+ * overlay can render asynchronously seconds after the login form, so the wait
+ * is not idle time — it is the interval in which a protected flow can still be
+ * caught before credentials are written or submitted.
+ *
+ * The window is deliberately NOT overridable per call. An earlier revision let
+ * callers shorten it at the fill boundaries to save wall-clock, which let
+ * credentials reach the DOM before a late overlay was seen. Trading detection
+ * latency for speed at a mutation boundary is not a per-call-site decision, so
+ * the parameter that allowed it was removed rather than merely left unused.
+ *
+ * The floor lives in the guard, not in the page adapter, for the same reason.
+ * The adapter's visibility timeout is an operational latency knob and is
+ * environment-configurable; this is a safety property. Clamping here means no
+ * page configuration can shrink it — a page may only widen it.
+ */
+export const MIN_PROTECTED_STATE_DETECTION_WINDOW_MS = 5_000;
 
 export const LOGIN_MUTATION_GUARD_ERROR_SUMMARIES = {
   MALFORMED_PORTAL_URL: "Bank portal URL is malformed",
@@ -109,10 +142,16 @@ export class LoginMutationGuard {
    * Guard-owned protected/incompatible state check for both pre-mutation and
    * post-submit observations. Callers must not duplicate this policy.
    */
+  /**
+   * Every caller gets the same clamped detection window, pre-mutation and
+   * post-submit alike. There is no per-call override: see
+   * MIN_PROTECTED_STATE_DETECTION_WINDOW_MS.
+   */
   async assertNoProtectedOrIncompatibleState(page: LoginMutationPage): Promise<void> {
+    const effectiveTimeoutMs = detectionWindowMs(page);
     const [hasMfaIndicator, hasIncompatibleFlow] = await Promise.all([
-      this.hasVisibleSelector(page, this.config.mfaIndicatorSelector),
-      this.hasVisibleSelector(page, this.config.incompatibleFlowSelector),
+      this.hasVisibleSelector(page, this.config.mfaIndicatorSelector, effectiveTimeoutMs),
+      this.hasVisibleSelector(page, this.config.incompatibleFlowSelector, effectiveTimeoutMs),
     ]);
 
     if (hasMfaIndicator) {
@@ -149,13 +188,23 @@ export class LoginMutationGuard {
     }
   }
 
-  private async hasVisibleSelector(page: LoginMutationPage, selector: string): Promise<boolean> {
+  private async hasVisibleSelector(page: LoginMutationPage, selector: string, timeoutMs?: number): Promise<boolean> {
     try {
-      return await page.hasVisibleSelector(selector);
+      return await page.hasVisibleSelector(selector, timeoutMs);
     } catch {
       throw createPortalStateUnavailableError();
     }
   }
+}
+
+/**
+ * Resolves the guard-owned detection window. A page may widen it; a missing,
+ * non-finite, or narrower value falls back to the safe floor.
+ */
+function detectionWindowMs(page: LoginMutationPage): number {
+  const declared = page.protectedStateDetectionWindowMs;
+  if (typeof declared !== "number" || !Number.isFinite(declared)) return MIN_PROTECTED_STATE_DETECTION_WINDOW_MS;
+  return Math.max(declared, MIN_PROTECTED_STATE_DETECTION_WINDOW_MS);
 }
 
 function createPortalStateUnavailableError(): LoginMutationGuardError {
