@@ -7,6 +7,11 @@ import { Button } from "../ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
 
+type ManualRecoveryDecision =
+  | { outcome: "safe_to_retry"; reason: "verified_no_mutation" }
+  | { outcome: "mutation_confirmed"; reason: "verified_mutation" }
+  | { outcome: "resolved_no_retry"; reason: "closed_without_retry" };
+
 const SAFE_FAILURE_MESSAGE = "No se pudo actualizar la configuración. Inténtalo nuevamente.";
 const METADATA_FAILURE_MESSAGE = "No se pudo consultar la configuración. Inténtalo nuevamente.";
 
@@ -47,6 +52,9 @@ export function BankAutoLoginSettings({
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [statusMessage, setStatusMessage] = useState("Cargando configuración…");
+  const [manualRecoveryEligible, setManualRecoveryEligible] = useState(false);
+  const [manualRecoveryDecision, setManualRecoveryDecision] = useState<ManualRecoveryDecision | null>(null);
+  const [isResolvingManualRecovery, setIsResolvingManualRecovery] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -70,6 +78,14 @@ export function BankAutoLoginSettings({
     return () => {
       active = false;
     };
+  }, [bankCode]);
+
+  useEffect(() => {
+    let active = true;
+    void fetchManualRecoveryEligibility(bankCode, fetch)
+      .then((eligible) => { if (active) setManualRecoveryEligible(eligible); })
+      .catch(() => { if (active) setManualRecoveryEligible(false); });
+    return () => { active = false; };
   }, [bankCode]);
 
   async function handleCredentialsSubmit(event: FormEvent<HTMLFormElement>) {
@@ -120,6 +136,22 @@ export function BankAutoLoginSettings({
       toast.error(SAFE_FAILURE_MESSAGE);
     } finally {
       setIsToggling(false);
+    }
+  }
+
+  async function handleManualRecoveryResolution() {
+    if (!manualRecoveryDecision) return;
+    setIsResolvingManualRecovery(true);
+    try {
+      if (!await resolveManualRecovery({ bankCode, decision: manualRecoveryDecision, fetchImpl: fetch })) throw new Error("resolution request failed");
+      setManualRecoveryEligible(false);
+      setStatusMessage("Recuperación manual resuelta.");
+      toast.success("Recuperación manual resuelta");
+    } catch {
+      setStatusMessage(SAFE_FAILURE_MESSAGE);
+      toast.error(SAFE_FAILURE_MESSAGE);
+    } finally {
+      setIsResolvingManualRecovery(false);
     }
   }
 
@@ -179,6 +211,26 @@ export function BankAutoLoginSettings({
             {isToggling ? "Actualizando…" : autoLoginEnabled ? "Desactivar auto-login" : "Activar auto-login"}
           </Button>
         </div>
+        {manualRecoveryEligible && (
+          <div className="grid gap-3 rounded-lg border border-warning/60 bg-warning/10 p-4">
+            <p className="text-sm font-medium">Se requiere resolver una recuperación manual</p>
+            <select
+              aria-label="Resultado de la recuperación manual"
+              className="h-9 rounded-md border bg-background px-3 text-sm"
+              disabled={isResolvingManualRecovery}
+              value={manualRecoveryDecision?.outcome ?? ""}
+              onChange={(event) => setManualRecoveryDecision(decisionForOutcome(event.target.value))}
+            >
+              <option value="">Seleccione el resultado verificado</option>
+              <option value="safe_to_retry">No hubo cambios; permitir nuevo intento</option>
+              <option value="mutation_confirmed">Cambios confirmados</option>
+              <option value="resolved_no_retry">Cerrar sin nuevo intento</option>
+            </select>
+            <Button type="button" className="w-fit" disabled={!manualRecoveryDecision || isResolvingManualRecovery} onClick={handleManualRecoveryResolution}>
+              {isResolvingManualRecovery ? "Resolviendo…" : "Resolver recuperación manual"}
+            </Button>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -233,6 +285,33 @@ export async function toggleAutoLogin({
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+function decisionForOutcome(outcome: string): ManualRecoveryDecision | null {
+  if (outcome === "safe_to_retry") return { outcome, reason: "verified_no_mutation" };
+  if (outcome === "mutation_confirmed") return { outcome, reason: "verified_mutation" };
+  if (outcome === "resolved_no_retry") return { outcome, reason: "closed_without_retry" };
+  return null;
+}
+
+export async function fetchManualRecoveryEligibility(bankCode: string, fetchImpl: typeof fetch): Promise<boolean> {
+  const response = await fetchImpl(`/api/bank-sessions/manual-recovery?bankCode=${encodeURIComponent(bankCode)}`);
+  if (!response.ok) throw new Error("manual recovery status request failed");
+  const body = await response.json() as { eligible?: unknown };
+  return body.eligible === true;
+}
+
+export async function resolveManualRecovery({ bankCode, decision, fetchImpl }: { bankCode: string; decision: ManualRecoveryDecision; fetchImpl: typeof fetch }): Promise<boolean> {
+  try {
+    const response = await fetchImpl(`/api/bank-sessions/manual-recovery?bankCode=${encodeURIComponent(bankCode)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision }),
     });
     return response.ok;
   } catch {
