@@ -180,6 +180,8 @@ model BankSessionExpiryEpisode {
   publicationFailureReportedAt DateTime?
   consumerClaimToken           String?
   consumerAttemptState         String?
+  consumerAttemptSource        String?
+  consumerLeaseExpiresAt       DateTime?
   terminalFailureReason        String?
   terminalFailureReconciledAt  DateTime?
   createdAt                    DateTime @default(now())

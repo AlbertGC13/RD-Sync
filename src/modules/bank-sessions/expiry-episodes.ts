@@ -12,6 +12,7 @@ import { createExpiryTerminalAudit, EXPIRY_TERMINAL_OPERATOR_SIGNAL, type Expiry
 export type SessionEpisodeAuditKind = "expired" | "restored";
 export type EpisodePublicationState = "pending" | "publishing" | "published" | "cancelled";
 export type ConsumerAttemptState = "reserved" | "mutation_started" | "manual_recovery_required" | "resolved";
+export type ConsumerAttemptSource = "scheduled" | "scrape_time";
 export const consumerAttemptTransitions = {
   mutationStarted: { from: "reserved", to: "mutation_started", requiresUnrestored: true },
   manualRecoveryRequired: { from: "mutation_started", to: "manual_recovery_required", requiresUnrestored: false },
@@ -29,6 +30,26 @@ export function parseConsumerAttemptState(value: string | null, token: string | 
   if (token?.trim() && (value === "reserved" || value === "mutation_started" || value === "manual_recovery_required" || value === "resolved")) return value;
   throw new Error("Invalid consumer attempt tuple");
 }
+export function parseConsumerAttemptLease(
+  source: string | null,
+  leaseExpiresAt: Date | null,
+  attemptState: ConsumerAttemptState | null,
+  publicationState: EpisodePublicationState,
+  terminalFailureReason: ExpiryTerminalFailureReason | null,
+): { source: ConsumerAttemptSource | null; leaseExpiresAt: Date | null } {
+  if (source === null && leaseExpiresAt === null) return { source: null, leaseExpiresAt: null };
+  const active = attemptState === "reserved" || attemptState === "mutation_started";
+  const terminal = attemptState === "manual_recovery_required" || attemptState === "resolved";
+  if (
+    (source !== "scheduled" && source !== "scrape_time")
+    || (active && (leaseExpiresAt === null || terminalFailureReason !== null))
+    || (terminal && leaseExpiresAt !== null)
+    || (!active && !terminal)
+    || (source === "scheduled" && publicationState !== "published")
+    || (source === "scrape_time" && publicationState === "published")
+  ) throw new Error("Invalid consumer lease tuple");
+  return { source, leaseExpiresAt };
+}
 function assertPublicationToken(token: string): void { if (!token.trim()) throw new Error("Publication token must be nonblank"); }
 export function assertConsumerClaimToken(token: string): void { if (!token.trim()) throw new Error("Consumer claim token must be nonblank"); }
 export interface BankSessionExpiryEpisode {
@@ -42,6 +63,8 @@ export interface BankSessionExpiryEpisode {
   publicationFailureReportedAt: Date | null;
   consumerClaimToken: string | null;
   consumerAttemptState: ConsumerAttemptState | null;
+  consumerAttemptSource: ConsumerAttemptSource | null;
+  consumerLeaseExpiresAt: Date | null;
   terminalFailureReason?: ExpiryTerminalFailureReason | null;
   terminalFailureReconciledAt?: Date | null;
   updatedAt: Date;
@@ -242,6 +265,8 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
       publicationFailureReportedAt: null,
       consumerClaimToken: null,
       consumerAttemptState: null,
+      consumerAttemptSource: null,
+      consumerLeaseExpiresAt: null,
       terminalFailureReason: null,
       terminalFailureReconciledAt: null,
       updatedAt: this.clock(),
@@ -330,7 +355,7 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
     const current = this.episodes.get(resolution.bankCode);
     if (current && (current.expiredEventId !== resolution.expiredEventId || current.runId !== resolution.runId || current.publicationState !== "published" || current.consumerAttemptState !== "resolved")) return { status: "ineligible" };
     if (this.resolutions.some((item) => item.expiredEventId === candidate.replayExpiredEventId || item.runId === candidate.replayRunId || (item as typeof stored).replayExpiredEventId === candidate.replayExpiredEventId || (item as typeof stored).replayRunId === candidate.replayRunId)) throw new Error("Replay IDs conflict with durable identity");
-    const replay: BankSessionExpiryEpisode = { bankCode: resolution.bankCode, expiredEventId: candidate.replayExpiredEventId, runId: candidate.replayRunId, expiredAuditDelivered: false, restoredAuditDelivered: false, publicationState: "pending", publicationClaimToken: null, publicationFailureReportedAt: null, consumerClaimToken: null, consumerAttemptState: null, updatedAt: candidate.authorizedAt };
+    const replay: BankSessionExpiryEpisode = { bankCode: resolution.bankCode, expiredEventId: candidate.replayExpiredEventId, runId: candidate.replayRunId, expiredAuditDelivered: false, restoredAuditDelivered: false, publicationState: "pending", publicationClaimToken: null, publicationFailureReportedAt: null, consumerClaimToken: null, consumerAttemptState: null, consumerAttemptSource: null, consumerLeaseExpiresAt: null, updatedAt: candidate.authorizedAt };
     stored.replayExpiredEventId = candidate.replayExpiredEventId; stored.replayRunId = candidate.replayRunId; stored.replayAuthorizedAt = candidate.authorizedAt;
     this.episodes.set(resolution.bankCode, replay);
     return this.replayResult("authorized", stored);
@@ -385,7 +410,7 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
     this.episodes.set(episode.bankCode, {
       ...current,
       [field]: true,
-      ...(clearedReservation ? { consumerClaimToken: null, consumerAttemptState: null } : {}),
+      ...(clearedReservation ? { consumerClaimToken: null, consumerAttemptState: null, consumerAttemptSource: null, consumerLeaseExpiresAt: null } : {}),
     });
     return true;
   }
@@ -407,7 +432,9 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
   ): Promise<boolean> {
     const current = this.episodes.get(episode.bankCode);
     if (!current || current.expiredEventId !== episode.expiredEventId || current.runId !== episode.runId || !canUpdate(current)) return false;
-    this.episodes.set(episode.bankCode, { ...update(current), updatedAt: this.clock() });
+    const updated = update(current);
+    parseConsumerAttemptLease(updated.consumerAttemptSource, updated.consumerLeaseExpiresAt, updated.consumerAttemptState, updated.publicationState, updated.terminalFailureReason ?? null);
+    this.episodes.set(episode.bankCode, { ...updated, updatedAt: this.clock() });
     return true;
   }
 

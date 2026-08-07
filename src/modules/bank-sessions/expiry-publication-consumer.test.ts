@@ -39,6 +39,8 @@ function durableEpisode(overrides: Partial<BankSessionExpiryEpisode> = {}): Bank
     consumerAttemptState: null,
     updatedAt: new Date("2026-07-17T00:00:00.000Z"),
     ...overrides,
+    consumerAttemptSource: overrides.consumerAttemptSource ?? null,
+    consumerLeaseExpiresAt: overrides.consumerLeaseExpiresAt ?? null,
   };
 }
 
