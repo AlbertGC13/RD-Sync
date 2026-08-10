@@ -37,6 +37,7 @@ import { createBankSessionMonitor } from "../bank-sessions";
 import { createManualRecoveryReplayAuthorization } from "../bank-sessions/manual-recovery-replay-authorization";
 import { InMemoryAuditSink } from "../audit";
 import { reserveExpiryPublicationConsumerClaim } from "../bank-sessions/expiry-publication-consumer";
+import { createIngestionProcessor } from "../../worker/queues";
 
 function createPublisherStub(overrides: Partial<ExpiryPublicationPublisher> = {}): ExpiryPublicationPublisher {
   return { schedule: async () => undefined, observe: async () => undefined, ...overrides };
@@ -544,6 +545,75 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
       await expect(repo.markConsumerManualRecoveryRequired(envelope, "consumer-token")).resolves.toBe(false);
       await expect(repo.close(envelope)).resolves.toBe("retained_for_recovery");
     } finally { await pool.end(); }
+  });
+
+  it("resolves only the exact active published consumer and retains every false CAS state", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const database = prisma;
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(database);
+    const createClaim = async (suffix: string) => {
+      const envelope = await publishEnvelope(repo, `resolved-${suffix}`);
+      await expect(repo.claimConsumerAttempt(envelope, "consumer-token")).resolves.toBe(true);
+      return envelope;
+    };
+    const valid = await createClaim("valid");
+    await expect(repo.markConsumerResolved(valid, "consumer-token")).resolves.toBe(true);
+    await expect(repo.findByBankCode(valid.bankCode)).resolves.toMatchObject({ consumerAttemptState: "resolved", consumerLeaseExpiresAt: null });
+    const mutationStarted = await createClaim("mutation-started");
+    await expect(repo.markConsumerMutationStarted(mutationStarted, "consumer-token")).resolves.toBe(true);
+    await expect(repo.markConsumerResolved(mutationStarted, "consumer-token")).resolves.toBe(true);
+    await expect(repo.findByBankCode(mutationStarted.bankCode)).resolves.toMatchObject({ consumerAttemptState: "resolved", consumerLeaseExpiresAt: null });
+
+    for (const [name, prepare, candidate] of [
+      ["bank identity", async (envelope: Awaited<ReturnType<typeof createClaim>>) => envelope, (envelope: Awaited<ReturnType<typeof createClaim>>) => ({ ...envelope, bankCode: "wrong-bank" })],
+      ["event identity", async (envelope: Awaited<ReturnType<typeof createClaim>>) => envelope, (envelope: Awaited<ReturnType<typeof createClaim>>) => ({ ...envelope, expiredEventId: "wrong-event" })],
+      ["run identity", async (envelope: Awaited<ReturnType<typeof createClaim>>) => envelope, (envelope: Awaited<ReturnType<typeof createClaim>>) => ({ ...envelope, runId: "wrong-run" })],
+      ["publication", async (envelope: Awaited<ReturnType<typeof createClaim>>) => { await database.$executeRaw`UPDATE "BankSessionExpiryEpisode" SET "publicationState" = 'publishing' WHERE "bankCode" = ${envelope.bankCode}`; return envelope; }, (envelope: Awaited<ReturnType<typeof createClaim>>) => envelope],
+      ["publication token", async (envelope: Awaited<ReturnType<typeof createClaim>>) => envelope, (envelope: Awaited<ReturnType<typeof createClaim>>) => ({ ...envelope, token: "wrong-token" })],
+      ["consumer token", async (envelope: Awaited<ReturnType<typeof createClaim>>) => envelope, (envelope: Awaited<ReturnType<typeof createClaim>>) => envelope],
+      ["manual state", async (envelope: Awaited<ReturnType<typeof createClaim>>) => { await expect(repo.markConsumerMutationStarted(envelope, "consumer-token")).resolves.toBe(true); await expect(repo.markConsumerManualRecoveryRequired(envelope, "consumer-token")).resolves.toBe(true); return envelope; }, (envelope: Awaited<ReturnType<typeof createClaim>>) => envelope],
+    ] as const) {
+      const envelope = await prepare(await createClaim(name.replaceAll(" ", "-")));
+      const before = await repo.findByBankCode(envelope.bankCode);
+      await expect(repo.markConsumerResolved(candidate(envelope), name === "consumer token" ? "wrong-owner" : "consumer-token")).resolves.toBe(false);
+      await expect(repo.findByBankCode(envelope.bankCode)).resolves.toEqual(before);
+    }
+  });
+
+  it("preserves a recollected result when the real PostgreSQL resolution CAS loses", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const originalMarkResolved = repo.markConsumerResolved.bind(repo);
+    vi.spyOn(repo, "markConsumerResolved").mockImplementation(async (envelope, consumerClaimToken) => {
+      await repo.markConsumerManualRecoveryRequired(envelope, consumerClaimToken);
+      return originalMarkResolved(envelope, consumerClaimToken);
+    });
+    const transitions: string[] = [];
+    const transactions = vi.fn().mockResolvedValue({ inserted: 1, skipped: 0 });
+    const auditSink = new InMemoryAuditSink();
+    const processor = createIngestionProcessor({
+      scrapeRuns: {
+        markRunning: async () => { transitions.push("running"); },
+        markSucceeded: async () => { transitions.push("succeeded"); },
+        markNeedsAdminAction: async () => { transitions.push("needs_admin_action"); },
+        markThrottled: async () => { transitions.push("throttled"); },
+        markFailed: async () => { transitions.push("failed"); },
+      },
+      transactions: { upsertMany: transactions },
+      scraper: { collect: vi.fn().mockResolvedValueOnce({ status: "needs_admin_action", cause: "session_expired", movements: [] }).mockResolvedValue({ status: "collected", movements: [{ bankId: "postgres-cas", accountFingerprint: "account", postedAt: "2026-08-10T00:00:00.000Z", amount: "1.00", currency: "DOP", direction: "credit" }] }) },
+      expiryEpisodes: repo,
+      runScrapeTimeAutoLogin: async () => ({ status: "succeeded" }),
+      createExpiredEventId: () => "postgres-cas-event",
+      auditSink,
+    });
+
+    await expect(processor({ data: { runId: "postgres-cas-run", bankId: "postgres-cas", accountFingerprint: "account" } })).resolves.toEqual({ status: "succeeded", inserted: 1, skipped: 0 });
+    expect(transactions).toHaveBeenCalledOnce();
+    expect(transitions).toEqual(["running", "succeeded"]);
+    expect(await repo.findByBankCode("postgres-cas")).toMatchObject({ consumerAttemptState: "manual_recovery_required" });
+    const events = await auditSink.list();
+    expect(events.some((event) => event.action === "scrape_run.needs_admin_action")).toBe(false);
+    expect(events.find((event) => event.action === "bank_autologin.resolution_conflict")?.metadata).toEqual({ bankCode: "postgres-cas", expiredEventId: "postgres-cas-event", runId: "postgres-cas-run", reason: "resolution_conflict" });
   });
 
   it("linearizes restoration against reserved and mutation-started consumer transitions", async () => {
