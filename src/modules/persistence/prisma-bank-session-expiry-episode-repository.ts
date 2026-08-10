@@ -34,7 +34,7 @@ type EpisodeRow = {
 function mapRow(row: EpisodeRow): BankSessionExpiryEpisode {
   const publicationState = parseEpisodePublicationState(row.publicationState, row.publicationClaimToken, row.publicationFailureReportedAt);
   const consumerAttemptState = parseConsumerAttemptState(row.consumerAttemptState, row.consumerClaimToken);
-  const lease = parseConsumerAttemptLease(row.consumerAttemptSource, row.consumerLeaseExpiresAt, consumerAttemptState, publicationState, row.terminalFailureReason);
+  const lease = parseConsumerAttemptLease(row.consumerAttemptSource, row.consumerLeaseExpiresAt, consumerAttemptState, publicationState, row.publicationClaimToken, row.terminalFailureReason);
   return {
     bankCode: row.bankCode,
     expiredEventId: row.expiredEventId,

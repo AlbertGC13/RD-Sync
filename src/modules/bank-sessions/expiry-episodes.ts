@@ -35,6 +35,7 @@ export function parseConsumerAttemptLease(
   leaseExpiresAt: Date | null,
   attemptState: ConsumerAttemptState | null,
   publicationState: EpisodePublicationState,
+  publicationClaimToken: string | null,
   terminalFailureReason: ExpiryTerminalFailureReason | null,
 ): { source: ConsumerAttemptSource | null; leaseExpiresAt: Date | null } {
   if (source === null && leaseExpiresAt === null) return { source: null, leaseExpiresAt: null };
@@ -46,6 +47,7 @@ export function parseConsumerAttemptLease(
     || (terminal && leaseExpiresAt !== null)
     || (!active && !terminal)
     || (source === "scheduled" && publicationState !== "published")
+    || (source === "scheduled" && !publicationClaimToken?.trim())
     || (source === "scrape_time" && publicationState === "published")
   ) throw new Error("Invalid consumer lease tuple");
   return { source, leaseExpiresAt };
@@ -433,7 +435,7 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
     const current = this.episodes.get(episode.bankCode);
     if (!current || current.expiredEventId !== episode.expiredEventId || current.runId !== episode.runId || !canUpdate(current)) return false;
     const updated = update(current);
-    parseConsumerAttemptLease(updated.consumerAttemptSource, updated.consumerLeaseExpiresAt, updated.consumerAttemptState, updated.publicationState, updated.terminalFailureReason ?? null);
+    parseConsumerAttemptLease(updated.consumerAttemptSource, updated.consumerLeaseExpiresAt, updated.consumerAttemptState, updated.publicationState, updated.publicationClaimToken, updated.terminalFailureReason ?? null);
     this.episodes.set(episode.bankCode, { ...updated, updatedAt: this.clock() });
     return true;
   }

@@ -6,6 +6,7 @@ import {
   InMemoryBankSessionExpiryEpisodeRepository,
   parseConsumerAttemptLease,
 } from "./expiry-episodes";
+import { createLeaseExpiresAt, INVALID_CONSUMER_LEASE_TUPLES } from "./expiry-lease-model.test-support";
 
 const leaseMigrationPath = fileURLToPath(
   new URL("../../../prisma/migrations/20260807000000_add_expiry_consumer_lease_model/migration.sql", import.meta.url),
@@ -16,31 +17,21 @@ describe("Expiry consumer lease model", () => {
   const activeLease = new Date("2026-08-07T12:00:00.000Z");
 
   it.each([
-    ["scheduled", activeLease, "mutation_started", "published"],
-    ["scrape_time", activeLease, "mutation_started", "pending"],
-  ] as const)("represents a valid %s consumer attempt", (source, leaseExpiresAt, attemptState, publicationState) => {
-    expect(parseConsumerAttemptLease(source, leaseExpiresAt, attemptState, publicationState, null)).toEqual({
+    ["scheduled", activeLease, "mutation_started", "published", "publication-token"],
+    ["scrape_time", activeLease, "mutation_started", "pending", null],
+  ] as const)("represents a valid %s consumer attempt", (source, leaseExpiresAt, attemptState, publicationState, publicationClaimToken) => {
+    expect(parseConsumerAttemptLease(source, leaseExpiresAt, attemptState, publicationState, publicationClaimToken, null)).toEqual({
       source,
       leaseExpiresAt,
     });
   });
 
-  it.each([
-    [null, activeLease, "reserved", "published", null],
-    ["scheduled", null, null, "published", null],
-    ["scheduled", null, "reserved", "published", null],
-    ["unknown", activeLease, "reserved", "published", null],
-    ["scrape_time", activeLease, "mutation_started", "published", null],
-    ["scheduled", activeLease, "mutation_started", "pending", null],
-    ["scheduled", activeLease, "resolved", "published", null],
-    ["scrape_time", activeLease, "manual_recovery_required", "pending", null],
-    ["scheduled", activeLease, "reserved", "published", "job_missing"],
-  ] as const)("rejects an incoherent source/lease tuple", (source, leaseExpiresAt, attemptState, publicationState, terminalFailureReason) => {
-    expect(() => parseConsumerAttemptLease(source, leaseExpiresAt, attemptState, publicationState, terminalFailureReason)).toThrow("Invalid consumer lease tuple");
+  it.each(INVALID_CONSUMER_LEASE_TUPLES)("rejects $name", (tuple) => {
+    expect(() => parseConsumerAttemptLease(tuple.source, createLeaseExpiresAt(tuple.leaseExpiresAt), tuple.attemptState, tuple.publicationState, tuple.publicationClaimToken, tuple.terminalFailureReason)).toThrow("Invalid consumer lease tuple");
   });
 
   it("keeps legacy attempts valid and creates dormant lease fields in memory", async () => {
-    expect(parseConsumerAttemptLease(null, null, "mutation_started", "published", null)).toEqual({
+    expect(parseConsumerAttemptLease(null, null, "mutation_started", "published", "publication-token", null)).toEqual({
       source: null,
       leaseExpiresAt: null,
     });
