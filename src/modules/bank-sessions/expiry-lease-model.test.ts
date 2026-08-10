@@ -83,6 +83,35 @@ describe("Expiry consumer lease model", () => {
     await expect(episodes.markConsumerResolved(envelope, "owner")).resolves.toBe(false);
   });
 
+  it("fail-closes expired sourced leases by durable identity without reopening the episode", async () => {
+    let now = new Date("2026-08-07T12:00:00.000Z");
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository(() => now);
+    const scrape = { bankCode: "expired-scrape", expiredEventId: "event", runId: "run" };
+    const scheduled = { bankCode: "expired-scheduled", expiredEventId: "event", runId: "run", token: "publication-token" };
+    const active = { bankCode: "active-scrape", expiredEventId: "event", runId: "run" };
+    const legacy = { bankCode: "legacy-scheduled", expiredEventId: "event", runId: "run", token: "publication-token" };
+    await episodes.getOrCreate(scrape);
+    await episodes.claimConsumerAttemptLease({ source: "scrape_time", episode: scrape, consumerClaimToken: "scrape-owner", leaseDurationMs: 100 });
+    await episodes.getOrCreate(scheduled); await episodes.claimPublication(scheduled, scheduled.token); await episodes.markPublicationPublished(scheduled, scheduled.token);
+    await episodes.claimConsumerAttemptLease({ source: "scheduled", envelope: scheduled, consumerClaimToken: "scheduled-owner", leaseDurationMs: 100 });
+    await episodes.markConsumerMutationStarted(scheduled, "scheduled-owner");
+    await episodes.getOrCreate(active); await episodes.claimConsumerAttemptLease({ source: "scrape_time", episode: active, consumerClaimToken: "active-owner", leaseDurationMs: 200 });
+    await episodes.getOrCreate(legacy); await episodes.claimPublication(legacy, legacy.token); await episodes.markPublicationPublished(legacy, legacy.token); await episodes.claimConsumerAttempt(legacy, "legacy-owner");
+    now = new Date(now.getTime() + 100);
+
+    await expect(episodes.reconcileExpiredConsumerAttemptLease(active)).resolves.toBe(false);
+    await expect(episodes.reconcileExpiredConsumerAttemptLease(legacy)).resolves.toBe(false);
+    await expect(episodes.reconcileExpiredConsumerAttemptLease({ bankCode: "missing", expiredEventId: "event", runId: "run" })).resolves.toBe(false);
+    await expect(episodes.reconcileExpiredConsumerAttemptLease(scrape)).resolves.toBe(true);
+    await expect(episodes.reconcileExpiredConsumerAttemptLease(scheduled)).resolves.toBe(true);
+    await expect(episodes.findByBankCode(scrape.bankCode)).resolves.toMatchObject({ publicationState: "pending", publicationClaimToken: null, consumerAttemptState: "manual_recovery_required", consumerAttemptSource: "scrape_time", consumerClaimToken: "scrape-owner", consumerLeaseExpiresAt: null, terminalFailureReason: null, restoredAuditDelivered: false });
+    await expect(episodes.findByBankCode(scheduled.bankCode)).resolves.toMatchObject({ publicationState: "published", publicationClaimToken: scheduled.token, consumerAttemptState: "manual_recovery_required", consumerAttemptSource: "scheduled", consumerClaimToken: "scheduled-owner", consumerLeaseExpiresAt: null, terminalFailureReason: null, restoredAuditDelivered: false });
+    await expect(episodes.findByBankCode(active.bankCode)).resolves.toMatchObject({ consumerAttemptState: "reserved", consumerAttemptSource: "scrape_time", consumerClaimToken: "active-owner", consumerLeaseExpiresAt: new Date(now.getTime() + 100) });
+    await expect(episodes.reconcileExpiredConsumerAttemptLease({ ...scheduled, runId: "stale" })).resolves.toBe(false);
+    await expect(episodes.reconcileExpiredConsumerAttemptLease(scrape)).resolves.toBe(false);
+    await expect(episodes.claimConsumerAttemptLease({ source: "scrape_time", episode: scrape, consumerClaimToken: "new-owner", leaseDurationMs: 100 })).resolves.toBe(false);
+  });
+
   it("keeps legacy transitions and clears a leased reservation when restoration is delivered", async () => {
     const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
     const legacy = { bankCode: "legacy-transition", expiredEventId: "event", runId: "run", token: "publication-token" };

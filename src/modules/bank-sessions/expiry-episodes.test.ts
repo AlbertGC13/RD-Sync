@@ -566,6 +566,7 @@ describe("Bank session expiry episodes", () => {
         claimConsumerAttempt: (envelope, token) => base.claimConsumerAttempt(envelope, token),
         claimConsumerAttemptLease: (claim) => base.claimConsumerAttemptLease(claim),
         renewConsumerAttemptLease: (claim) => base.renewConsumerAttemptLease(claim),
+        reconcileExpiredConsumerAttemptLease: (episode) => base.reconcileExpiredConsumerAttemptLease(episode),
         markConsumerMutationStarted: (envelope, token) => base.markConsumerMutationStarted(envelope, token),
         markConsumerManualRecoveryRequired: (envelope, token) => base.markConsumerManualRecoveryRequired(envelope, token),
         markConsumerResolved: (envelope, token) => base.markConsumerResolved(envelope, token),

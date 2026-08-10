@@ -60,7 +60,7 @@ export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpi
   async reconcileTerminalFailure(envelope: ExpiryPublicationEnvelope, reason: ExpiryTerminalFailureReason, reconciledAt: Date, retry = true): Promise<ExpiryTerminalReconciliationResult> {
     try {
       return await this.prisma.$transaction(async (tx) => {
-        const rows = await tx.$queryRaw<Array<EpisodeRow & { activeLease: boolean }>>`SELECT "bankCode", "expiredEventId", "runId", "publicationState", "publicationClaimToken", "restoredAuditDeliveredAt", "consumerAttemptState", "consumerAttemptSource", "consumerLeaseExpiresAt", "terminalFailureReason", ("consumerLeaseExpiresAt" > NOW()) AS "activeLease" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = ${envelope.bankCode} AND "expiredEventId" = ${envelope.expiredEventId} AND "runId" = ${envelope.runId} AND "publicationState" = 'published' AND "publicationClaimToken" = ${envelope.token} AND "restoredAuditDeliveredAt" IS NULL AND "consumerAttemptState" IS DISTINCT FROM 'resolved' FOR UPDATE`;
+        const rows = await tx.$queryRaw<Array<EpisodeRow & { activeLease: boolean }>>`SELECT "bankCode", "expiredEventId", "runId", "publicationState", "publicationClaimToken", "restoredAuditDeliveredAt", "consumerAttemptState", "consumerAttemptSource", "consumerLeaseExpiresAt", "terminalFailureReason", COALESCE("consumerLeaseExpiresAt" > NOW(), FALSE) AS "activeLease" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = ${envelope.bankCode} AND "expiredEventId" = ${envelope.expiredEventId} AND "runId" = ${envelope.runId} AND "publicationState" = 'published' AND "publicationClaimToken" = ${envelope.token} AND "restoredAuditDeliveredAt" IS NULL AND "consumerAttemptState" IS DISTINCT FROM 'resolved' FOR UPDATE`;
         const episode = rows[0];
         if (!episode || !envelope.token.trim()) return { status: "ignored_stale_envelope", operatorSignal: "Automatic session recovery requires administrative review" };
         const strongerReason = episode.terminalFailureReason === "job_missing" && reason === "job_failed";
@@ -226,6 +226,10 @@ export class PrismaBankSessionExpiryEpisodeRepository implements BankSessionExpi
       return updated.length === 1;
     }
     const updated = await this.prisma.$queryRaw<{ bankCode: string }[]>`UPDATE "BankSessionExpiryEpisode" SET "consumerLeaseExpiresAt" = NOW() + (${claim.leaseDurationMs} * INTERVAL '1 millisecond'), "updatedAt" = NOW() WHERE "bankCode" = ${claim.episode.bankCode} AND "expiredEventId" = ${claim.episode.expiredEventId} AND "runId" = ${claim.episode.runId} AND "publicationState" = 'pending' AND "publicationClaimToken" IS NULL AND "consumerClaimToken" = ${claim.consumerClaimToken} AND "consumerAttemptSource" = 'scrape_time' AND "consumerAttemptState" IN ('reserved', 'mutation_started') AND "terminalFailureReason" IS NULL AND "consumerLeaseExpiresAt" > NOW() RETURNING "bankCode"`;
+    return updated.length === 1;
+  }
+  async reconcileExpiredConsumerAttemptLease(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<boolean> {
+    const updated = await this.prisma.$queryRaw<{ bankCode: string }[]>`UPDATE "BankSessionExpiryEpisode" SET "consumerAttemptState" = 'manual_recovery_required', "consumerLeaseExpiresAt" = NULL, "updatedAt" = NOW() WHERE "bankCode" = ${episode.bankCode} AND "expiredEventId" = ${episode.expiredEventId} AND "runId" = ${episode.runId} AND "consumerAttemptSource" IS NOT NULL AND "consumerAttemptState" IN ('reserved', 'mutation_started') AND "consumerLeaseExpiresAt" IS NOT NULL AND "consumerLeaseExpiresAt" <= NOW() RETURNING "bankCode"`;
     return updated.length === 1;
   }
   async markConsumerMutationStarted(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {

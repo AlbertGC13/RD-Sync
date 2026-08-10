@@ -111,6 +111,7 @@ export interface BankSessionExpiryEpisodeRepository {
   claimConsumerAttempt(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
   claimConsumerAttemptLease(claim: ConsumerAttemptLeaseClaim): Promise<boolean>;
   renewConsumerAttemptLease(claim: ConsumerAttemptLeaseClaim): Promise<boolean>;
+  reconcileExpiredConsumerAttemptLease(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<boolean>;
   /** Persists that a later worker phase may mutate credentials; it performs no mutation itself. */
   markConsumerMutationStarted(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
   /** Persists a manual-recovery requirement; it performs no operator notification or audit delivery. */
@@ -334,6 +335,14 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
         ? current.publicationState === "published" && current.publicationClaimToken === claim.envelope.token
         : current.publicationState === "pending" && current.publicationClaimToken === null),
     (current) => ({ ...current, consumerLeaseExpiresAt: new Date(this.clock().getTime() + claim.leaseDurationMs) }));
+  }
+  async reconcileExpiredConsumerAttemptLease(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<boolean> {
+    return this.updatePublication(episode, (current) =>
+      current.consumerAttemptSource !== null
+      && (current.consumerAttemptState === "reserved" || current.consumerAttemptState === "mutation_started")
+      && current.consumerLeaseExpiresAt !== null
+      && current.consumerLeaseExpiresAt <= this.clock(),
+    (current) => ({ ...current, consumerAttemptState: "manual_recovery_required", consumerLeaseExpiresAt: null }));
   }
   async markConsumerMutationStarted(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
     return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.mutationStarted);

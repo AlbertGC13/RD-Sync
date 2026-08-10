@@ -742,6 +742,41 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     await expect(repo.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ consumerAttemptState: "manual_recovery_required", consumerLeaseExpiresAt: null, terminalFailureReason: "job_failed" });
     await expect(repo.markConsumerMutationStarted(envelope, "owner")).resolves.toBe(false);
   });
+
+  it("fail-closes expired sourced leases independently of publication and keeps them unavailable", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const scrape = await createUnclaimedEnvelope(repo, "expired-lease-scrape");
+    const scheduled = await publishEnvelope(repo, "expired-lease-scheduled");
+    const active = await createUnclaimedEnvelope(repo, "active-lease");
+    const legacy = await publishEnvelope(repo, "legacy-lease");
+    await repo.claimConsumerAttemptLease({ source: "scrape_time", episode: scrape, consumerClaimToken: "scrape-owner", leaseDurationMs: 5_000 });
+    await repo.claimConsumerAttemptLease({ source: "scheduled", envelope: scheduled, consumerClaimToken: "scheduled-owner", leaseDurationMs: 5_000 });
+    await repo.markConsumerMutationStarted(scheduled, "scheduled-owner");
+    await repo.claimConsumerAttemptLease({ source: "scrape_time", episode: active, consumerClaimToken: "active-owner", leaseDurationMs: 5_000 });
+    await repo.claimConsumerAttempt(legacy, "legacy-owner");
+    await prisma.$executeRaw`UPDATE "BankSessionExpiryEpisode" SET "consumerLeaseExpiresAt" = NOW() WHERE "bankCode" IN (${scrape.bankCode}, ${scheduled.bankCode})`;
+
+    await expect(repo.reconcileExpiredConsumerAttemptLease(active)).resolves.toBe(false);
+    await expect(repo.reconcileExpiredConsumerAttemptLease(legacy)).resolves.toBe(false);
+    await expect(repo.reconcileExpiredConsumerAttemptLease({ bankCode: "missing", expiredEventId: "event", runId: "run" })).resolves.toBe(false);
+    await expect(repo.reconcileExpiredConsumerAttemptLease(scrape)).resolves.toBe(true);
+    await expect(repo.reconcileExpiredConsumerAttemptLease(scheduled)).resolves.toBe(true);
+    await expect(repo.findByBankCode(scrape.bankCode)).resolves.toMatchObject({ publicationState: "pending", publicationClaimToken: null, consumerAttemptState: "manual_recovery_required", consumerAttemptSource: "scrape_time", consumerClaimToken: "scrape-owner", consumerLeaseExpiresAt: null, terminalFailureReason: null, restoredAuditDelivered: false });
+    await expect(repo.findByBankCode(scheduled.bankCode)).resolves.toMatchObject({ publicationState: "published", publicationClaimToken: scheduled.token, consumerAttemptState: "manual_recovery_required", consumerAttemptSource: "scheduled", consumerClaimToken: "scheduled-owner", consumerLeaseExpiresAt: null, terminalFailureReason: null, restoredAuditDelivered: false });
+    await expect(repo.findByBankCode(active.bankCode)).resolves.toMatchObject({ consumerAttemptState: "reserved", consumerAttemptSource: "scrape_time", consumerClaimToken: "active-owner", consumerLeaseExpiresAt: expect.any(Date) });
+    await expect(repo.reconcileExpiredConsumerAttemptLease({ ...scheduled, expiredEventId: "stale" })).resolves.toBe(false);
+    await expect(repo.reconcileExpiredConsumerAttemptLease(scrape)).resolves.toBe(false);
+    await expect(repo.claimConsumerAttemptLease({ source: "scrape_time", episode: scrape, consumerClaimToken: "new-owner", leaseDurationMs: 5_000 })).resolves.toBe(false);
+  });
+
+  it("treats a legacy null lease as inactive in PostgreSQL", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, "legacy-null-lease");
+    await repo.claimConsumerAttempt(envelope, "legacy-owner");
+    await expect(repo.reconcileTerminalFailure(envelope, "job_failed", new Date())).resolves.toMatchObject({ status: "reconciled" });
+  });
 });
 describe("Manual recovery resolution schema contract", () => {
   it("declares durable resolution and pending audit-outbox models with independent identities", async () => {
