@@ -48,7 +48,7 @@ export function parseConsumerAttemptLease(
     || (!active && !terminal)
     || (source === "scheduled" && publicationState !== "published")
     || (source === "scheduled" && !publicationClaimToken?.trim())
-    || (source === "scrape_time" && publicationState === "published")
+    || (source === "scrape_time" && (publicationState !== "pending" || publicationClaimToken !== null))
   ) throw new Error("Invalid consumer lease tuple");
   return { source, leaseExpiresAt };
 }
@@ -85,9 +85,11 @@ export interface GetOrCreateBankSessionExpiryEpisodeResult {
   created: boolean;
 }
 
-export type ConsumerAttemptLeaseClaim =
-  | { source: "scheduled"; envelope: ExpiryPublicationEnvelope; consumerClaimToken: string; leaseDurationMs: number }
-  | { source: "scrape_time"; episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">; consumerClaimToken: string; leaseDurationMs: number };
+export type ConsumerAttemptIdentity = Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">;
+export type ConsumerAttemptLeaseOwner =
+  | { source: "scheduled"; envelope: ExpiryPublicationEnvelope; consumerClaimToken: string }
+  | { source: "scrape_time"; episode: ConsumerAttemptIdentity; consumerClaimToken: string };
+export type ConsumerAttemptLeaseClaim = ConsumerAttemptLeaseOwner & { leaseDurationMs: number };
 
 function assertLeaseDuration(leaseDurationMs: number): void {
   if (!Number.isFinite(leaseDurationMs) || leaseDurationMs <= 0) throw new Error("Consumer lease duration must be positive and finite");
@@ -114,9 +116,12 @@ export interface BankSessionExpiryEpisodeRepository {
   reconcileExpiredConsumerAttemptLease(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<boolean>;
   /** Persists that a later worker phase may mutate credentials; it performs no mutation itself. */
   markConsumerMutationStarted(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
+  markConsumerMutationStartedLease(owner: ConsumerAttemptLeaseOwner): Promise<boolean>;
   /** Persists a manual-recovery requirement; it performs no operator notification or audit delivery. */
   markConsumerManualRecoveryRequired(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
+  markConsumerManualRecoveryRequiredLease(owner: ConsumerAttemptLeaseOwner): Promise<boolean>;
   markConsumerResolved(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
+  markConsumerResolvedLease(owner: ConsumerAttemptLeaseOwner): Promise<boolean>;
   resolveConsumerManualRecovery(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string, command: ManualRecoveryResolutionCommand): Promise<ManualRecoveryResolutionResult | null>;
   /** The monitor retains mutation_started/manual_recovery_required evidence; resolved episodes close normally. */
   close(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<EpisodeCloseResult>;
@@ -347,12 +352,26 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
   async markConsumerMutationStarted(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
     return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.mutationStarted);
   }
+  async markConsumerMutationStartedLease(owner: ConsumerAttemptLeaseOwner): Promise<boolean> {
+    return this.transitionConsumerAttemptLease(owner, consumerAttemptTransitions.mutationStarted);
+  }
   async markConsumerManualRecoveryRequired(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
     return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.manualRecoveryRequired);
+  }
+  async markConsumerManualRecoveryRequiredLease(owner: ConsumerAttemptLeaseOwner): Promise<boolean> {
+    return this.transitionConsumerAttemptLease(owner, consumerAttemptTransitions.manualRecoveryRequired);
   }
   async markConsumerResolved(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
     assertConsumerClaimToken(consumerClaimToken);
     return this.updatePublication(envelope, (current) => current.publicationState === "published" && current.publicationClaimToken === envelope.token && current.consumerClaimToken === consumerClaimToken && (current.consumerLeaseExpiresAt === null || current.consumerLeaseExpiresAt > this.clock()) && (current.consumerAttemptState === "mutation_started" || (current.consumerAttemptState === "reserved" && !current.restoredAuditDelivered)), (current) => ({ ...current, consumerAttemptState: "resolved", consumerLeaseExpiresAt: null }));
+  }
+  async markConsumerResolvedLease(owner: ConsumerAttemptLeaseOwner): Promise<boolean> {
+    assertConsumerClaimToken(owner.consumerClaimToken);
+    const episode = owner.source === "scheduled" ? owner.envelope : owner.episode;
+    return this.updatePublication(episode, (current) =>
+      this.hasActiveLeaseOwner(current, owner)
+      && (current.consumerAttemptState === "mutation_started" || (current.consumerAttemptState === "reserved" && !current.restoredAuditDelivered)),
+    (current) => ({ ...current, consumerAttemptState: "resolved", consumerLeaseExpiresAt: null }));
   }
   async resolveConsumerManualRecovery(
     envelope: ExpiryPublicationEnvelope,
@@ -497,5 +516,24 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
       && current.consumerAttemptState === transition.from
       && (current.consumerLeaseExpiresAt === null || current.consumerLeaseExpiresAt > this.clock()),
     (current) => ({ ...current, consumerAttemptState: transition.to, ...(transition.to === "manual_recovery_required" ? { consumerLeaseExpiresAt: null } : {}) }));
+  }
+  private async transitionConsumerAttemptLease(owner: ConsumerAttemptLeaseOwner, transition: ConsumerAttemptTransition): Promise<boolean> {
+    assertConsumerClaimToken(owner.consumerClaimToken);
+    const episode = owner.source === "scheduled" ? owner.envelope : owner.episode;
+    return this.updatePublication(episode, (current) =>
+      this.hasActiveLeaseOwner(current, owner)
+      && current.consumerAttemptState === transition.from
+      && (!transition.requiresUnrestored || !current.restoredAuditDelivered),
+    (current) => ({ ...current, consumerAttemptState: transition.to, ...(transition.to === "manual_recovery_required" ? { consumerLeaseExpiresAt: null } : {}) }));
+  }
+  private hasActiveLeaseOwner(current: BankSessionExpiryEpisode, owner: ConsumerAttemptLeaseOwner): boolean {
+    return current.consumerClaimToken === owner.consumerClaimToken
+      && current.consumerAttemptSource === owner.source
+      && current.consumerLeaseExpiresAt !== null
+      && current.consumerLeaseExpiresAt > this.clock()
+      && current.terminalFailureReason === null
+      && (owner.source === "scheduled"
+        ? current.publicationState === "published" && current.publicationClaimToken === owner.envelope.token
+        : current.publicationState === "pending" && current.publicationClaimToken === null);
   }
 }

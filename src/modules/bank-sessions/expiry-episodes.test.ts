@@ -568,8 +568,11 @@ describe("Bank session expiry episodes", () => {
         renewConsumerAttemptLease: (claim) => base.renewConsumerAttemptLease(claim),
         reconcileExpiredConsumerAttemptLease: (episode) => base.reconcileExpiredConsumerAttemptLease(episode),
         markConsumerMutationStarted: (envelope, token) => base.markConsumerMutationStarted(envelope, token),
+        markConsumerMutationStartedLease: (owner) => base.markConsumerMutationStartedLease(owner),
         markConsumerManualRecoveryRequired: (envelope, token) => base.markConsumerManualRecoveryRequired(envelope, token),
+        markConsumerManualRecoveryRequiredLease: (owner) => base.markConsumerManualRecoveryRequiredLease(owner),
         markConsumerResolved: (envelope, token) => base.markConsumerResolved(envelope, token),
+        markConsumerResolvedLease: (owner) => base.markConsumerResolvedLease(owner),
         resolveConsumerManualRecovery: (envelope, token, command) => base.resolveConsumerManualRecovery(envelope, token, command),
        close: async (episode) => {
         closeCalls.push(episode.expiredEventId);
