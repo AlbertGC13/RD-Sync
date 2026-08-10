@@ -550,7 +550,7 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     if (!prisma) throw new Error("prisma not initialized");
     const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
     const reserved = await publishEnvelope(repo, "recovery-reserved-race");
-    await repo.claimConsumerAttempt(reserved, "reserved-token");
+     await repo.claimConsumerAttemptLease({ source: "scheduled", envelope: reserved, consumerClaimToken: "reserved-token", leaseDurationMs: 5_000 });
     const reservedHolder = await openPausedPostgresConnection();
     const reservedObserver = await openPausedPostgresConnection();
     try {
@@ -561,7 +561,7 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
       await reservedHolder.client.query("COMMIT");
       await expect(restoration).resolves.toBe(true);
       await expect(contender).resolves.toBe(false);
-      await expect(repo.findByBankCode(reserved.bankCode)).resolves.toMatchObject({ consumerClaimToken: null, consumerAttemptState: null });
+       await expect(repo.findByBankCode(reserved.bankCode)).resolves.toMatchObject({ consumerClaimToken: null, consumerAttemptState: null, consumerAttemptSource: null, consumerLeaseExpiresAt: null });
       await expect(repo.close(reserved)).resolves.toBe("closed");
     } finally { await closePausedPostgresConnection(reservedObserver); await closePausedPostgresConnection(reservedHolder); }
 
@@ -711,6 +711,36 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
         await expect(pool.query('UPDATE "BankSessionExpiryEpisode" SET "terminalFailureReason" = $1, "terminalFailureReconciledAt" = $2, "publicationState" = $3, "publicationClaimToken" = $4 WHERE "bankCode" = $5', [reason, at, state, token, envelope.bankCode])).rejects.toMatchObject({ code: POSTGRES_CHECK_VIOLATION, constraint: "BankSessionExpiryEpisode_terminalFailure_check" });
       }
     } finally { await pool.end(); }
+  });
+
+  it("uses PostgreSQL time for source-specific leases and makes scrape ownership exclude publication", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const scrape = await createUnclaimedEnvelope(repo, "lease-scrape");
+    const results = await Promise.all([
+      repo.claimConsumerAttemptLease({ source: "scrape_time", episode: scrape, consumerClaimToken: "scrape-owner", leaseDurationMs: 5_000 }),
+      repo.claimPublication(scrape, "publisher"),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    if (results[0]) {
+      await expect(repo.findByBankCode(scrape.bankCode)).resolves.toMatchObject({ publicationState: "pending", consumerAttemptSource: "scrape_time", consumerClaimToken: "scrape-owner", consumerLeaseExpiresAt: expect.any(Date) });
+      await expect(prisma.$queryRaw<Array<{ active: boolean }>>`SELECT "consumerLeaseExpiresAt" > NOW() AS active FROM "BankSessionExpiryEpisode" WHERE "bankCode" = ${scrape.bankCode}`).resolves.toEqual([{ active: true }]);
+    }
+  });
+
+  it("defers active leases then terminalizes expired ownership atomically", async () => {
+    if (!prisma) throw new Error("prisma not initialized");
+    const repo = new PrismaBankSessionExpiryEpisodeRepository(prisma);
+    const envelope = await publishEnvelope(repo, "lease-terminal");
+    const claim = { source: "scheduled" as const, envelope, consumerClaimToken: "owner", leaseDurationMs: 5_000 };
+    await repo.claimConsumerAttemptLease(claim);
+    await expect(repo.reconcileTerminalFailure(envelope, "job_failed", new Date())).resolves.toMatchObject({ status: "deferred_active_lease" });
+    await expect(prisma.auditEvent.count()).resolves.toBe(0);
+    await prisma.$executeRaw`UPDATE "BankSessionExpiryEpisode" SET "consumerLeaseExpiresAt" = NOW() WHERE "bankCode" = ${envelope.bankCode}`;
+    await expect(repo.markConsumerMutationStarted(envelope, "owner")).resolves.toBe(false);
+    await expect(repo.reconcileTerminalFailure(envelope, "job_failed", new Date())).resolves.toMatchObject({ status: "reconciled" });
+    await expect(repo.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ consumerAttemptState: "manual_recovery_required", consumerLeaseExpiresAt: null, terminalFailureReason: "job_failed" });
+    await expect(repo.markConsumerMutationStarted(envelope, "owner")).resolves.toBe(false);
   });
 });
 describe("Manual recovery resolution schema contract", () => {

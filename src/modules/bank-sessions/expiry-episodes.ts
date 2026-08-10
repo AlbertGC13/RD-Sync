@@ -85,6 +85,14 @@ export interface GetOrCreateBankSessionExpiryEpisodeResult {
   created: boolean;
 }
 
+export type ConsumerAttemptLeaseClaim =
+  | { source: "scheduled"; envelope: ExpiryPublicationEnvelope; consumerClaimToken: string; leaseDurationMs: number }
+  | { source: "scrape_time"; episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">; consumerClaimToken: string; leaseDurationMs: number };
+
+function assertLeaseDuration(leaseDurationMs: number): void {
+  if (!Number.isFinite(leaseDurationMs) || leaseDurationMs <= 0) throw new Error("Consumer lease duration must be positive and finite");
+}
+
 export interface BankSessionExpiryEpisodeRepository {
   getOrCreate(input: CreateBankSessionExpiryEpisodeInput): Promise<GetOrCreateBankSessionExpiryEpisodeResult>;
   findByBankCode(bankCode: string): Promise<BankSessionExpiryEpisode | null>;
@@ -101,6 +109,8 @@ export interface BankSessionExpiryEpisodeRepository {
   cancelPublication(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">): Promise<boolean>;
   markPublicationFailureReported(episode: Pick<BankSessionExpiryEpisode, "bankCode" | "expiredEventId" | "runId">, token: string): Promise<boolean>;
   claimConsumerAttempt(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
+  claimConsumerAttemptLease(claim: ConsumerAttemptLeaseClaim): Promise<boolean>;
+  renewConsumerAttemptLease(claim: ConsumerAttemptLeaseClaim): Promise<boolean>;
   /** Persists that a later worker phase may mutate credentials; it performs no mutation itself. */
   markConsumerMutationStarted(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean>;
   /** Persists a manual-recovery requirement; it performs no operator notification or audit delivery. */
@@ -280,7 +290,7 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
     assertPublicationToken(token);
     const staleBefore = new Date(this.clock().getTime() - PUBLICATION_CLAIM_TIMEOUT_MS);
     return this.updatePublication(episode, (current) =>
-      !current.restoredAuditDelivered && (
+      !current.restoredAuditDelivered && current.consumerAttemptState === null && (
         current.publicationState === "pending" || (
           current.publicationState === "publishing"
           && current.publicationClaimToken === token
@@ -303,6 +313,28 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
     assertConsumerClaimToken(consumerClaimToken);
     return this.updatePublication(envelope, (current) => !current.restoredAuditDelivered && current.publicationState === "published" && current.publicationClaimToken === envelope.token && current.consumerClaimToken === null && current.consumerAttemptState === null, (current) => ({ ...current, consumerClaimToken, consumerAttemptState: "reserved" }));
   }
+  async claimConsumerAttemptLease(claim: ConsumerAttemptLeaseClaim): Promise<boolean> {
+    assertConsumerClaimToken(claim.consumerClaimToken); assertLeaseDuration(claim.leaseDurationMs);
+    const episode = claim.source === "scheduled" ? claim.envelope : claim.episode;
+    return this.updatePublication(episode, (current) =>
+      !current.restoredAuditDelivered && current.terminalFailureReason === null && current.consumerClaimToken === null && current.consumerAttemptState === null
+      && (claim.source === "scheduled"
+        ? current.publicationState === "published" && current.publicationClaimToken === claim.envelope.token
+        : current.publicationState === "pending" && current.publicationClaimToken === null),
+    (current) => ({ ...current, consumerClaimToken: claim.consumerClaimToken, consumerAttemptState: "reserved", consumerAttemptSource: claim.source, consumerLeaseExpiresAt: new Date(this.clock().getTime() + claim.leaseDurationMs) }));
+  }
+  async renewConsumerAttemptLease(claim: ConsumerAttemptLeaseClaim): Promise<boolean> {
+    assertConsumerClaimToken(claim.consumerClaimToken); assertLeaseDuration(claim.leaseDurationMs);
+    const episode = claim.source === "scheduled" ? claim.envelope : claim.episode;
+    return this.updatePublication(episode, (current) =>
+      current.consumerClaimToken === claim.consumerClaimToken && current.consumerAttemptSource === claim.source
+      && (current.consumerAttemptState === "reserved" || current.consumerAttemptState === "mutation_started")
+      && current.terminalFailureReason === null && current.consumerLeaseExpiresAt !== null && current.consumerLeaseExpiresAt > this.clock()
+      && (claim.source === "scheduled"
+        ? current.publicationState === "published" && current.publicationClaimToken === claim.envelope.token
+        : current.publicationState === "pending" && current.publicationClaimToken === null),
+    (current) => ({ ...current, consumerLeaseExpiresAt: new Date(this.clock().getTime() + claim.leaseDurationMs) }));
+  }
   async markConsumerMutationStarted(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
     return this.transitionConsumerAttempt(envelope, consumerClaimToken, consumerAttemptTransitions.mutationStarted);
   }
@@ -311,7 +343,7 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
   }
   async markConsumerResolved(envelope: ExpiryPublicationEnvelope, consumerClaimToken: string): Promise<boolean> {
     assertConsumerClaimToken(consumerClaimToken);
-    return this.updatePublication(envelope, (current) => current.publicationState === "published" && current.publicationClaimToken === envelope.token && current.consumerClaimToken === consumerClaimToken && (current.consumerAttemptState === "mutation_started" || (current.consumerAttemptState === "reserved" && !current.restoredAuditDelivered)), (current) => ({ ...current, consumerAttemptState: "resolved" }));
+    return this.updatePublication(envelope, (current) => current.publicationState === "published" && current.publicationClaimToken === envelope.token && current.consumerClaimToken === consumerClaimToken && (current.consumerLeaseExpiresAt === null || current.consumerLeaseExpiresAt > this.clock()) && (current.consumerAttemptState === "mutation_started" || (current.consumerAttemptState === "reserved" && !current.restoredAuditDelivered)), (current) => ({ ...current, consumerAttemptState: "resolved", consumerLeaseExpiresAt: null }));
   }
   async resolveConsumerManualRecovery(
     envelope: ExpiryPublicationEnvelope,
@@ -374,10 +406,12 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
         audit: createExpiryTerminalAudit(envelope, storedReason ?? reason, current.terminalFailureReconciledAt ?? reconciledAt, current.consumerAttemptState === "mutation_started" || current.consumerAttemptState === "manual_recovery_required"),
       };
     }
-    const requiresManualRecovery = current.consumerAttemptState === "mutation_started" || current.consumerAttemptState === "manual_recovery_required";
+    if (current.consumerLeaseExpiresAt !== null && current.consumerLeaseExpiresAt > this.clock()) return { status: "deferred_active_lease", operatorSignal: EXPIRY_TERMINAL_OPERATOR_SIGNAL };
+    const requiresManualRecovery = current.consumerAttemptState === "mutation_started" || current.consumerAttemptState === "manual_recovery_required" || (current.consumerAttemptSource !== null && current.consumerAttemptState === "reserved");
     const updated = {
       ...current,
       consumerAttemptState: requiresManualRecovery ? "manual_recovery_required" as const : current.consumerAttemptState,
+      consumerLeaseExpiresAt: requiresManualRecovery ? null : current.consumerLeaseExpiresAt,
       terminalFailureReason: reason,
       terminalFailureReconciledAt: current.terminalFailureReconciledAt ?? reconciledAt,
       updatedAt: this.clock(),
@@ -451,7 +485,8 @@ export class InMemoryBankSessionExpiryEpisodeRepository implements BankSessionEx
       && current.publicationState === "published"
       && current.publicationClaimToken === envelope.token
       && current.consumerClaimToken === consumerClaimToken
-      && current.consumerAttemptState === transition.from,
-    (current) => ({ ...current, consumerAttemptState: transition.to }));
+      && current.consumerAttemptState === transition.from
+      && (current.consumerLeaseExpiresAt === null || current.consumerLeaseExpiresAt > this.clock()),
+    (current) => ({ ...current, consumerAttemptState: transition.to, ...(transition.to === "manual_recovery_required" ? { consumerLeaseExpiresAt: null } : {}) }));
   }
 }

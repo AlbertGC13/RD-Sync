@@ -51,4 +51,47 @@ describe("Expiry consumer lease model", () => {
     expect(migration.trimStart()).toMatch(/^BEGIN;/);
     expect(migration.trimEnd()).toMatch(/COMMIT;$/);
   });
+
+  it("claims scheduled and scrape-time leases with their distinct CAS envelopes", async () => {
+    let now = new Date("2026-08-07T12:00:00.000Z");
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository(() => now);
+    const scheduled = { bankCode: "scheduled-lease", expiredEventId: "event", runId: "run", token: "publication-token" };
+    const scrape = { bankCode: "scrape-lease", expiredEventId: "event", runId: "run" };
+    await episodes.getOrCreate(scheduled); await episodes.claimPublication(scheduled, scheduled.token); await episodes.markPublicationPublished(scheduled, scheduled.token);
+    await episodes.getOrCreate(scrape);
+
+    await expect(episodes.claimConsumerAttemptLease({ source: "scheduled", envelope: scheduled, consumerClaimToken: "scheduled-owner", leaseDurationMs: 500 })).resolves.toBe(true);
+    await expect(episodes.claimConsumerAttemptLease({ source: "scrape_time", episode: scrape, consumerClaimToken: "scrape-owner", leaseDurationMs: 500 })).resolves.toBe(true);
+    await expect(episodes.claimPublication(scrape, "publisher")).resolves.toBe(false);
+    await expect(episodes.findByBankCode(scheduled.bankCode)).resolves.toMatchObject({ consumerAttemptSource: "scheduled", consumerLeaseExpiresAt: new Date(now.getTime() + 500) });
+    now = new Date(now.getTime() + 500);
+    await expect(episodes.renewConsumerAttemptLease({ source: "scheduled", envelope: scheduled, consumerClaimToken: "scheduled-owner", leaseDurationMs: 500 })).resolves.toBe(false);
+  });
+
+  it("renews only an active exact owner and expires stale leased transitions", async () => {
+    let now = new Date("2026-08-07T12:00:00.000Z");
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository(() => now);
+    const envelope = { bankCode: "renew-lease", expiredEventId: "event", runId: "run", token: "publication-token" };
+    await episodes.getOrCreate(envelope); await episodes.claimPublication(envelope, envelope.token); await episodes.markPublicationPublished(envelope, envelope.token);
+    const claim = { source: "scheduled" as const, envelope, consumerClaimToken: "owner", leaseDurationMs: 100 };
+    await episodes.claimConsumerAttemptLease(claim);
+    await expect(episodes.renewConsumerAttemptLease({ ...claim, consumerClaimToken: "other" })).resolves.toBe(false);
+    await expect(episodes.renewConsumerAttemptLease(claim)).resolves.toBe(true);
+    now = new Date(now.getTime() + 100);
+    await expect(episodes.markConsumerMutationStarted(envelope, "owner")).resolves.toBe(false);
+    await expect(episodes.markConsumerManualRecoveryRequired(envelope, "owner")).resolves.toBe(false);
+    await expect(episodes.markConsumerResolved(envelope, "owner")).resolves.toBe(false);
+  });
+
+  it("keeps legacy transitions and clears a leased reservation when restoration is delivered", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    const legacy = { bankCode: "legacy-transition", expiredEventId: "event", runId: "run", token: "publication-token" };
+    await episodes.getOrCreate(legacy); await episodes.claimPublication(legacy, legacy.token); await episodes.markPublicationPublished(legacy, legacy.token); await episodes.claimConsumerAttempt(legacy, "owner");
+    await expect(episodes.markConsumerMutationStarted(legacy, "owner")).resolves.toBe(true);
+    const leased = { ...legacy, bankCode: "leased-restoration" };
+    await episodes.getOrCreate(leased); await episodes.claimPublication(leased, leased.token); await episodes.markPublicationPublished(leased, leased.token);
+    await episodes.claimConsumerAttemptLease({ source: "scheduled", envelope: leased, consumerClaimToken: "owner", leaseDurationMs: 100 });
+    await episodes.markAuditDelivered(leased, "restored");
+    await expect(episodes.findByBankCode(leased.bankCode)).resolves.toMatchObject({ consumerClaimToken: null, consumerAttemptState: null, consumerAttemptSource: null, consumerLeaseExpiresAt: null });
+  });
 });
