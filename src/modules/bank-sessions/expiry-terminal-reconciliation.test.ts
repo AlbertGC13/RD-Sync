@@ -68,4 +68,17 @@ describe("expiry terminal reconciliation", () => {
     expect(results.filter((result) => result.status === "reconciled")).toHaveLength(2);
     await expect(episodes.findByBankCode("popular")).resolves.toMatchObject({ consumerAttemptState: "manual_recovery_required", terminalFailureReason: "job_failed" });
   });
+
+  it("defers an active lease without mutation then fail-closes an expired reservation or mutation", async () => {
+    let now = new Date("2026-07-28T12:00:00.000Z");
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository(() => now);
+    await published(episodes);
+    await episodes.claimConsumerAttemptLease({ source: "scheduled", envelope, consumerClaimToken: "owner", leaseDurationMs: 100 });
+    await expect(episodes.reconcileTerminalFailure(envelope, "job_failed", now)).resolves.toMatchObject({ status: "deferred_active_lease" });
+    await expect(episodes.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ terminalFailureReason: null, consumerAttemptState: "reserved" });
+    now = new Date(now.getTime() + 100);
+    await expect(episodes.reconcileTerminalFailure(envelope, "job_missing", now)).resolves.toMatchObject({ status: "reconciled" });
+    await expect(episodes.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ consumerAttemptState: "manual_recovery_required", consumerLeaseExpiresAt: null, terminalFailureReason: "job_missing" });
+    await expect(episodes.reconcileTerminalFailure(envelope, "job_failed", now)).resolves.toMatchObject({ status: "reconciled" });
+  });
 });

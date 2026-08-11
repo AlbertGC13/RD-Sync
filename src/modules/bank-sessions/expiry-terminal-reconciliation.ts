@@ -7,7 +7,7 @@ export type ExpiryTerminalObservation =
   | { kind: "terminal"; reason: ExpiryTerminalFailureReason }
   | { kind: "non_terminal"; state: "waiting" | "active" | "delayed" | "prioritized" | "waiting-children" | "completed" }
   | { kind: "observation_rejected"; operatorSignal: typeof EXPIRY_OBSERVATION_REJECTED_SIGNAL; retryable: true };
-export type ExpiryTerminalReconciliationResult = { status: "reconciled" | "already_reconciled" | "ignored_stale_envelope"; operatorSignal: typeof EXPIRY_TERMINAL_OPERATOR_SIGNAL; audit?: AuditEvent };
+export type ExpiryTerminalReconciliationResult = { status: "reconciled" | "already_reconciled" | "ignored_stale_envelope" | "deferred_active_lease"; operatorSignal: typeof EXPIRY_TERMINAL_OPERATOR_SIGNAL; audit?: AuditEvent };
 
 export const EXPIRY_OBSERVATION_REJECTED_SIGNAL = "Expiry recovery status could not be verified";
 export const EXPIRY_TERMINAL_OPERATOR_SIGNAL = "Automatic session recovery requires administrative review";
