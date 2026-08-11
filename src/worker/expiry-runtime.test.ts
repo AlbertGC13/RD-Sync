@@ -71,14 +71,18 @@ describe("expiry runtime", () => {
     expect(deps.episodes.reconcileTerminalFailure).not.toHaveBeenCalled();
   });
 
-  it("observes terminal publication once and sends only the fixed safe winner alert", async () => {
+  it("reobserves a deferred terminal lease on the next tick and alerts only after reconciliation", async () => {
     const notifySessionAttention = vi.fn().mockResolvedValue(undefined);
-    const deps = dependencies({ alerts: { notifySessionAttention } });
+    const reconcileTerminalFailure = vi.fn()
+      .mockResolvedValueOnce({ status: "deferred_active_lease", operatorSignal: "safe" })
+      .mockResolvedValueOnce({ status: "reconciled", operatorSignal: "safe" });
+    const deps = dependencies({ alerts: { notifySessionAttention }, episodes: { findByBankCode: vi.fn().mockResolvedValue(episode), reconcileTerminalFailure } });
     const runtime = createExpiryRuntime(enabled, () => deps);
     await runtime.tick();
+    expect(notifySessionAttention).not.toHaveBeenCalled();
     await runtime.tick();
     expect(deps.publisher.observe).toHaveBeenCalledTimes(2);
-    expect(deps.episodes.reconcileTerminalFailure).toHaveBeenCalledTimes(2);
+    expect(reconcileTerminalFailure).toHaveBeenCalledTimes(2);
     expect(deps.alerts.notifySessionAttention).toHaveBeenCalledOnce();
     expect(deps.alerts.notifySessionAttention).toHaveBeenCalledWith({
       status: "expired",
