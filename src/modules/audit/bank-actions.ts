@@ -24,6 +24,7 @@ export const BANK_AUTOLOGIN_ACTIONS = {
   NEEDS_ADMIN_ACTION: "bank_autologin.needs_admin_action",
   CONSUMER_RESERVED: "bank_autologin.consumer_reserved",
   MUTATION_STARTED: "bank_autologin.mutation_started",
+  RESOLUTION_CONFLICT: "bank_autologin.resolution_conflict",
   MANUAL_RECOVERY_REQUIRED: "bank_autologin.manual_recovery_required",
   MANUAL_RECOVERY_RESOLVED: "bank_autologin.manual_recovery_resolved",
   REPLAY_AUTHORIZED: "bank_autologin.replay_authorized",
