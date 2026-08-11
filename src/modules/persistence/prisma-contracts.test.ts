@@ -54,6 +54,11 @@ const TEST_DB_URL = process.env.RD_SYNC_TEST_DATABASE_URL;
 const hasTestDb = Boolean(TEST_DB_URL);
 const MAX_POSTGRES_LOCK_WAIT_ATTEMPTS = 100;
 const POSTGRES_CHECK_VIOLATION = "23514";
+const requiredExpiryCheckConstraints = [
+  "BankSessionExpiryEpisode_publicationState_check",
+  "BankSessionExpiryEpisode_consumerAttempt_check",
+  "BankSessionExpiryEpisode_terminalFailure_check",
+] as const;
 const recoveryMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260718014500_add_expiry_consumer_recovery_state/migration.sql", import.meta.url));
 const schemaPath = fileURLToPath(new URL("../../../prisma/schema.prisma", import.meta.url));
 const manualRecoveryResolutionMigrationPath = fileURLToPath(new URL("../../../prisma/migrations/20260728120000_add_manual_recovery_resolution_outbox/migration.sql", import.meta.url));
@@ -67,16 +72,24 @@ const terminalFailureMigrationPath = fileURLToPath(new URL("../../../prisma/migr
 
 let prisma: PrismaClient | undefined;
 
+function missingExpiryCheckConstraints(rows: readonly { conname: string }[]): string[] {
+  const present = new Set(rows.map((row) => row.conname));
+  return requiredExpiryCheckConstraints.filter((name) => !present.has(name));
+}
+
 // Capture original so we can restore it after the suite.
 const _originalDatabaseUrl = process.env.DATABASE_URL;
 
 if (hasTestDb) {
-  beforeAll(() => {
+  beforeAll(async () => {
     // Repositories call getPrismaClient() which reads DATABASE_URL.
     // Mirror the test URL there so repositories target the same test DB.
     process.env.DATABASE_URL = TEST_DB_URL!;
     const adapter = new PrismaPg({ connectionString: TEST_DB_URL! });
     prisma = new PrismaClient({ adapter });
+    const constraints = await prisma.$queryRaw<{ conname: string }[]>`SELECT conname FROM pg_constraint WHERE conrelid = '"BankSessionExpiryEpisode"'::regclass AND contype = 'c'`;
+    const missing = missingExpiryCheckConstraints(constraints);
+    if (missing.length > 0) throw new Error(`Missing expiry CHECK constraints: ${missing.join(", ")}; use migrate deploy, not db push`);
   });
 
   afterAll(async () => {
@@ -710,7 +723,7 @@ describe.skipIf(!hasTestDb)("Prisma bank-session expiry episode repository (requ
     await expect(first.reconcileTerminalFailure(envelope, "job_failed", new Date("2026-07-28T13:00:02.000Z"))).resolves.toMatchObject({ status: "already_reconciled" });
     await expect(first.findByBankCode(envelope.bankCode)).resolves.toMatchObject({ terminalFailureReason: "job_failed", terminalFailureReconciledAt: expect.any(Date) });
     const audit = await prisma.auditEvent.findUnique({ where: { id: `bank-session-expiry-terminal:${envelope.bankCode}:${envelope.expiredEventId}:${envelope.runId}` } });
-    expect(audit).toMatchObject({ action: "needs_admin_action", metadata: { bankCode: envelope.bankCode, expiredEventId: envelope.expiredEventId, runId: envelope.runId, reason: "job_failed" } });
+    expect(audit).toMatchObject({ action: "bank_autologin.needs_admin_action", metadata: { bankCode: envelope.bankCode, expiredEventId: envelope.expiredEventId, runId: envelope.runId, reason: "job_failed" } });
     expect(JSON.stringify(audit?.metadata)).not.toContain(envelope.token);
     await expect(prisma.auditEvent.count({ where: { id: audit!.id } })).resolves.toBe(1);
   });
