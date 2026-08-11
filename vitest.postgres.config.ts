@@ -5,7 +5,7 @@ export default defineConfig({
   ...sharedVitestConfig,
   test: {
     ...sharedVitestConfig.test,
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "tests/**/*.test.ts"],
-    exclude: ["**/*.postgres.test.ts", "src/modules/persistence/prisma-contracts.test.ts"],
+    include: ["**/*.postgres.test.ts", "src/modules/persistence/prisma-contracts.test.ts"],
+    fileParallelism: false,
   },
 });
