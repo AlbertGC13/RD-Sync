@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  type ConsumerAttemptLeaseOwner,
   InMemoryBankSessionExpiryEpisodeRepository,
   parseConsumerAttemptLease,
 } from "./expiry-episodes";
@@ -122,5 +123,57 @@ describe("Expiry consumer lease model", () => {
     await episodes.claimConsumerAttemptLease({ source: "scheduled", envelope: leased, consumerClaimToken: "owner", leaseDurationMs: 100 });
     await episodes.markAuditDelivered(leased, "restored");
     await expect(episodes.findByBankCode(leased.bankCode)).resolves.toMatchObject({ consumerClaimToken: null, consumerAttemptState: null, consumerAttemptSource: null, consumerLeaseExpiresAt: null });
+  });
+
+  it.each(["scheduled", "scrape_time"] as const)("moves an active %s owner through the lease-aware lifecycle", async (source) => {
+    const now = new Date("2026-08-07T12:00:00.000Z");
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository(() => now);
+    const identity = { bankCode: `lifecycle-${source}`, expiredEventId: "event", runId: "run" };
+    const envelope = { ...identity, token: "publication-token" };
+    const owner: ConsumerAttemptLeaseOwner = source === "scheduled"
+      ? { source, envelope, consumerClaimToken: "owner" }
+      : { source, episode: identity, consumerClaimToken: "owner" };
+    await episodes.getOrCreate(identity);
+    if (source === "scheduled") { await episodes.claimPublication(envelope, envelope.token); await episodes.markPublicationPublished(envelope, envelope.token); }
+    await episodes.claimConsumerAttemptLease({ ...owner, leaseDurationMs: 100 });
+
+    await expect(episodes.markConsumerMutationStartedLease(owner)).resolves.toBe(true);
+    await expect(episodes.findByBankCode(identity.bankCode)).resolves.toMatchObject({ consumerAttemptState: "mutation_started", consumerLeaseExpiresAt: new Date(now.getTime() + 100) });
+    await expect(episodes.markAuditDelivered(identity, "restored")).resolves.toBe(true);
+    await expect(episodes.findByBankCode(identity.bankCode)).resolves.toMatchObject({ consumerClaimToken: "owner", consumerAttemptSource: source });
+    await expect(episodes.markConsumerManualRecoveryRequiredLease(owner)).resolves.toBe(true);
+    await expect(episodes.findByBankCode(identity.bankCode)).resolves.toMatchObject({ consumerAttemptState: "manual_recovery_required", consumerLeaseExpiresAt: null });
+  });
+
+  it.each(["scheduled", "scrape_time"] as const)("resolves an active %s owner and permanently rejects takeover", async (source) => {
+    let now = new Date("2026-08-07T12:00:00.000Z");
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository(() => now);
+    const identity = { bankCode: `resolved-${source}`, expiredEventId: "event", runId: "run" };
+    const envelope = { ...identity, token: "publication-token" };
+    const owner: ConsumerAttemptLeaseOwner = source === "scheduled" ? { source, envelope, consumerClaimToken: "owner" } : { source, episode: identity, consumerClaimToken: "owner" };
+    await episodes.getOrCreate(identity);
+    if (source === "scheduled") { await episodes.claimPublication(envelope, envelope.token); await episodes.markPublicationPublished(envelope, envelope.token); }
+    await episodes.claimConsumerAttemptLease({ ...owner, leaseDurationMs: 100 });
+
+    await expect(episodes.markConsumerResolvedLease(owner)).resolves.toBe(true);
+    await expect(episodes.findByBankCode(identity.bankCode)).resolves.toMatchObject({ consumerAttemptState: "resolved", consumerLeaseExpiresAt: null });
+    await expect(episodes.claimConsumerAttemptLease({ ...owner, consumerClaimToken: "other", leaseDurationMs: 100 })).resolves.toBe(false);
+    now = new Date(now.getTime() + 100);
+    await expect(episodes.markConsumerMutationStartedLease(owner)).resolves.toBe(false);
+  });
+
+  it("rejects stale lease-aware transition tuples while the expiry sweep wins exactly once", async () => {
+    let now = new Date("2026-08-07T12:00:00.000Z");
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository(() => now);
+    const identity = { bankCode: "lifecycle-stale", expiredEventId: "event", runId: "run" };
+    const owner: ConsumerAttemptLeaseOwner = { source: "scrape_time", episode: identity, consumerClaimToken: "owner" };
+    await episodes.getOrCreate(identity);
+    await episodes.claimConsumerAttemptLease({ ...owner, leaseDurationMs: 100 });
+    await expect(episodes.markConsumerMutationStartedLease({ ...owner, consumerClaimToken: "other" })).resolves.toBe(false);
+    await expect(episodes.markConsumerMutationStartedLease({ source: "scrape_time", episode: { ...identity, runId: "other" }, consumerClaimToken: "owner" })).resolves.toBe(false);
+    now = new Date(now.getTime() + 100);
+    const [swept, advanced] = await Promise.all([episodes.reconcileExpiredConsumerAttemptLease(identity), episodes.markConsumerMutationStartedLease(owner)]);
+    expect([swept, advanced].filter(Boolean)).toHaveLength(1);
+    await expect(episodes.findByBankCode(identity.bankCode)).resolves.toMatchObject({ consumerAttemptState: "manual_recovery_required", consumerLeaseExpiresAt: null });
   });
 });

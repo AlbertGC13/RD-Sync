@@ -252,15 +252,21 @@ async function recoverExpiredSession(
     await requireManualRecovery(dependencies.expiryEpisodes, reservation);
     return recollected;
   }
-  if (!await dependencies.expiryEpisodes.markConsumerResolved(reservation.envelope, reservation.consumerClaimToken)) {
-    return { status: "needs_admin_action", reason: "browser_unavailable", safeSummary: "Bank auto-login requires admin action" };
+  if (await dependencies.expiryEpisodes.markConsumerResolved(reservation.envelope, reservation.consumerClaimToken)) {
+    await restoreExpiryEpisode(
+      dependencies.auditSink,
+      dependencies.expiryEpisodes,
+      durable.episode,
+      now().toISOString(),
+    );
+  } else {
+    await emitAutoLoginResolutionConflictAuditEvent(
+      dependencies.auditSink,
+      job.data.runId,
+      durable.episode.expiredEventId,
+      durable.episode.bankCode,
+    );
   }
-  await restoreExpiryEpisode(
-    dependencies.auditSink,
-    dependencies.expiryEpisodes,
-    durable.episode,
-    now().toISOString(),
-  );
   return recollected;
 }
 
@@ -421,5 +427,28 @@ async function emitAutoLoginOutcomeAuditEvent(
     );
   } catch {
     // Audit failures must never disrupt ingestion.
+  }
+}
+
+async function emitAutoLoginResolutionConflictAuditEvent(
+  auditSink: Pick<AuditSink, "record"> | undefined,
+  runId: string,
+  expiredEventId: string,
+  bankCode: string,
+): Promise<void> {
+  if (!auditSink) return;
+  try {
+    await auditSink.record(
+      createAuditEvent({
+        actorId: SYSTEM_AUTOLOGIN_ACTOR,
+        actorRole: null,
+        action: BANK_AUTOLOGIN_ACTIONS.RESOLUTION_CONFLICT,
+        target: "bank_session_expiry_episode",
+        targetId: `${bankCode}:${expiredEventId}`,
+        metadata: { bankCode, expiredEventId, runId, reason: "resolution_conflict" },
+      }),
+    );
+  } catch {
+    // Audit failures must never discard a successful recollection.
   }
 }

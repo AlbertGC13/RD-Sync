@@ -795,6 +795,95 @@ describe("ingestion processor — scrape-time auto-login trigger", () => {
     expect(await episodes.findByBankCode("popular")).toMatchObject({ consumerAttemptState: "manual_recovery_required" });
   });
 
+  it("preserves a successful recollection when durable resolution loses its CAS", async () => {
+    const calls: string[] = [];
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    const markConsumerResolved = vi.spyOn(episodes, "markConsumerResolved").mockResolvedValue(false);
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const transactions = new FakeTransactionRepository({ inserted: 1, skipped: 0 });
+    const adminAlerts = new FakeAdminAlertSink();
+    const auditSink = new InMemoryAuditSink();
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions,
+      adminAlerts,
+      auditSink,
+      scraper: {
+        collect: async () => {
+          calls.push("collect");
+          return calls.length === 1
+            ? { status: "needs_admin_action" as const, cause: "session_expired" as const, movements: [] }
+            : { status: "collected" as const, movements: [{ bankId: "popular", accountFingerprint: "acct-main", postedAt: "2026-06-07T13:45:00.000Z", amount: "100.00", currency: "DOP", direction: "credit" as const, reference: "RECOVERED" }] };
+        },
+      },
+      runScrapeTimeAutoLogin: async () => ({ status: "succeeded" }),
+      expiryEpisodes: episodes,
+      createExpiredEventId: () => "cas-conflict",
+    });
+
+    await expect(processor({ data: jobData })).resolves.toEqual({ status: "succeeded", inserted: 1, skipped: 0 });
+
+    expect(calls).toEqual(["collect", "collect"]);
+    expect(markConsumerResolved).toHaveBeenCalledOnce();
+    expect(transactions.received).toHaveLength(1);
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-1", status: "running" },
+      { runId: "run-1", status: "succeeded", insertedCount: 1, skippedCount: 0 },
+    ]);
+    expect(adminAlerts.events).toEqual([]);
+    expect(await episodes.findByBankCode("popular")).toMatchObject({ consumerAttemptState: "mutation_started", restoredAuditDelivered: false });
+    const events = await auditSink.list();
+    const conflict = events.find((event) => event.action === BANK_AUTOLOGIN_ACTIONS.RESOLUTION_CONFLICT);
+    expect(conflict).toMatchObject({
+      actorId: "system:auto-login",
+      target: "bank_session_expiry_episode",
+      metadata: { bankCode: "popular", expiredEventId: "cas-conflict", runId: "run-1", reason: "resolution_conflict" },
+    });
+    expect(events.find((event) => event.action === "bank_session.restored")).toBeUndefined();
+    expect(events.find((event) => event.action === "scrape_run.needs_admin_action")).toBeUndefined();
+    expect(JSON.stringify(conflict)).not.toContain("token");
+  });
+
+  it("keeps the episode fail-closed after preserving the current successful recollection", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    vi.spyOn(episodes, "markConsumerResolved").mockResolvedValue(false);
+    const firstScraper = { collect: vi.fn().mockResolvedValueOnce({ status: "needs_admin_action" as const, cause: "session_expired" as const, movements: [] }).mockResolvedValue({ status: "collected" as const, movements: [] }) };
+    const first = createIngestionProcessor({
+      scrapeRuns: new FakeScrapeRunRepository(), transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      scraper: firstScraper, expiryEpisodes: episodes, createExpiredEventId: () => "retained", runScrapeTimeAutoLogin: async () => ({ status: "succeeded" }),
+    });
+    const nextCollect = vi.fn().mockResolvedValue({ status: "needs_admin_action" as const, cause: "session_expired" as const, movements: [] });
+    const second = createIngestionProcessor({
+      scrapeRuns: new FakeScrapeRunRepository(), transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      scraper: { collect: nextCollect }, expiryEpisodes: episodes, createExpiredEventId: () => "retained", runScrapeTimeAutoLogin: async () => ({ status: "succeeded" }),
+    });
+
+    await expect(first({ data: jobData })).resolves.toEqual({ status: "succeeded", inserted: 0, skipped: 0 });
+    await expect(second({ data: { ...jobData, runId: "next-run" } })).resolves.toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+
+    expect(nextCollect).toHaveBeenCalledOnce();
+    expect(await episodes.findByBankCode("popular")).toMatchObject({ consumerAttemptState: "mutation_started" });
+  });
+
+  it("does not discard a recollection when conflict audit delivery fails", async () => {
+    const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
+    vi.spyOn(episodes, "markConsumerResolved").mockResolvedValue(false);
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      auditSink: { record: async () => { throw new Error("audit unavailable"); } },
+      scraper: { collect: vi.fn().mockResolvedValueOnce({ status: "needs_admin_action" as const, cause: "session_expired" as const, movements: [] }).mockResolvedValue({ status: "collected" as const, movements: [] }) },
+      expiryEpisodes: episodes, createExpiredEventId: () => "audit-failure", runScrapeTimeAutoLogin: async () => ({ status: "succeeded" }),
+    });
+
+    await expect(processor({ data: jobData })).resolves.toEqual({ status: "succeeded", inserted: 0, skipped: 0 });
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-1", status: "running" },
+      { runId: "run-1", status: "succeeded", insertedCount: 0, skippedCount: 0 },
+    ]);
+  });
+
   it("converges concurrent expiry jobs on one durable reservation before invoking the runner", async () => {
     const episodes = new InMemoryBankSessionExpiryEpisodeRepository();
     let releaseLogin: () => void = () => undefined;
