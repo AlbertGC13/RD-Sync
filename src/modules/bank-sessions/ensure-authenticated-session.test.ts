@@ -154,12 +154,11 @@ describe("coordinateAuthenticatedSessionState", () => {
     const { attempts, dependencies, probe } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" });
     const result = await coordinate(dependencies); if (result.status !== "authentication_required") throw new Error("expected authority");
     const claimed = claimAuthenticationMutationAuthority(result.authority); if (claimed.status !== "claimed") throw new Error("expected claim");
-    await expect(claimed.authority.renewLease()).resolves.toEqual({ status: "unavailable" }); expect(attempts.renewLease).not.toHaveBeenCalled();
-    await expect(claimed.authority.claimRetry()).resolves.toEqual({ status: "authorized" });
+    await expect(claimed.authority.renewLease()).resolves.toEqual({ status: "invalid_sequence" }); expect(attempts.renewLease).not.toHaveBeenCalled();
     await expect(claimed.authority.beginCredentialInteraction()).resolves.toEqual({ status: "authorized" });
     await expect(claimed.authority.renewLease()).resolves.toEqual({ status: "authorized" }); await expect(claimed.authority.recordSubmitBarrier()).resolves.toEqual({ status: "authorized" });
     let release!: () => void; attempts.completeAuthenticated.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({ status: "authenticated", record: authenticated() }); }));
-    const completion = claimed.authority.completeAuthenticated(); await expect(claimed.authority.completeFailed({ failureClass: "transient_pre_interaction", operatorReason: "temporary_authentication_problem" })).resolves.toEqual({ status: "unavailable" }); expect(attempts.completeFailed).not.toHaveBeenCalled(); release(); await expect(completion).resolves.toEqual({ status: "completed" });
+    const completion = claimed.authority.completeAuthenticated(); await expect(claimed.authority.completeFailed({ failureClass: "transient_pre_interaction", operatorReason: "temporary_authentication_problem" })).resolves.toEqual({ status: "invalid_sequence" }); expect(attempts.completeFailed).not.toHaveBeenCalled(); release(); await expect(completion).resolves.toEqual({ status: "completed" });
     expect(attempts.completeAuthenticated).toHaveBeenCalledTimes(1);
   });
 
@@ -168,7 +167,24 @@ describe("coordinateAuthenticatedSessionState", () => {
     const result = await coordinate(dependencies); if (result.status !== "authentication_required") throw new Error("expected authority");
     const claimed = claimAuthenticationMutationAuthority(result.authority); if (claimed.status !== "claimed") throw new Error("expected claim");
     attempts.beginCredentialInteraction.mockRejectedValueOnce(new Error("owner=db-owner"));
-    await expect(claimed.authority.beginCredentialInteraction()).resolves.toEqual({ status: "unavailable" }); await expect(claimed.authority.beginCredentialInteraction()).resolves.toEqual({ status: "unavailable" }); expect(attempts.beginCredentialInteraction).toHaveBeenCalledTimes(1);
+    await expect(claimed.authority.beginCredentialInteraction()).resolves.toEqual({ status: "unavailable" }); await expect(claimed.authority.beginCredentialInteraction()).resolves.toEqual({ status: "invalid_sequence" }); expect(attempts.beginCredentialInteraction).toHaveBeenCalledTimes(1);
+  });
+
+  it("consumes retry claims, exhaustion, and unsafe retry outcomes", async () => {
+    for (const [outcome, expected] of [[{ status: "retry_claimed", retryCount: 1, record: active() }, "retry_claimed"], [{ status: "retry_exhausted" }, "retry_exhausted"], [new Error("internal"), "unavailable"], [{ status: "unknown" }, "unavailable"]] as const) {
+      const { attempts, dependencies, probe } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" }); const result = await coordinate(dependencies); if (result.status !== "authentication_required") throw new Error("expected authority"); const claimed = claimAuthenticationMutationAuthority(result.authority); if (claimed.status !== "claimed") throw new Error("expected claim");
+      if (outcome instanceof Error) attempts.claimRetry.mockRejectedValueOnce(outcome); else attempts.claimRetry.mockResolvedValueOnce(outcome as never);
+      await expect(claimed.authority.claimRetry()).resolves.toEqual({ status: expected }); await expect(claimed.authority.beginCredentialInteraction()).resolves.toEqual({ status: "invalid_sequence" }); expect(attempts.beginCredentialInteraction).not.toHaveBeenCalled();
+    }
+  });
+
+  it("permits one in-flight lifecycle operation and preserves serial renewal", async () => {
+    const retry = setup(); retry.probe.observe.mockResolvedValue({ status: "unauthenticated" }); const retried = await coordinate(retry.dependencies); if (retried.status !== "authentication_required") throw new Error("expected authority"); const retryClaim = claimAuthenticationMutationAuthority(retried.authority); if (retryClaim.status !== "claimed") throw new Error("expected claim"); let releaseRetry!: () => void; retry.attempts.claimRetry.mockImplementationOnce(() => new Promise((resolve) => { releaseRetry = () => resolve({ status: "retry_claimed", retryCount: 1, record: active() }); })); const pendingRetry = retryClaim.authority.claimRetry(); await expect(retryClaim.authority.beginCredentialInteraction()).resolves.toEqual({ status: "invalid_sequence" }); releaseRetry(); await expect(pendingRetry).resolves.toEqual({ status: "retry_claimed" }); expect(retry.attempts.beginCredentialInteraction).not.toHaveBeenCalled();
+    const concurrent = setup(); concurrent.probe.observe.mockResolvedValue({ status: "unauthenticated" }); const coordinated = await coordinate(concurrent.dependencies); if (coordinated.status !== "authentication_required") throw new Error("expected authority"); const claim = claimAuthenticationMutationAuthority(coordinated.authority); if (claim.status !== "claimed") throw new Error("expected claim"); let releaseBegin!: () => void; concurrent.attempts.beginCredentialInteraction.mockImplementationOnce(() => new Promise((resolve) => { releaseBegin = () => resolve({ status: "interaction_started", record: owned() }); })); const begin = claim.authority.beginCredentialInteraction(); await expect(claim.authority.beginCredentialInteraction()).resolves.toEqual({ status: "invalid_sequence" }); releaseBegin(); await expect(begin).resolves.toEqual({ status: "authorized" }); let releaseRenew!: () => void; concurrent.attempts.renewLease.mockImplementationOnce(() => new Promise((resolve) => { releaseRenew = () => resolve({ status: "lease_renewed", record: owned() }); })); const renew = claim.authority.renewLease(); await expect(claim.authority.renewLease()).resolves.toEqual({ status: "invalid_sequence" }); releaseRenew(); await expect(renew).resolves.toEqual({ status: "authorized" }); await expect(claim.authority.renewLease()).resolves.toEqual({ status: "authorized" }); expect(concurrent.attempts.renewLease).toHaveBeenCalledTimes(2);
+  });
+
+  it("allows only one in-flight submit barrier", async () => {
+    const { attempts, dependencies, probe } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" }); const result = await coordinate(dependencies); if (result.status !== "authentication_required") throw new Error("expected authority"); const claimed = claimAuthenticationMutationAuthority(result.authority); if (claimed.status !== "claimed") throw new Error("expected claim"); await claimed.authority.beginCredentialInteraction(); let release!: () => void; attempts.recordSubmitBarrier.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({ status: "recorded", record: owned() }); })); const barrier = claimed.authority.recordSubmitBarrier(); await expect(claimed.authority.recordSubmitBarrier()).resolves.toEqual({ status: "invalid_sequence" }); release(); await expect(barrier).resolves.toEqual({ status: "authorized" }); expect(attempts.recordSubmitBarrier).toHaveBeenCalledTimes(1);
   });
 
   it("issues at most one authority to concurrent unauthenticated coordinators", async () => {

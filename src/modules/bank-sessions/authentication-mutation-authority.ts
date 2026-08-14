@@ -16,8 +16,8 @@ export type ClaimedAuthenticationMutationAuthority = Readonly<{
   completeAuthenticated(): Promise<MutationAuthorityCompletionResult>;
   completeFailed(failure: SessionAuthenticationFailurePair): Promise<MutationAuthorityCompletionResult>;
 }>;
-export type MutationAuthorityResult = Readonly<{ status: "authorized" | "unavailable" | "ownership_lost" }>;
-export type MutationAuthorityCompletionResult = Readonly<{ status: "completed" | "unavailable" | "ownership_lost" }>;
+export type MutationAuthorityResult = Readonly<{ status: "authorized" | "retry_claimed" | "retry_exhausted" | "invalid_sequence" | "unavailable" | "ownership_lost" }>;
+export type MutationAuthorityCompletionResult = Readonly<{ status: "completed" | "invalid_sequence" | "unavailable" | "ownership_lost" }>;
 
 type AuthorityState = { repository: SessionAuthenticationAttemptRepository; owner: SessionAuthenticationLeaseOwner; leaseDurationMs: number; claimed: boolean };
 type Phase = "leased" | "interaction_started" | "submit_barrier_recorded" | "consumed";
@@ -30,8 +30,10 @@ type AuthorityAcquisition =
 
 const states = new WeakMap<object, AuthorityState>();
 const unavailable = (): MutationAuthorityResult => ({ status: "unavailable" });
+const invalidSequence = (): MutationAuthorityResult => ({ status: "invalid_sequence" });
 const lost = (): MutationAuthorityResult => ({ status: "ownership_lost" });
 const completionUnavailable = (): MutationAuthorityCompletionResult => ({ status: "unavailable" });
+const completionInvalidSequence = (): MutationAuthorityCompletionResult => ({ status: "invalid_sequence" });
 const completionLost = (): MutationAuthorityCompletionResult => ({ status: "ownership_lost" });
 const valid = (identity: SessionAuthenticationAttemptIdentity, ownerToken: string, leaseDurationMs: number) =>
   [identity?.bankCode, identity?.runId, identity?.attemptId, ownerToken].every((value) => typeof value === "string" && /\S/.test(value)) && Number.isSafeInteger(leaseDurationMs) && leaseDurationMs > 0;
@@ -100,17 +102,17 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
   let pending = false;
   const poison = () => { phase = "consumed"; pending = false; };
   const run = async (allowed: Phase, call: () => Promise<{ status: string }>, next: Phase): Promise<MutationAuthorityResult> => {
-    if (phase !== allowed || pending) return unavailable();
+    if (phase !== allowed || pending) return invalidSequence();
     pending = true;
     try {
       const result = await call(); pending = false;
       if (result.status === "stale_owner" || result.status === "lease_expired") { poison(); return lost(); }
-      if (!(["interaction_started", "lease_renewed", "recorded", "retry_claimed"] as string[]).includes(result.status)) { poison(); return unavailable(); }
+      if (!(["interaction_started", "lease_renewed", "recorded"] as string[]).includes(result.status)) { poison(); return unavailable(); }
       phase = next; return { status: "authorized" };
     } catch { poison(); return unavailable(); }
   };
   const complete = async (call: () => Promise<{ status: string }>): Promise<MutationAuthorityCompletionResult> => {
-    if (phase === "consumed" || pending) return completionUnavailable();
+    if (phase === "consumed" || pending) return completionInvalidSequence();
     phase = "consumed"; pending = true;
     try {
       const result = await call(); pending = false;
@@ -118,11 +120,22 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
       return result.status === "authenticated" || result.status === "failed" ? { status: "completed" } : completionUnavailable();
     } catch { pending = false; return completionUnavailable(); }
   };
+  const claimRetry = async (): Promise<MutationAuthorityResult> => {
+    if (phase !== "leased" || pending) return invalidSequence();
+    phase = "consumed"; pending = true;
+    try {
+      const result = await state.repository.claimRetry({ owner: state.owner }); pending = false;
+      if (result.status === "retry_claimed" || result.status === "retry_exhausted") return { status: result.status };
+      if (result.status === "stale_owner" || result.status === "lease_expired") return lost();
+      return unavailable();
+    } catch { pending = false; return unavailable(); }
+  };
   return { status: "claimed", authority: Object.freeze({
     beginCredentialInteraction: () => run("leased", () => state.repository.beginCredentialInteraction({ owner: state.owner }), "interaction_started"),
+    // A blocked overlap never changes phase; a later serial renewal remains valid.
     renewLease: () => run("interaction_started", () => state.repository.renewLease({ owner: state.owner, leaseDurationMs: state.leaseDurationMs }), "interaction_started"),
     recordSubmitBarrier: () => run("interaction_started", () => state.repository.recordSubmitBarrier({ owner: state.owner }), "submit_barrier_recorded"),
-    claimRetry: () => run("leased", () => state.repository.claimRetry({ owner: state.owner }), "leased"),
+    claimRetry,
     completeAuthenticated: () => complete(() => state.repository.completeAuthenticated({ owner: state.owner })),
     completeFailed: (failure) => complete(() => state.repository.completeFailed({ owner: state.owner, ...failure })),
   }) };
