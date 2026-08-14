@@ -12,6 +12,7 @@ const attemptIdentity = (name: string, attemptId = "attempt") => ({ bankCode: "a
 
 describe.skipIf(!url)("Session authentication attempt PostgreSQL contract", () => {
   beforeEach(async () => {
+    await pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" LIKE \'auth-contract-%\'');
     await pool!.query('DELETE FROM "BankSessionAuthenticationAttempt" WHERE "bankCode" LIKE \'auth-contract-%\'');
     await pool!.query('DELETE FROM "Bank" WHERE "code" LIKE \'auth-contract-%\'');
     await pool!.query('INSERT INTO "Bank" ("id", "code", "name", "updatedAt") VALUES ($1, $2, $3, NOW())', ["auth-contract-bank-id", "auth-contract-bank", "Authentication contract bank"]);
@@ -36,6 +37,10 @@ describe.skipIf(!url)("Session authentication attempt PostgreSQL contract", () =
     await pool!.query('INSERT INTO "Bank" ("id", "code", "name", "updatedAt") VALUES ($1, $2, $3, NOW())', [`${bankCode}-id`, bankCode, bankCode]);
   }
   async function expire(id: ReturnType<typeof attemptIdentity>) { await pool!.query('UPDATE "BankSessionAuthenticationAttempt" SET "leaseExpiresAt" = NOW() WHERE "bankCode" = $1 AND "runId" = $2 AND "attemptId" = $3', [id.bankCode, id.runId, id.attemptId]); }
+  async function episode(id: ReturnType<typeof attemptIdentity>, state = "manual_recovery_required", lease = "NOW() - INTERVAL '1 second'") {
+    const mutation = state === "mutation_started";
+    await pool!.query(`INSERT INTO "BankSessionExpiryEpisode" ("bankCode", "expiredEventId", "runId", "publicationState", "publicationClaimToken", "consumerClaimToken", "consumerAttemptState", "consumerAttemptSource", "consumerLeaseExpiresAt", "updatedAt") VALUES ($1, $2, $3, ${mutation ? "'published', 'publication'" : "'pending', NULL"}, 'consumer', $4, ${mutation && lease !== "NULL" ? "'scheduled'" : "NULL"}, ${mutation ? lease : "NULL"}, NOW())`, [id.bankCode, `expired-${id.runId}`, id.runId, state]);
+  }
   function diagnosticRow(record: SessionAuthenticationAttemptRecord) {
     return {
       bankCode: record.identity.bankCode, runId: record.identity.runId, attemptId: record.identity.attemptId,
@@ -190,6 +195,81 @@ describe.skipIf(!url)("Session authentication attempt PostgreSQL contract", () =
       expect(reconciled).toMatchObject(phase === "no" ? { status: "lease_reconciled", record: { retryCount: 1, status: "active" } } : { status: "lease_reconciled", record: { status: "failed", failureClass: "interaction_outcome_uncertain" } });
       await expect(repo().completeAuthenticated({ owner: current.owner })).resolves.toMatchObject({ status: phase === "no" ? "stale_owner" : "terminal" });
     }
+  });
+
+  it.each(["no_credential_interaction", "credentials_may_have_reached_portal", "submit_may_have_been_dispatched"])("resolves manual recovery while preserving %s", async (phase) => {
+    const { id, owner } = await lease(`observed-${phase}`); await episode(id);
+    if (phase !== "no_credential_interaction") await repo().beginCredentialInteraction({ owner });
+    if (phase === "submit_may_have_been_dispatched") await repo().recordSubmitBarrier({ owner });
+    await expect(repo().resolveObservedRestoration(owner)).resolves.toMatchObject({ status: "resolved" });
+    await expect(repo().findExact({ identity: id })).resolves.toMatchObject({ status: "found", record: { status: "authenticated", interactionPhase: phase, ownerToken: null, leaseExpiresAt: null, generation: owner.generation + 1n } });
+    await expect(pool!.query('SELECT "consumerAttemptState", "consumerLeaseExpiresAt" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [id.bankCode])).resolves.toMatchObject({ rows: [{ consumerAttemptState: "resolved", consumerLeaseExpiresAt: null }] });
+  });
+
+  it.each([
+    ["expired mutation lease", "mutation_started", "NOW() - INTERVAL '1 second'", "resolved"],
+    ["active mutation lease", "mutation_started", "NOW() + INTERVAL '1 hour'", "active_mutation_owner"],
+    ["legacy mutation", "mutation_started", "NULL", "active_mutation_owner"],
+    ["reserved episode", "reserved", "NULL", "episode_not_resolvable"],
+  ])("classifies %s", async (_name, state, expiry, status) => {
+    const { id, owner } = await lease(`observed-${status}-${expiry === "NULL"}`); await episode(id, state, expiry);
+    await expect(repo().resolveObservedRestoration(owner)).resolves.toMatchObject({ status });
+  });
+
+  it.each([
+    ["wrong owner", async (_id: ReturnType<typeof attemptIdentity>, owner: Awaited<ReturnType<typeof lease>>["owner"]) => ({ ...owner, ownerToken: "wrong" }), "stale_owner"],
+    ["stale generation", async (_id: ReturnType<typeof attemptIdentity>, owner: Awaited<ReturnType<typeof lease>>["owner"]) => ({ ...owner, generation: owner.generation + 1n }), "stale_owner"],
+    ["expired auth lease", async (id: ReturnType<typeof attemptIdentity>, owner: Awaited<ReturnType<typeof lease>>["owner"]) => { await expire(id); return owner; }, "lease_expired"],
+  ])("rejects %s", async (_name, change, status) => {
+    const { id, owner } = await lease(`observed-${status}-${_name}`); await episode(id);
+    await expect(repo().resolveObservedRestoration(await change(id, owner))).resolves.toMatchObject({ status });
+  });
+
+  it("fails closed for missing and mismatched durable identities", async () => {
+    const { id, owner } = await lease("observed-identities"); await episode(id);
+    await expect(repo().resolveObservedRestoration({ ...owner, identity: { ...id, attemptId: "other" } })).resolves.toEqual({ status: "identity_mismatch" });
+    await pool!.query('UPDATE "BankSessionExpiryEpisode" SET "runId" = $2 WHERE "bankCode" = $1', [id.bankCode, "replacement"]);
+    await expect(repo().resolveObservedRestoration(owner)).resolves.toEqual({ status: "identity_mismatch" });
+    await expect(repo().resolveObservedRestoration({ ...owner, identity: { ...id, runId: "missing" } })).resolves.toEqual({ status: "missing", missing: "authentication_attempt" });
+    await pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [id.bankCode]);
+    await expect(repo().resolveObservedRestoration(owner)).resolves.toEqual({ status: "missing", missing: "expiry_episode" });
+  });
+
+  it("classifies terminal attempts and supports only exact resolved idempotence", async () => {
+    const failed = await lease("observed-failed"); await episode(failed.id); await repo().completeFailed({ owner: failed.owner, failureClass: "transient_pre_interaction", operatorReason: "temporary_authentication_problem" });
+    await expect(repo().resolveObservedRestoration(failed.owner)).resolves.toEqual({ status: "terminal_conflict" });
+    await pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [failed.id.bankCode]);
+    const resolved = await lease("observed-resolved"); await episode(resolved.id); await repo().resolveObservedRestoration(resolved.owner);
+    await expect(repo().resolveObservedRestoration(resolved.owner)).resolves.toEqual({ status: "already_resolved" });
+    await pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [resolved.id.bankCode]);
+    await expect(repo().resolveObservedRestoration(resolved.owner)).resolves.toEqual({ status: "already_resolved" });
+    const conflict = await lease("observed-terminal-conflict"); await episode(conflict.id); await repo().completeAuthenticated({ owner: conflict.owner });
+    await expect(repo().resolveObservedRestoration(conflict.owner)).resolves.toEqual({ status: "terminal_conflict" });
+  });
+
+  it("uses database time, preserves episode evidence, and rolls back on an episode write failure", async () => {
+    const { id, owner } = await lease("observed-evidence"); await episode(id, "mutation_started");
+    const before = await pool!.query('SELECT "expiredEventId", "publicationClaimToken", "consumerClaimToken", "consumerAttemptSource" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [id.bankCode]);
+    const result = await repo().resolveObservedRestoration(owner);
+    expect(result).toMatchObject({ status: "resolved", evidence: { authenticatedAt: expect.any(Date) } });
+    await expect(pool!.query('SELECT "expiredEventId", "publicationClaimToken", "consumerClaimToken", "consumerAttemptSource", "consumerAttemptState", "consumerLeaseExpiresAt" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [id.bankCode])).resolves.toMatchObject({ rows: [{ ...before.rows[0], consumerAttemptState: "resolved", consumerLeaseExpiresAt: null }] });
+    await pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [id.bankCode]);
+    const rollback = await lease("observed-rollback"); await episode(rollback.id);
+    await pool!.query('CREATE FUNCTION fail_observed_episode() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION \'forced\'; END $$; CREATE TRIGGER fail_observed_episode BEFORE UPDATE ON "BankSessionExpiryEpisode" FOR EACH ROW EXECUTE FUNCTION fail_observed_episode()');
+    await expect(repo().resolveObservedRestoration(rollback.owner)).rejects.toThrow("forced");
+    await pool!.query('DROP TRIGGER fail_observed_episode ON "BankSessionExpiryEpisode"; DROP FUNCTION fail_observed_episode()');
+    await expect(repo().findExact({ identity: rollback.id })).resolves.toMatchObject({ status: "found", record: { status: "active", ownerToken: rollback.owner.ownerToken, generation: rollback.owner.generation } });
+  });
+
+  it("serializes concurrent resolvers and an overlapping close without partial terminalization", async () => {
+    const concurrent = await lease("observed-concurrent"); await episode(concurrent.id);
+    const results = await Promise.all([repo().resolveObservedRestoration(concurrent.owner), repo().resolveObservedRestoration(concurrent.owner)]);
+    expect(results.map(({ status }) => status).sort()).toEqual(["already_resolved", "resolved"]);
+    await pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [concurrent.id.bankCode]);
+    const closing = await lease("observed-close"); await episode(closing.id);
+    const [result] = await Promise.all([repo().resolveObservedRestoration(closing.owner), pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1 AND "runId" = $2', [closing.id.bankCode, closing.id.runId])]);
+    const attempt = await repo().findExact({ identity: closing.id });
+    expect(result.status === "resolved" ? attempt : result).not.toMatchObject({ status: "not_applied" });
   });
 
   it.each([
