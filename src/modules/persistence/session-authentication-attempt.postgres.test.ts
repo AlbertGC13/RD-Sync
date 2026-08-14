@@ -247,13 +247,34 @@ describe.skipIf(!url)("Session authentication attempt PostgreSQL contract", () =
     await expect(repo().resolveObservedRestoration(conflict.owner)).resolves.toEqual({ status: "terminal_conflict" });
   });
 
-  it("uses database time, preserves episode evidence, and rolls back on an episode write failure", async () => {
-    const { id, owner } = await lease("observed-evidence"); await episode(id, "mutation_started");
-    const before = await pool!.query('SELECT "expiredEventId", "publicationClaimToken", "consumerClaimToken", "consumerAttemptSource" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [id.bankCode]);
-    const result = await repo().resolveObservedRestoration(owner);
-    expect(result).toMatchObject({ status: "resolved", evidence: { authenticatedAt: expect.any(Date) } });
-    await expect(pool!.query('SELECT "expiredEventId", "publicationClaimToken", "consumerClaimToken", "consumerAttemptSource", "consumerAttemptState", "consumerLeaseExpiresAt" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [id.bankCode])).resolves.toMatchObject({ rows: [{ ...before.rows[0], consumerAttemptState: "resolved", consumerLeaseExpiresAt: null }] });
+  it("uses PostgreSQL time and preserves every maximal legal episode evidence set", async () => {
+    const { id, owner } = await lease("observed-evidence"); await episode(id);
+    await pool!.query('UPDATE "BankSessionExpiryEpisode" SET "publicationState" = \'published\', "publicationClaimToken" = \'publication\', "consumerAttemptSource" = \'scheduled\', "expiredAuditDeliveredAt" = NOW() - INTERVAL \'3 minutes\', "restoredAuditDeliveredAt" = NOW() - INTERVAL \'2 minutes\', "terminalFailureReason" = \'job_missing\', "terminalFailureReconciledAt" = NOW() - INTERVAL \'1 minute\', "updatedAt" = NOW() - INTERVAL \'4 minutes\' WHERE "bankCode" = $1', [id.bankCode]);
+    const before = (await pool!.query('SELECT "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "consumerAttemptSource", "consumerAttemptState", "consumerLeaseExpiresAt", "terminalFailureReason", "terminalFailureReconciledAt", "updatedAt" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [id.bankCode])).rows[0];
+    const clock = await pool!.connect(); let authenticatedAt!: Date;
+    try {
+      const lower = (await clock.query<{ now: Date }>('SELECT NOW() AS "now"')).rows[0].now;
+      const result = await repo().resolveObservedRestoration(owner);
+      const upper = (await clock.query<{ now: Date }>('SELECT NOW() AS "now"')).rows[0].now;
+      if (result.status !== "resolved") throw new Error("Expected observed restoration");
+      authenticatedAt = result.evidence.authenticatedAt;
+      expect(authenticatedAt.getTime()).toBeGreaterThanOrEqual(lower.getTime());
+      expect(authenticatedAt.getTime()).toBeLessThanOrEqual(upper.getTime());
+    } finally { clock.release(); }
+    const resolved = (await pool!.query('SELECT "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "consumerAttemptSource", "consumerAttemptState", "consumerLeaseExpiresAt", "terminalFailureReason", "terminalFailureReconciledAt", "updatedAt" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [id.bankCode])).rows[0];
+    const { updatedAt: _beforeUpdatedAt, ...preserved } = before;
+    void _beforeUpdatedAt;
+    expect(resolved).toMatchObject({ ...preserved, consumerAttemptState: "resolved", consumerLeaseExpiresAt: null });
+    expect(resolved.updatedAt.getTime()).toBeGreaterThan(before.updatedAt.getTime());
+    await expect(repo().findExact({ identity: id })).resolves.toMatchObject({ status: "found", record: { status: "authenticated", ownerToken: null, leaseExpiresAt: null, generation: owner.generation + 1n, terminalAt: authenticatedAt } });
     await pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [id.bankCode]);
+    const failure = await lease("observed-publication-failure"); await episode(failure.id);
+    await pool!.query('UPDATE "BankSessionExpiryEpisode" SET "publicationState" = \'publishing\', "publicationClaimToken" = \'failed-publication\', "publicationFailureReportedAt" = NOW() - INTERVAL \'1 minute\', "expiredAuditDeliveredAt" = NOW() - INTERVAL \'3 minutes\', "restoredAuditDeliveredAt" = NOW() - INTERVAL \'2 minutes\', "updatedAt" = NOW() - INTERVAL \'4 minutes\' WHERE "bankCode" = $1', [failure.id.bankCode]);
+    const failedPublication = (await pool!.query('SELECT "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "consumerAttemptSource", "consumerAttemptState", "consumerLeaseExpiresAt", "terminalFailureReason", "terminalFailureReconciledAt" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [failure.id.bankCode])).rows[0];
+    await expect(repo().resolveObservedRestoration(failure.owner)).resolves.toMatchObject({ status: "resolved" });
+    await expect(pool!.query('SELECT "expiredEventId", "runId", "expiredAuditDeliveredAt", "restoredAuditDeliveredAt", "publicationState", "publicationClaimToken", "publicationFailureReportedAt", "consumerClaimToken", "consumerAttemptSource", "consumerAttemptState", "consumerLeaseExpiresAt", "terminalFailureReason", "terminalFailureReconciledAt" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [failure.id.bankCode])).resolves.toMatchObject({ rows: [{ ...failedPublication, consumerAttemptState: "resolved", consumerLeaseExpiresAt: null }] });
+    // PostgreSQL permits terminal evidence only for published episodes, but a publication failure only for publishing episodes.
+    await pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [failure.id.bankCode]);
     const rollback = await lease("observed-rollback"); await episode(rollback.id);
     await pool!.query('CREATE FUNCTION fail_observed_episode() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION \'forced\'; END $$; CREATE TRIGGER fail_observed_episode BEFORE UPDATE ON "BankSessionExpiryEpisode" FOR EACH ROW EXECUTE FUNCTION fail_observed_episode()');
     await expect(repo().resolveObservedRestoration(rollback.owner)).rejects.toThrow("forced");
@@ -261,15 +282,19 @@ describe.skipIf(!url)("Session authentication attempt PostgreSQL contract", () =
     await expect(repo().findExact({ identity: rollback.id })).resolves.toMatchObject({ status: "found", record: { status: "active", ownerToken: rollback.owner.ownerToken, generation: rollback.owner.generation } });
   });
 
-  it("serializes concurrent resolvers and an overlapping close without partial terminalization", async () => {
+  it("serializes concurrent resolvers and close into only coherent durable states", async () => {
     const concurrent = await lease("observed-concurrent"); await episode(concurrent.id);
     const results = await Promise.all([repo().resolveObservedRestoration(concurrent.owner), repo().resolveObservedRestoration(concurrent.owner)]);
     expect(results.map(({ status }) => status).sort()).toEqual(["already_resolved", "resolved"]);
     await pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [concurrent.id.bankCode]);
     const closing = await lease("observed-close"); await episode(closing.id);
-    const [result] = await Promise.all([repo().resolveObservedRestoration(closing.owner), pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1 AND "runId" = $2', [closing.id.bankCode, closing.id.runId])]);
-    const attempt = await repo().findExact({ identity: closing.id });
-    expect(result.status === "resolved" ? attempt : result).not.toMatchObject({ status: "not_applied" });
+    const [result, closed] = await Promise.all([repo().resolveObservedRestoration(closing.owner), pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1 AND "runId" = $2 AND "expiredEventId" = $3 AND ("consumerAttemptState" IS NULL OR "consumerAttemptState" = \'resolved\')', [closing.id.bankCode, closing.id.runId, `expired-${closing.id.runId}`])]);
+    expect(result).toMatchObject({ status: "resolved" });
+    const attempt = (await pool!.query('SELECT "status", "ownerToken", "leaseExpiresAt", "generation" FROM "BankSessionAuthenticationAttempt" WHERE "bankCode" = $1 AND "runId" = $2', [closing.id.bankCode, closing.id.runId])).rows[0];
+    const finalEpisode = (await pool!.query('SELECT "consumerAttemptState", "consumerLeaseExpiresAt" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [closing.id.bankCode])).rows[0];
+    expect(attempt).toMatchObject({ status: "authenticated", ownerToken: null, leaseExpiresAt: null, generation: String(closing.owner.generation + 1n) });
+    if (closed.rowCount === 1) expect(finalEpisode).toBeUndefined();
+    else expect(finalEpisode).toEqual({ consumerAttemptState: "resolved", consumerLeaseExpiresAt: null });
   });
 
   it.each([
