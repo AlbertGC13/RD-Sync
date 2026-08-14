@@ -99,6 +99,7 @@ model Bank {
   bankCredential     BankCredential?
   autoLoginConfig    BankAutoLoginConfig?
   adapterConfig      BankAdapterConfig?
+  sessionAuthenticationAttempts BankSessionAuthenticationAttempt[]
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
 }
@@ -186,6 +187,29 @@ model BankSessionExpiryEpisode {
   terminalFailureReconciledAt  DateTime?
   createdAt                    DateTime @default(now())
   updatedAt                    DateTime @updatedAt
+}
+
+// Independent durable login-attempt fencing state.
+model BankSessionAuthenticationAttempt {
+  bankCode         String
+  bank             Bank     @relation(fields: [bankCode], references: [code], onDelete: Restrict, onUpdate: Restrict)
+  runId            String
+  attemptId        String
+  status           String   @default("active")
+  interactionPhase String   @default("no_credential_interaction")
+  failureClass     String?
+  operatorReason   String?
+  retryCount       Int      @default(0)
+  ownerToken       String?
+  generation       BigInt   @default(0)
+  leaseExpiresAt   DateTime?
+  terminalAt       DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@id([bankCode, runId, attemptId])
+  @@unique([bankCode, runId])
+  @@index([status, leaseExpiresAt])
 }
 
 // Durable resolution evidence survives deletion of its ephemeral expiry episode.
