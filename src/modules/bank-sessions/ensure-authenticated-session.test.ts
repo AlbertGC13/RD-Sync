@@ -28,6 +28,9 @@ function setup(overrides: Partial<AuthenticatedSessionCoordinatorDependencies> =
   return { attempts, probe, resolver, dependencies: { attempts, probe, completion: { mode: "attempt_only" }, ...overrides } as AuthenticatedSessionCoordinatorDependencies };
 }
 function coordinate(dependencies: AuthenticatedSessionCoordinatorDependencies, input = {}) { return coordinateAuthenticatedSessionState({ identity, ownerToken: "caller-owner", leaseDurationMs: 1_000, ...input }, dependencies); }
+function expectNoDurableMutation(attempts: ReturnType<typeof setup>["attempts"], resolver: ReturnType<typeof setup>["resolver"]) {
+  expect(attempts.getOrCreate).not.toHaveBeenCalled(); expect(attempts.acquireLease).not.toHaveBeenCalled(); expect(attempts.reconcileExpiredLease).not.toHaveBeenCalled(); expect(attempts.completeAuthenticated).not.toHaveBeenCalled(); expect(resolver.resolveObservedRestoration).not.toHaveBeenCalled();
+}
 
 describe("coordinateAuthenticatedSessionState", () => {
   it.each([{ identity: { ...identity, bankCode: " " } }, { ownerToken: " " }, { leaseDurationMs: 0 }, { leaseDurationMs: 1.5 }])("rejects invalid durable input without dependencies: %#", async (input) => {
@@ -41,11 +44,11 @@ describe("coordinateAuthenticatedSessionState", () => {
     await expect(coordinate(dependencies, { signal: controller.signal })).resolves.toEqual({ status: "cancelled" }); expect(attempts.getOrCreate).not.toHaveBeenCalled();
   });
   it("maps terminal records without probing", async () => {
-    const { attempts, probe, dependencies } = setup(); attempts.getOrCreate.mockResolvedValueOnce({ status: "found", record: authenticated() });
+    const { attempts, probe, dependencies } = setup(); attempts.findExact.mockResolvedValueOnce({ status: "found", record: authenticated() });
     await expect(coordinate(dependencies)).resolves.toEqual({ status: "authenticated", source: "existing" }); expect(probe.observe).not.toHaveBeenCalled();
   });
   it.each(["temporary_authentication_problem", "protected_authentication_step_detected", "bank_login_configuration_requires_review", "authentication_attempt_requires_review"] as const)("maps durable failure %s safely", async (reason) => {
-    const { attempts, dependencies } = setup(); attempts.getOrCreate.mockResolvedValueOnce({ status: "found", record: failed(reason) });
+    const { attempts, dependencies } = setup(); attempts.findExact.mockResolvedValueOnce({ status: "found", record: failed(reason) });
     await expect(coordinate(dependencies)).resolves.toEqual({ status: "needs_operator_action", reason });
   });
   it("hides identity-conflict attempt IDs", async () => {
@@ -53,24 +56,39 @@ describe("coordinateAuthenticatedSessionState", () => {
     const result = await coordinate(dependencies); expect(result).toEqual({ status: "needs_operator_action", reason: "identity_conflict" }); expect(JSON.stringify(result)).not.toContain("conflicting-attempt-id");
   });
   it("requires authentication without leasing or retrying when unowned probe is unauthenticated", async () => {
-    const { attempts, probe, dependencies } = setup(); probe.observe.mockResolvedValueOnce({ status: "unauthenticated" });
-    await expect(coordinate(dependencies)).resolves.toEqual({ status: "authentication_required" }); expect(attempts.acquireLease).not.toHaveBeenCalled(); expect("claimRetry" in attempts).toBe(false);
+    const { attempts, probe, resolver, dependencies } = setup(); probe.observe.mockResolvedValueOnce({ status: "unauthenticated" });
+    await expect(coordinate(dependencies)).resolves.toEqual({ status: "authentication_required" }); expectNoDurableMutation(attempts, resolver); expect("claimRetry" in attempts).toBe(false);
   });
   it.each(["unavailable", "throws"] as const)("maps probe %s to a safe retry", async (outcome) => {
-    const { probe, dependencies } = setup();
+    const { attempts, probe, resolver, dependencies } = setup();
     if (outcome === "throws") probe.observe.mockRejectedValueOnce(new Error("internal")); else probe.observe.mockResolvedValueOnce({ status: "unavailable" });
-    await expect(coordinate(dependencies)).resolves.toEqual({ status: "retry_later", reason: "session_probe_unavailable" });
+    await expect(coordinate(dependencies)).resolves.toEqual({ status: "retry_later", reason: "session_probe_unavailable" }); expectNoDurableMutation(attempts, resolver);
   });
   it("cancels when the caller aborts during probing", async () => {
-    const controller = new AbortController(); const { probe, attempts, dependencies } = setup(); probe.observe.mockImplementationOnce(async () => { controller.abort(); return { status: "authenticated", observedAt: new Date() }; });
-    await expect(coordinate(dependencies, { signal: controller.signal })).resolves.toEqual({ status: "cancelled" }); expect(attempts.acquireLease).not.toHaveBeenCalled();
+    const controller = new AbortController(); const { probe, attempts, resolver, dependencies } = setup(); probe.observe.mockImplementationOnce(async () => { controller.abort(); return { status: "authenticated", observedAt: new Date() }; });
+    await expect(coordinate(dependencies, { signal: controller.signal })).resolves.toEqual({ status: "cancelled" }); expectNoDurableMutation(attempts, resolver);
+  });
+  it.each([
+    { label: "created active", created: { status: "created", record: active() }, expected: { status: "authenticated", source: "observed" } },
+    { label: "concurrently active", created: { status: "found", record: active() }, expected: { status: "authenticated", source: "observed" } },
+    { label: "concurrently authenticated", created: { status: "found", record: authenticated() }, expected: { status: "authenticated", source: "existing" } },
+    { label: "concurrently failed", created: { status: "found", record: failed("temporary_authentication_problem") }, expected: { status: "needs_operator_action", reason: "temporary_authentication_problem" } },
+    { label: "identity conflict", created: { status: "identity_conflict", existingAttemptId: "other" }, expected: { status: "needs_operator_action", reason: "identity_conflict" } },
+  ])("probes before getOrCreate and safely maps missing $label races", async ({ created, expected }) => {
+    const { attempts, probe, dependencies } = setup(); attempts.getOrCreate.mockResolvedValueOnce(created);
+    await expect(coordinate(dependencies)).resolves.toEqual(expected); expect(probe.observe.mock.invocationCallOrder[0]).toBeLessThan(attempts.getOrCreate.mock.invocationCallOrder[0]);
+  });
+  it("classifies a concurrently owned getOrCreate result without a second probe", async () => {
+    const { attempts, probe, dependencies } = setup(); attempts.getOrCreate.mockResolvedValueOnce({ status: "found", record: owned() }); attempts.acquireLease.mockResolvedValueOnce({ status: "lease_held", record: owned() });
+    await expect(coordinate(dependencies)).resolves.toEqual({ status: "in_progress", reason: "lease_held" }); expect(probe.observe).toHaveBeenCalledTimes(1);
   });
   it("classifies an owned active attempt from the lease path without probing", async () => {
-    const { attempts, probe, dependencies } = setup(); attempts.getOrCreate.mockResolvedValueOnce({ status: "found", record: owned() }); attempts.acquireLease.mockResolvedValueOnce({ status: "lease_held", record: owned() });
+    const { attempts, probe, dependencies } = setup(); attempts.findExact.mockResolvedValueOnce({ status: "found", record: owned() }); attempts.acquireLease.mockResolvedValueOnce({ status: "lease_held", record: owned() });
     await expect(coordinate(dependencies)).resolves.toEqual({ status: "in_progress", reason: "lease_held" }); expect(probe.observe).not.toHaveBeenCalled();
   });
   it("closes observed authentication in attempt-only mode", async () => {
-    const { attempts, dependencies } = setup(); await expect(coordinate(dependencies)).resolves.toEqual({ status: "authenticated", source: "observed" }); expect(attempts.completeAuthenticated).toHaveBeenCalledWith({ owner });
+    const { attempts, dependencies } = setup(); attempts.findExact.mockResolvedValueOnce({ status: "found", record: active() });
+    await expect(coordinate(dependencies)).resolves.toEqual({ status: "authenticated", source: "observed" }); expect(attempts.getOrCreate).not.toHaveBeenCalled(); expect(attempts.completeAuthenticated).toHaveBeenCalledWith({ owner });
   });
   it("allows only the lease owner to complete concurrent observations", async () => {
     const { attempts, dependencies } = setup(); attempts.acquireLease.mockResolvedValueOnce({ status: "lease_acquired", owner, record: owned() }).mockResolvedValueOnce({ status: "lease_held", record: owned() });

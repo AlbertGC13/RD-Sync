@@ -51,12 +51,25 @@ export async function coordinateAuthenticatedSessionState(
   if (![identity?.bankCode, identity?.runId, identity?.attemptId, ownerToken].every(isNonblank) || !Number.isSafeInteger(leaseDurationMs) || leaseDurationMs <= 0) return { status: "invalid_request" };
   if (signal?.aborted) return { status: "cancelled" };
 
-  const created = await attempts.getOrCreate({ identity });
-  if (created.status === "identity_conflict") return { status: "needs_operator_action", reason: "identity_conflict" };
-  const existing = terminal(created.record);
-  if (existing) return existing;
-
-  let shouldProbe = created.record.ownerToken === null;
+  const exact = await attempts.findExact({ identity });
+  let shouldProbe: boolean;
+  if (exact.status === "found") {
+    const existing = terminal(exact.record);
+    if (existing) return existing;
+    shouldProbe = exact.record.ownerToken === null;
+  } else {
+    let observation: Awaited<ReturnType<AuthenticatedSessionProbe["observe"]>>;
+    try { observation = await probe.observe({ bankCode: identity.bankCode, signal }); }
+    catch { return { status: "retry_later", reason: "session_probe_unavailable" }; }
+    if (signal?.aborted) return { status: "cancelled" };
+    if (observation.status === "unauthenticated") return { status: "authentication_required" };
+    if (observation.status === "unavailable") return { status: "retry_later", reason: "session_probe_unavailable" };
+    const created = await attempts.getOrCreate({ identity });
+    if (created.status === "identity_conflict") return { status: "needs_operator_action", reason: "identity_conflict" };
+    const existing = terminal(created.record);
+    if (existing) return existing;
+    shouldProbe = false;
+  }
   let reconciled = false;
   while (true) {
     if (shouldProbe) {
