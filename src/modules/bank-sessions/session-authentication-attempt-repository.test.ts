@@ -12,7 +12,10 @@ import {
   type SessionAuthenticationAttemptNotAppliedResult,
   type SessionAuthenticationAttemptRepository,
   type SessionAuthenticationAttemptRow,
+  type ObservedRestorationResolver,
+  type ResolveObservedRestorationResult,
 } from "./session-authentication-attempt-repository";
+import { PrismaBankSessionAuthenticationAttemptRepository } from "../persistence/prisma-bank-session-authentication-attempt-repository";
 
 const base: SessionAuthenticationAttemptRow = {
   bankCode: "popular", runId: "run-1", attemptId: "attempt-1", status: "active",
@@ -68,10 +71,23 @@ describe("parseSessionAuthenticationAttemptRecord", () => {
   });
 });
 
+describe("ObservedRestorationResolver", () => {
+  it.each([
+    { identity: { bankCode: " ", runId: "run", attemptId: "attempt" }, ownerToken: "owner", generation: 0n },
+    { identity: { bankCode: "bank", runId: "run", attemptId: "attempt" }, ownerToken: " ", generation: 0n },
+    { identity: { bankCode: "bank", runId: "run", attemptId: "attempt" }, ownerToken: "owner", generation: -1n },
+  ])("rejects invalid owner input", async (owner) => {
+    const resolver = new PrismaBankSessionAuthenticationAttemptRepository({} as never);
+    await expect(resolver.resolveObservedRestoration(owner)).rejects.toThrow();
+  });
+});
+
 type RepositoryMethods = Pick<SessionAuthenticationAttemptRepository,
   "getOrCreate" | "findExact" | "acquireLease" | "renewLease" | "beginCredentialInteraction" |
   "recordSubmitBarrier" | "claimRetry" | "completeAuthenticated" | "completeFailed" | "reconcileExpiredLease">;
 void (null as unknown as RepositoryMethods);
+type ResolverMethods = Pick<ObservedRestorationResolver, "resolveObservedRestoration">;
+void (null as unknown as ResolverMethods);
 declare const repository: SessionAuthenticationAttemptRepository;
 if (false) {
   // @ts-expect-error The generic repository operation is intentionally unavailable.
@@ -108,6 +124,13 @@ const reconcileExpiredLeaseResults: readonly ReconcileExpiredLeaseResult[] = [
   { status: "missing" }, { status: "not_applied" },
 ];
 const notApplied: SessionAuthenticationAttemptNotAppliedResult = { status: "not_applied" };
+const observedRestorationResults: readonly ResolveObservedRestorationResult[] = [
+  { status: "resolved", evidence: { authenticatedAt: new Date("2026-08-13T01:00:00.000Z") } },
+  { status: "already_resolved" }, { status: "missing", missing: "authentication_attempt" },
+  { status: "missing", missing: "expiry_episode" }, { status: "identity_mismatch" },
+  { status: "stale_owner" }, { status: "lease_expired" }, { status: "active_mutation_owner" },
+  { status: "episode_not_resolvable" }, { status: "terminal_conflict" }, { status: "not_applied" },
+];
 const getOrCreateResults: readonly GetOrCreateSessionAuthenticationAttemptResult[] = [
   { status: "created", record: null as unknown as never },
   { status: "found", record: null as unknown as never },
@@ -127,5 +150,9 @@ if (false) {
   void ({ owner, failureClass: "transient_pre_interaction", operatorReason: "temporary_authentication_problem", terminalAt: new Date() } satisfies CompleteFailedInput);
   // @ts-expect-error Lease reconciliation time comes from PostgreSQL.
   void ({ identity: owner.identity, reconciledAt: new Date() } satisfies ReconcileExpiredLeaseInput);
+  // @ts-expect-error The resolver owns no ordinary repository operations.
+  void (null as unknown as ObservedRestorationResolver).completeAuthenticated;
+  // @ts-expect-error Resolution evidence never exposes expiry ownership.
+  void (observedRestorationResults[0] as Extract<ResolveObservedRestorationResult, { status: "resolved" }>).evidence.consumerClaimToken;
 }
-void [submitBarrierResults, retryResults, acquireLeaseResults, completeAuthenticatedInput, completeFailedInput, reconcileExpiredLeaseInput, reconcileExpiredLeaseResults, notApplied, getOrCreateResults];
+void [submitBarrierResults, retryResults, acquireLeaseResults, completeAuthenticatedInput, completeFailedInput, reconcileExpiredLeaseInput, reconcileExpiredLeaseResults, notApplied, observedRestorationResults, getOrCreateResults];

@@ -52,6 +52,13 @@ export type ClaimRetryInput = Readonly<{ owner: SessionAuthenticationLeaseOwner 
 export type CompleteAuthenticatedInput = Readonly<{ owner: SessionAuthenticationLeaseOwner }>;
 export type CompleteFailedInput = Readonly<{ owner: SessionAuthenticationLeaseOwner } & SessionAuthenticationFailurePair>;
 export type ReconcileExpiredLeaseInput = Readonly<{ identity: SessionAuthenticationAttemptIdentity }>;
+export type ObservedRestorationEvidence = Readonly<{ authenticatedAt: Date }>;
+export type ResolveObservedRestorationResult =
+  | Readonly<{ status: "resolved"; evidence: ObservedRestorationEvidence }>
+  | Readonly<{ status: "already_resolved" }>
+  | Readonly<{ status: "missing"; missing: "authentication_attempt" | "expiry_episode" }>
+  | Readonly<{ status: "identity_mismatch" | "stale_owner" | "lease_expired" | "active_mutation_owner" | "episode_not_resolvable" | "terminal_conflict" }>
+  | SessionAuthenticationAttemptNotAppliedResult;
 
 export type GetOrCreateSessionAuthenticationAttemptResult =
   | Readonly<{ status: "created"; record: SessionAuthenticationAttemptRecord }>
@@ -139,6 +146,10 @@ export interface SessionAuthenticationAttemptRepository {
   completeAuthenticated(input: CompleteAuthenticatedInput): Promise<CompleteAuthenticatedResult>;
   completeFailed(input: CompleteFailedInput): Promise<CompleteFailedResult>;
   reconcileExpiredLease(input: ReconcileExpiredLeaseInput): Promise<ReconcileExpiredLeaseResult>;
+}
+/** Atomic, production-inert capability for durable observed-restoration evidence. */
+export interface ObservedRestorationResolver {
+  resolveObservedRestoration(owner: SessionAuthenticationLeaseOwner): Promise<ResolveObservedRestorationResult>;
 }
 
 const phases: readonly CredentialInteractionPhase[] = ["no_credential_interaction", "credentials_may_have_reached_portal", "submit_may_have_been_dispatched"];
