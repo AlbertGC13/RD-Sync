@@ -3,6 +3,7 @@ import type {
   SessionAuthenticationAttemptRecord,
   SessionAuthenticationAttemptRepository,
 } from "./session-authentication-attempt-repository";
+import { parseSessionAuthenticationAttemptRecord } from "./session-authentication-attempt-repository";
 import type { SessionAuthenticationAttemptIdentity, SessionAuthenticationOperatorReason } from "./session-authentication-attempt";
 import { acquireAuthenticationMutationAuthority } from "./authentication-mutation-authority";
 import type { AuthenticationMutationAuthority } from "./authentication-mutation-authority";
@@ -33,7 +34,9 @@ export type AuthenticatedSessionState =
 const isNonblank = (value: unknown): value is string => typeof value === "string" && /\S/.test(value);
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 const isIdentity = (value: unknown): value is SessionAuthenticationAttemptIdentity => isObject(value) && [value.bankCode, value.runId, value.attemptId].every(isNonblank);
-const isAttempt = (value: unknown): value is SessionAuthenticationAttemptRecord => isObject(value) && (value.status === "active" ? value.ownerToken === null || typeof value.ownerToken === "string" : value.status === "authenticated" || value.status === "failed" && typeof value.operatorReason === "string");
+const parseAttempt = (value: unknown): SessionAuthenticationAttemptRecord | null => !isObject(value) || !isObject(value.identity) ? null : parseSessionAuthenticationAttemptRecord({ bankCode: value.identity.bankCode, runId: value.identity.runId, attemptId: value.identity.attemptId, status: value.status, interactionPhase: value.interactionPhase, failureClass: value.failureClass, operatorReason: value.operatorReason, retryCount: value.retryCount, ownerToken: value.ownerToken, generation: value.generation, leaseExpiresAt: value.leaseExpiresAt, terminalAt: value.terminalAt, createdAt: value.createdAt, updatedAt: value.updatedAt });
+const isAttempt = (value: unknown): value is SessionAuthenticationAttemptRecord => parseAttempt(value) !== null;
+const isBound = (owner: { identity: SessionAuthenticationAttemptIdentity; ownerToken: string; generation: bigint }, record: SessionAuthenticationAttemptRecord, identity: SessionAuthenticationAttemptIdentity, ownerToken: string) => owner.generation >= 0n && owner.identity.bankCode === identity.bankCode && owner.identity.runId === identity.runId && owner.identity.attemptId === identity.attemptId && owner.ownerToken === ownerToken && record.status === "active" && record.identity.bankCode === identity.bankCode && record.identity.runId === identity.runId && record.identity.attemptId === identity.attemptId && record.ownerToken === ownerToken && record.generation === owner.generation && record.leaseExpiresAt instanceof Date;
 const isExact = (value: unknown): value is Awaited<ReturnType<Attempts["findExact"]>> => isObject(value) && (value.status === "missing" || value.status === "found" && isAttempt(value.record));
 const isCreated = (value: unknown): value is Awaited<ReturnType<Attempts["getOrCreate"]>> => isObject(value) && (value.status === "identity_conflict" && typeof value.existingAttemptId === "string" || (value.status === "created" || value.status === "found") && isAttempt(value.record));
 const isLeased = (value: unknown): value is Awaited<ReturnType<Attempts["acquireLease"]>> => isObject(value) && (value.status === "missing" || value.status === "not_applied" || ((value.status === "lease_held" || value.status === "reconciliation_required" || value.status === "terminal") && isAttempt(value.record)) || value.status === "lease_acquired" && isObject(value.owner) && isIdentity(value.owner.identity) && typeof value.owner.ownerToken === "string" && typeof value.owner.generation === "bigint" && isAttempt(value.record));
@@ -120,6 +123,8 @@ export async function coordinateAuthenticatedSessionState(
       shouldProbe = true;
       continue;
     }
+
+    if (!isBound(leased.owner, leased.record, identity, ownerToken)) return ownershipChanged();
 
     if (completion.mode === "attempt_only") {
       let result: unknown;

@@ -207,6 +207,17 @@ describe("coordinateAuthenticatedSessionState", () => {
     }
   });
 
+  it("rejects partial active records and exact-binding mismatches before completion", async () => {
+    for (const record of [{ ...active(), identity: {} }, { ...active(), generation: undefined }, { ...active(), generation: "1" }, { ...active(), createdAt: "now" }, { ...active(), ownerToken: "owner", leaseExpiresAt: null }]) {
+      const { attempts, dependencies } = setup(); attempts.findExact.mockResolvedValueOnce({ status: "found", record } as never);
+      await expect(coordinate(dependencies)).resolves.toEqual({ status: "retry_later", reason: "state_changed" }); expect(attempts.completeAuthenticated).not.toHaveBeenCalled();
+    }
+    for (const acquired of [{ owner: { ...owner, identity: { ...identity, attemptId: "other" } }, record: owned() }, { owner: { ...owner, ownerToken: "other" }, record: owned() }, { owner: { ...owner, generation: 2n }, record: owned() }, { owner, record: { ...owned(), identity: { ...identity, attemptId: "other" } } }, { owner, record: { ...owned(), ownerToken: "other" } }, { owner, record: { ...owned(), generation: 2n } }, { owner, record: authenticated() }]) {
+      const { attempts, dependencies } = setup(); attempts.findExact.mockResolvedValueOnce({ status: "found", record: owned() }); attempts.acquireLease.mockResolvedValueOnce({ status: "lease_acquired", ...acquired } as never);
+      await expect(coordinate(dependencies)).resolves.toEqual({ status: "retry_later", reason: "ownership_changed" }); expect(attempts.completeAuthenticated).not.toHaveBeenCalled();
+    }
+  });
+
   it("issues at most one authority to concurrent unauthenticated coordinators", async () => {
     const { attempts, probe, dependencies } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" }); attempts.acquireLease.mockResolvedValueOnce({ status: "lease_acquired", owner, record: owned() }).mockResolvedValueOnce({ status: "lease_held", record: owned() });
     const results = await Promise.all([coordinate(dependencies), coordinate(dependencies)]);

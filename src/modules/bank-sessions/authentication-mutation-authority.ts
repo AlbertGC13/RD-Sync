@@ -4,6 +4,7 @@ import type {
   SessionAuthenticationFailurePair,
   SessionAuthenticationLeaseOwner,
 } from "./session-authentication-attempt-repository";
+import { parseSessionAuthenticationAttemptRecord } from "./session-authentication-attempt-repository";
 import type { SessionAuthenticationAttemptIdentity } from "./session-authentication-attempt";
 
 declare const authenticationMutationAuthorityBrand: unique symbol;
@@ -37,7 +38,8 @@ const completionInvalidSequence = (): MutationAuthorityCompletionResult => ({ st
 const completionLost = (): MutationAuthorityCompletionResult => ({ status: "ownership_lost" });
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 const isIdentity = (value: unknown): value is SessionAuthenticationAttemptIdentity => isObject(value) && [value.bankCode, value.runId, value.attemptId].every((part) => typeof part === "string" && /\S/.test(part));
-const isAttempt = (value: unknown): value is SessionAuthenticationAttemptRecord => isObject(value) && isIdentity(value.identity) && typeof value.generation === "bigint" && (value.status === "active" ? value.ownerToken === null || typeof value.ownerToken === "string" : value.status === "authenticated" || (value.status === "failed" && typeof value.operatorReason === "string"));
+const parseAttempt = (value: unknown): SessionAuthenticationAttemptRecord | null => !isObject(value) || !isObject(value.identity) ? null : parseSessionAuthenticationAttemptRecord({ bankCode: value.identity.bankCode, runId: value.identity.runId, attemptId: value.identity.attemptId, status: value.status, interactionPhase: value.interactionPhase, failureClass: value.failureClass, operatorReason: value.operatorReason, retryCount: value.retryCount, ownerToken: value.ownerToken, generation: value.generation, leaseExpiresAt: value.leaseExpiresAt, terminalAt: value.terminalAt, createdAt: value.createdAt, updatedAt: value.updatedAt });
+const isAttempt = (value: unknown): value is SessionAuthenticationAttemptRecord => parseAttempt(value) !== null;
 const isProbe = (value: unknown): value is Readonly<{ status: "authenticated"; observedAt: Date }> | Readonly<{ status: "unauthenticated" }> | Readonly<{ status: "unavailable" }> => isObject(value) && (value.status === "unauthenticated" || value.status === "unavailable" || value.status === "authenticated" && value.observedAt instanceof Date && !Number.isNaN(value.observedAt.getTime()));
 const isExact = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["findExact"]>> => isObject(value) && (value.status === "missing" || value.status === "found" && isAttempt(value.record));
 const isCreated = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["getOrCreate"]>> => isObject(value) && (value.status === "identity_conflict" && typeof value.existingAttemptId === "string" || (value.status === "created" || value.status === "found") && isAttempt(value.record));
@@ -51,7 +53,7 @@ const terminal = (record: SessionAuthenticationAttemptRecord): AuthorityAcquisit
   return null;
 };
 const sameOwner = (owner: SessionAuthenticationLeaseOwner, record: SessionAuthenticationAttemptRecord, identity: SessionAuthenticationAttemptIdentity, ownerToken: string) =>
-  owner.identity.bankCode === identity.bankCode && owner.identity.runId === identity.runId && owner.identity.attemptId === identity.attemptId && owner.ownerToken === ownerToken && record.status === "active" && record.identity.bankCode === identity.bankCode && record.identity.runId === identity.runId && record.identity.attemptId === identity.attemptId && record.ownerToken === ownerToken && record.generation === owner.generation;
+  owner.generation >= 0n && owner.identity.bankCode === identity.bankCode && owner.identity.runId === identity.runId && owner.identity.attemptId === identity.attemptId && owner.ownerToken === ownerToken && record.status === "active" && record.identity.bankCode === identity.bankCode && record.identity.runId === identity.runId && record.identity.attemptId === identity.attemptId && record.ownerToken === ownerToken && record.generation === owner.generation && record.leaseExpiresAt instanceof Date;
 
 /** Full probe-and-fenced-lease integration; it is the only authority mint path. */
 export async function acquireAuthenticationMutationAuthority(input: Readonly<{
