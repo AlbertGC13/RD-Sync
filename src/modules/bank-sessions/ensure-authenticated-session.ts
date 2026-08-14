@@ -4,6 +4,8 @@ import type {
   SessionAuthenticationAttemptRepository,
 } from "./session-authentication-attempt-repository";
 import type { SessionAuthenticationAttemptIdentity, SessionAuthenticationOperatorReason } from "./session-authentication-attempt";
+import { acquireAuthenticationMutationAuthority } from "./authentication-mutation-authority";
+import type { AuthenticationMutationAuthority } from "./authentication-mutation-authority";
 
 export interface AuthenticatedSessionProbe {
   observe(input: Readonly<{ bankCode: string; signal?: AbortSignal }>): Promise<
@@ -13,7 +15,7 @@ export interface AuthenticatedSessionProbe {
   >;
 }
 
-type Attempts = Pick<SessionAuthenticationAttemptRepository, "getOrCreate" | "findExact" | "acquireLease" | "reconcileExpiredLease" | "completeAuthenticated">;
+type Attempts = SessionAuthenticationAttemptRepository;
 export type AuthenticatedSessionCompletion =
   | Readonly<{ mode: "attempt_only" }>
   | Readonly<{ mode: "expiry_restoration"; resolver: ObservedRestorationResolver }>;
@@ -21,7 +23,7 @@ export type AuthenticatedSessionCoordinatorDependencies = Readonly<{ attempts: A
 export type CoordinateAuthenticatedSessionStateInput = Readonly<{ identity: SessionAuthenticationAttemptIdentity; ownerToken: string; leaseDurationMs: number; signal?: AbortSignal }>;
 export type AuthenticatedSessionState =
   | Readonly<{ status: "authenticated"; source: "existing" | "observed" }>
-  | Readonly<{ status: "authentication_required" }>
+  | Readonly<{ status: "authentication_required"; authority: AuthenticationMutationAuthority }>
   | Readonly<{ status: "in_progress"; reason: "lease_held" | "active_mutation_owner" }>
   | Readonly<{ status: "retry_later"; reason: "session_probe_unavailable" | "ownership_changed" | "state_changed" }>
   | Readonly<{ status: "needs_operator_action"; reason: SessionAuthenticationOperatorReason | "identity_conflict" | "restoration_state_conflict" }>
@@ -62,7 +64,7 @@ export async function coordinateAuthenticatedSessionState(
     try { observation = await probe.observe({ bankCode: identity.bankCode, signal }); }
     catch { return { status: "retry_later", reason: "session_probe_unavailable" }; }
     if (signal?.aborted) return { status: "cancelled" };
-    if (observation.status === "unauthenticated") return { status: "authentication_required" };
+    if (observation.status === "unauthenticated") return acquireAuthenticationMutationAuthority({ identity, ownerToken, leaseDurationMs, signal, repository: attempts, probe });
     if (observation.status === "unavailable") return { status: "retry_later", reason: "session_probe_unavailable" };
     const created = await attempts.getOrCreate({ identity });
     if (created.status === "identity_conflict") return { status: "needs_operator_action", reason: "identity_conflict" };
@@ -77,7 +79,7 @@ export async function coordinateAuthenticatedSessionState(
       try { observation = await probe.observe({ bankCode: identity.bankCode, signal }); }
       catch { return { status: "retry_later", reason: "session_probe_unavailable" }; }
       if (signal?.aborted) return { status: "cancelled" };
-      if (observation.status === "unauthenticated") return { status: "authentication_required" };
+      if (observation.status === "unauthenticated") return acquireAuthenticationMutationAuthority({ identity, ownerToken, leaseDurationMs, signal, repository: attempts, probe });
       if (observation.status === "unavailable") return { status: "retry_later", reason: "session_probe_unavailable" };
     }
 
