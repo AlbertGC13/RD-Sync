@@ -125,6 +125,41 @@ describe("executeDurablyFencedAutoLogin", () => {
     expect(result).toMatchObject({ status: "blocked", reason: "durable_state_changed" });
   });
 
+  it("keeps a begin ownership denial sticky when a strategy catches it and later fills", async () => {
+    const events: string[] = [];
+    const result = await execute(events, async (p) => { try { await p.fill("user", "alice"); } catch {} await p.fill("later", "alice"); }, { begin: "stale_owner" });
+    expect(events).toEqual(["begin"]);
+    expect(result).toMatchObject({ status: "blocked", reason: "ownership_lost", interactionPhase: "no_credential_interaction" });
+  });
+
+  it("keeps denial sticky across empty cleanup before a later non-empty fill", async () => {
+    const events: string[] = [];
+    const result = await execute(events, async (p) => { try { await p.fill("user", "alice"); } catch { await p.fill("user", ""); } await p.fill("later", "alice"); }, { begin: "stale_owner" });
+    expect(events).toEqual(["begin", "fill:user:"]);
+    expect(result).toMatchObject({ status: "blocked", reason: "ownership_lost", interactionPhase: "no_credential_interaction" });
+  });
+
+  it("keeps a fill denial sticky before a later click", async () => {
+    const events: string[] = [];
+    const result = await execute(events, async (p) => { try { await p.fill("user", "alice"); } catch {} await p.click("submit"); }, { begin: "stale_owner" });
+    expect(events).toEqual(["begin"]);
+    expect(result).toMatchObject({ status: "blocked", reason: "ownership_lost" });
+  });
+
+  it("keeps a barrier denial sticky when a strategy catches it and clicks again", async () => {
+    const events: string[] = [];
+    const result = await execute(events, async (p) => { try { await p.click("first"); } catch {} await p.click("second"); }, { barrier: "already_recorded" });
+    expect(events).toEqual(["barrier"]);
+    expect(result).toMatchObject({ status: "blocked", reason: "durable_state_changed" });
+  });
+
+  it("keeps a repository failure denial sticky when a strategy later fills", async () => {
+    const events: string[] = [];
+    const result = await executeDurablyFencedAutoLogin({ strategy: strategy(async (p) => { try { await p.fill("user", "alice"); } catch {} await p.fill("later", "alice"); }), credential, page: page(events), attempts: { ...attempts(events), beginCredentialInteraction: async () => { events.push("begin"); throw new Error("unavailable"); } }, owner, leaseDurationMs: 1 });
+    expect(events).toEqual(["begin"]);
+    expect(result).toMatchObject({ status: "blocked", reason: "persistence_unavailable" });
+  });
+
   it("allows empty cleanup best-effort without durable calls and preserves a primary denial", async () => {
     const events: string[] = [];
     const result = await execute(events, async (p) => { try { await p.fill("user", "alice"); } catch { await p.fill("user", ""); } }, { begin: "stale_owner" });

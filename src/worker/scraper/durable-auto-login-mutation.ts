@@ -46,6 +46,7 @@ export async function executeDurablyFencedAutoLogin(input: Readonly<{
     protectedStateDetectionWindowMs: input.page.protectedStateDetectionWindowMs,
     async fill(selector, value) {
       if (!value) return input.page.fill(selector, value);
+      if (denial) throw new Error("Durable auto-login mutation denied");
       try {
         const result = phase === "no_credential_interaction"
           ? await input.attempts.beginCredentialInteraction({ owner: input.owner })
@@ -60,6 +61,7 @@ export async function executeDurablyFencedAutoLogin(input: Readonly<{
       return input.page.fill(selector, value);
     },
     async click(selector) {
+      if (denial) throw new Error("Durable auto-login mutation denied");
       try {
         const result = await input.attempts.recordSubmitBarrier({ owner: input.owner });
         if (result.status !== "recorded") deny(blockFor(result.status));
