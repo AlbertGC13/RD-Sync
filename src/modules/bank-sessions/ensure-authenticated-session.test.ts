@@ -187,6 +187,26 @@ describe("coordinateAuthenticatedSessionState", () => {
     const { attempts, dependencies, probe } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" }); const result = await coordinate(dependencies); if (result.status !== "authentication_required") throw new Error("expected authority"); const claimed = claimAuthenticationMutationAuthority(result.authority); if (claimed.status !== "claimed") throw new Error("expected claim"); await claimed.authority.beginCredentialInteraction(); let release!: () => void; attempts.recordSubmitBarrier.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({ status: "recorded", record: owned() }); })); const barrier = claimed.authority.recordSubmitBarrier(); await expect(claimed.authority.recordSubmitBarrier()).resolves.toEqual({ status: "invalid_sequence" }); release(); await expect(barrier).resolves.toEqual({ status: "authorized" }); expect(attempts.recordSubmitBarrier).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["findExact", "probe", "getOrCreate", "acquireLease", "reconcileExpiredLease"] as const)("fails closed when %s fulfills malformed acquisition data", async (dependency) => {
+    for (const value of [undefined, null, {}, { status: "unknown" }, { status: "found" }]) {
+      const { attempts, probe, dependencies } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" });
+      if (dependency === "findExact") attempts.findExact.mockResolvedValueOnce(value as never);
+      if (dependency === "probe") probe.observe.mockResolvedValueOnce(value as never);
+      if (dependency === "getOrCreate") attempts.getOrCreate.mockResolvedValueOnce(value as never);
+      if (dependency === "acquireLease") attempts.acquireLease.mockResolvedValueOnce(value as never);
+      if (dependency === "reconcileExpiredLease") { attempts.acquireLease.mockResolvedValueOnce({ status: "reconciliation_required", record: owned() }); attempts.reconcileExpiredLease.mockResolvedValueOnce(value as never); }
+      const result = await coordinate(dependencies);
+      expect(result.status).toBe(dependency === "probe" ? "retry_later" : "retry_later"); expect("authority" in result).toBe(false);
+    }
+  });
+
+  it("rejects acquired owner and record shapes without invoking the claimed facade", async () => {
+    for (const acquired of [{ status: "lease_acquired", owner: {}, record: owned() }, { status: "lease_acquired", owner, record: {} }, { status: "lease_acquired", owner: { ...owner, identity: {} }, record: owned() }]) {
+      const { attempts, probe, dependencies } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" }); attempts.acquireLease.mockResolvedValueOnce(acquired as never);
+      await expect(coordinate(dependencies)).resolves.toEqual({ status: "retry_later", reason: "state_changed" }); expect(attempts.beginCredentialInteraction).not.toHaveBeenCalled();
+    }
+  });
+
   it("issues at most one authority to concurrent unauthenticated coordinators", async () => {
     const { attempts, probe, dependencies } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" }); attempts.acquireLease.mockResolvedValueOnce({ status: "lease_acquired", owner, record: owned() }).mockResolvedValueOnce({ status: "lease_held", record: owned() });
     const results = await Promise.all([coordinate(dependencies), coordinate(dependencies)]);

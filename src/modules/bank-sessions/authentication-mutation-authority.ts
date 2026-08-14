@@ -35,6 +35,14 @@ const lost = (): MutationAuthorityResult => ({ status: "ownership_lost" });
 const completionUnavailable = (): MutationAuthorityCompletionResult => ({ status: "unavailable" });
 const completionInvalidSequence = (): MutationAuthorityCompletionResult => ({ status: "invalid_sequence" });
 const completionLost = (): MutationAuthorityCompletionResult => ({ status: "ownership_lost" });
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
+const isIdentity = (value: unknown): value is SessionAuthenticationAttemptIdentity => isObject(value) && [value.bankCode, value.runId, value.attemptId].every((part) => typeof part === "string" && /\S/.test(part));
+const isAttempt = (value: unknown): value is SessionAuthenticationAttemptRecord => isObject(value) && isIdentity(value.identity) && typeof value.generation === "bigint" && (value.status === "active" ? value.ownerToken === null || typeof value.ownerToken === "string" : value.status === "authenticated" || (value.status === "failed" && typeof value.operatorReason === "string"));
+const isProbe = (value: unknown): value is Readonly<{ status: "authenticated"; observedAt: Date }> | Readonly<{ status: "unauthenticated" }> | Readonly<{ status: "unavailable" }> => isObject(value) && (value.status === "unauthenticated" || value.status === "unavailable" || value.status === "authenticated" && value.observedAt instanceof Date && !Number.isNaN(value.observedAt.getTime()));
+const isExact = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["findExact"]>> => isObject(value) && (value.status === "missing" || value.status === "found" && isAttempt(value.record));
+const isCreated = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["getOrCreate"]>> => isObject(value) && (value.status === "identity_conflict" && typeof value.existingAttemptId === "string" || (value.status === "created" || value.status === "found") && isAttempt(value.record));
+const isLeased = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["acquireLease"]>> => isObject(value) && (value.status === "missing" || value.status === "not_applied" || ((value.status === "lease_held" || value.status === "reconciliation_required" || value.status === "terminal") && isAttempt(value.record)) || value.status === "lease_acquired" && isObject(value.owner) && isIdentity(value.owner.identity) && typeof value.owner.ownerToken === "string" && typeof value.owner.generation === "bigint" && isAttempt(value.record));
+const isReconciled = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["reconcileExpiredLease"]>> => isObject(value) && (value.status === "missing" || value.status === "not_applied" || ((value.status === "lease_reconciled" || value.status === "lease_still_active" || value.status === "unowned" || value.status === "terminal") && isAttempt(value.record)));
 const valid = (identity: SessionAuthenticationAttemptIdentity, ownerToken: string, leaseDurationMs: number) =>
   [identity?.bankCode, identity?.runId, identity?.attemptId, ownerToken].every((value) => typeof value === "string" && /\S/.test(value)) && Number.isSafeInteger(leaseDurationMs) && leaseDurationMs > 0;
 const terminal = (record: SessionAuthenticationAttemptRecord): AuthorityAcquisition | null => {
@@ -56,23 +64,27 @@ export async function acquireAuthenticationMutationAuthority(input: Readonly<{
   if (signal?.aborted) return { status: "cancelled" };
   let reconciled = false;
   while (true) {
-    let exact: Awaited<ReturnType<typeof repository.findExact>>;
+    let exact: unknown;
     try { exact = await repository.findExact({ identity }); } catch { return { status: "retry_later", reason: "state_changed" }; }
+    if (!isExact(exact)) return { status: "retry_later", reason: "state_changed" };
     if (exact.status === "found") {
       const resolved = terminal(exact.record); if (resolved) return resolved;
       if (exact.record.ownerToken !== null) return { status: "in_progress", reason: "lease_held" };
     }
-    let observation: Awaited<ReturnType<typeof probe.observe>>;
+    let observation: unknown;
     try { observation = await probe.observe({ bankCode: identity.bankCode, signal }); } catch { return { status: "retry_later", reason: "session_probe_unavailable" }; }
     if (signal?.aborted) return { status: "cancelled" };
+    if (!isProbe(observation)) return { status: "retry_later", reason: "session_probe_unavailable" };
     if (observation.status !== "unauthenticated") return { status: "retry_later", reason: observation.status === "unavailable" ? "session_probe_unavailable" : "state_changed" };
-    let created: Awaited<ReturnType<typeof repository.getOrCreate>>;
+    let created: unknown;
     try { created = await repository.getOrCreate({ identity }); } catch { return { status: "retry_later", reason: "state_changed" }; }
+    if (!isCreated(created)) return { status: "retry_later", reason: "state_changed" };
     if (created.status === "identity_conflict") return { status: "needs_operator_action", reason: "identity_conflict" };
     const resolved = terminal(created.record); if (resolved) return resolved;
     if (created.record.ownerToken !== null) return { status: "in_progress", reason: "lease_held" };
-    let leased: Awaited<ReturnType<typeof repository.acquireLease>>;
+    let leased: unknown;
     try { leased = await repository.acquireLease({ identity, ownerToken, leaseDurationMs }); } catch { return { status: "retry_later", reason: "state_changed" }; }
+    if (!isLeased(leased)) return { status: "retry_later", reason: "state_changed" };
     if (leased.status === "lease_held") return { status: "in_progress", reason: "lease_held" };
     if (leased.status === "terminal") return terminal(leased.record) ?? { status: "retry_later", reason: "state_changed" };
     if (leased.status === "missing" || leased.status === "not_applied") return { status: "retry_later", reason: "state_changed" };
@@ -80,7 +92,8 @@ export async function acquireAuthenticationMutationAuthority(input: Readonly<{
       if (reconciled) return { status: "retry_later", reason: "state_changed" };
       reconciled = true;
       try {
-        const result = await repository.reconcileExpiredLease({ identity });
+        const result: unknown = await repository.reconcileExpiredLease({ identity });
+        if (!isReconciled(result)) return { status: "retry_later", reason: "state_changed" };
         if (result.status === "terminal") return terminal(result.record) ?? { status: "retry_later", reason: "state_changed" };
         if (result.status === "lease_still_active") return { status: "in_progress", reason: "lease_held" };
         if (result.status === "missing" || result.status === "not_applied") return { status: "retry_later", reason: "state_changed" };
