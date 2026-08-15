@@ -36,15 +36,15 @@ const lost = (): MutationAuthorityResult => ({ status: "ownership_lost" });
 const completionUnavailable = (): MutationAuthorityCompletionResult => ({ status: "unavailable" });
 const completionInvalidSequence = (): MutationAuthorityCompletionResult => ({ status: "invalid_sequence" });
 const completionLost = (): MutationAuthorityCompletionResult => ({ status: "ownership_lost" });
-const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
-const isIdentity = (value: unknown): value is SessionAuthenticationAttemptIdentity => isObject(value) && [value.bankCode, value.runId, value.attemptId].every((part) => typeof part === "string" && /\S/.test(part));
-const parseAttempt = (value: unknown): SessionAuthenticationAttemptRecord | null => !isObject(value) || !isObject(value.identity) ? null : parseSessionAuthenticationAttemptRecord({ bankCode: value.identity.bankCode, runId: value.identity.runId, attemptId: value.identity.attemptId, status: value.status, interactionPhase: value.interactionPhase, failureClass: value.failureClass, operatorReason: value.operatorReason, retryCount: value.retryCount, ownerToken: value.ownerToken, generation: value.generation, leaseExpiresAt: value.leaseExpiresAt, terminalAt: value.terminalAt, createdAt: value.createdAt, updatedAt: value.updatedAt });
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
+const isIdentity = (value: unknown): value is SessionAuthenticationAttemptIdentity => isRecord(value) && [value.bankCode, value.runId, value.attemptId].every((part) => typeof part === "string" && /\S/.test(part));
+const parseAttempt = (value: unknown): SessionAuthenticationAttemptRecord | null => !isRecord(value) || !isRecord(value.identity) ? null : parseSessionAuthenticationAttemptRecord({ bankCode: value.identity.bankCode, runId: value.identity.runId, attemptId: value.identity.attemptId, status: value.status, interactionPhase: value.interactionPhase, failureClass: value.failureClass, operatorReason: value.operatorReason, retryCount: value.retryCount, ownerToken: value.ownerToken, generation: value.generation, leaseExpiresAt: value.leaseExpiresAt, terminalAt: value.terminalAt, createdAt: value.createdAt, updatedAt: value.updatedAt });
 const isAttempt = (value: unknown): value is SessionAuthenticationAttemptRecord => parseAttempt(value) !== null;
-const isProbe = (value: unknown): value is Readonly<{ status: "authenticated"; observedAt: Date }> | Readonly<{ status: "unauthenticated" }> | Readonly<{ status: "unavailable" }> => isObject(value) && (value.status === "unauthenticated" || value.status === "unavailable" || value.status === "authenticated" && value.observedAt instanceof Date && !Number.isNaN(value.observedAt.getTime()));
-const isExact = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["findExact"]>> => isObject(value) && (value.status === "missing" || value.status === "found" && isAttempt(value.record));
-const isCreated = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["getOrCreate"]>> => isObject(value) && (value.status === "identity_conflict" && typeof value.existingAttemptId === "string" || (value.status === "created" || value.status === "found") && isAttempt(value.record));
-const isLeased = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["acquireLease"]>> => isObject(value) && (value.status === "missing" || value.status === "not_applied" || ((value.status === "lease_held" || value.status === "reconciliation_required" || value.status === "terminal") && isAttempt(value.record)) || value.status === "lease_acquired" && isObject(value.owner) && isIdentity(value.owner.identity) && typeof value.owner.ownerToken === "string" && typeof value.owner.generation === "bigint" && isAttempt(value.record));
-const isReconciled = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["reconcileExpiredLease"]>> => isObject(value) && (value.status === "missing" || value.status === "not_applied" || ((value.status === "lease_reconciled" || value.status === "lease_still_active" || value.status === "unowned" || value.status === "terminal") && isAttempt(value.record)));
+const isProbe = (value: unknown): value is Readonly<{ status: "authenticated"; observedAt: Date }> | Readonly<{ status: "unauthenticated" }> | Readonly<{ status: "unavailable" }> => isRecord(value) && (value.status === "unauthenticated" || value.status === "unavailable" || value.status === "authenticated" && value.observedAt instanceof Date && !Number.isNaN(value.observedAt.getTime()));
+const isExact = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["findExact"]>> => isRecord(value) && (value.status === "missing" || value.status === "found" && isAttempt(value.record));
+const isCreated = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["getOrCreate"]>> => isRecord(value) && (value.status === "identity_conflict" && typeof value.existingAttemptId === "string" || (value.status === "created" || value.status === "found") && isAttempt(value.record));
+const isLeased = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["acquireLease"]>> => isRecord(value) && (value.status === "missing" || value.status === "not_applied" || ((value.status === "lease_held" || value.status === "reconciliation_required" || value.status === "terminal") && isAttempt(value.record)) || value.status === "lease_acquired" && isRecord(value.owner) && isIdentity(value.owner.identity) && typeof value.owner.ownerToken === "string" && typeof value.owner.generation === "bigint" && isAttempt(value.record));
+const isReconciled = (value: unknown): value is Awaited<ReturnType<SessionAuthenticationAttemptRepository["reconcileExpiredLease"]>> => isRecord(value) && (value.status === "missing" || value.status === "not_applied" || ((value.status === "lease_reconciled" || value.status === "lease_still_active" || value.status === "unowned" || value.status === "terminal") && isAttempt(value.record)));
 const valid = (identity: SessionAuthenticationAttemptIdentity, ownerToken: string, leaseDurationMs: number) =>
   [identity?.bankCode, identity?.runId, identity?.attemptId, ownerToken].every((value) => typeof value === "string" && /\S/.test(value)) && Number.isSafeInteger(leaseDurationMs) && leaseDurationMs > 0;
 const terminal = (record: SessionAuthenticationAttemptRecord): AuthorityAcquisition | null => {
@@ -125,35 +125,38 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
     return record?.status === status && record.identity.bankCode === state.owner.identity.bankCode && record.identity.runId === state.owner.identity.runId && record.identity.attemptId === state.owner.identity.attemptId && record.ownerToken === null && record.leaseExpiresAt === null && record.generation === state.owner.generation + 1n && record.terminalAt instanceof Date && (!failure || record.status === "failed" && record.failureClass === failure.failureClass && record.operatorReason === failure.operatorReason);
   };
   const retryClaimed = (value: unknown) => {
-    if (!isObject(value) || value.status !== "retry_claimed" || (value.retryCount !== 1 && value.retryCount !== 2)) return false;
+    if (!isRecord(value) || value.status !== "retry_claimed" || (value.retryCount !== 1 && value.retryCount !== 2)) return false;
     const record = parseAttempt(value.record);
     return record?.status === "active" && record.identity.bankCode === state.owner.identity.bankCode && record.identity.runId === state.owner.identity.runId && record.identity.attemptId === state.owner.identity.attemptId && record.ownerToken === null && record.leaseExpiresAt === null && record.failureClass === null && record.operatorReason === null && record.terminalAt === null && record.generation === state.owner.generation + 1n && record.retryCount === value.retryCount;
   };
-  const run = async (allowed: Phase, call: () => Promise<{ status: string }>, next: Phase): Promise<MutationAuthorityResult> => {
+  const run = async (allowed: Phase, call: () => Promise<unknown>, next: Phase): Promise<MutationAuthorityResult> => {
     if (phase !== allowed || pending) return invalidSequence();
     pending = true;
     try {
       const result = await call(); pending = false;
+      if (!isRecord(result) || typeof result.status !== "string") { poison(); return unavailable(); }
       if (result.status === "stale_owner" || result.status === "lease_expired") { poison(); return lost(); }
       const expected = next === "interaction_started" ? "credentials_may_have_reached_portal" : "submit_may_have_been_dispatched";
-      if (!(["interaction_started", "lease_renewed", "recorded"] as string[]).includes(result.status) || !active((result as { record?: unknown }).record, expected)) { poison(); return unavailable(); }
+      if (!(["interaction_started", "lease_renewed", "recorded"] as string[]).includes(result.status) || !active(result.record, expected)) { poison(); return unavailable(); }
       phase = next; return { status: "authorized" };
     } catch { poison(); return unavailable(); }
   };
-  const complete = async (call: () => Promise<{ status: string }>, failure?: SessionAuthenticationFailurePair): Promise<MutationAuthorityCompletionResult> => {
+  const complete = async (call: () => Promise<unknown>, failure?: SessionAuthenticationFailurePair): Promise<MutationAuthorityCompletionResult> => {
     if (phase === "consumed" || pending) return completionInvalidSequence();
     phase = "consumed"; pending = true;
     try {
       const result = await call(); pending = false;
+      if (!isRecord(result)) return completionUnavailable();
       if (result.status === "stale_owner" || result.status === "lease_expired") return completionLost();
-      return result.status === "authenticated" && terminal((result as { record?: unknown }).record, "authenticated") || result.status === "failed" && terminal((result as { record?: unknown }).record, "failed", failure) ? { status: "completed" } : completionUnavailable();
+      return result.status === "authenticated" && terminal(result.record, "authenticated") || result.status === "failed" && terminal(result.record, "failed", failure) ? { status: "completed" } : completionUnavailable();
     } catch { pending = false; return completionUnavailable(); }
   };
   const claimRetry = async (): Promise<MutationAuthorityResult> => {
     if (phase !== "leased" || pending) return invalidSequence();
     phase = "consumed"; pending = true;
     try {
-      const result = await state.repository.claimRetry({ owner: state.owner }); pending = false;
+      const result: unknown = await state.repository.claimRetry({ owner: state.owner }); pending = false;
+      if (!isRecord(result)) return unavailable();
       if (result.status === "retry_exhausted") return { status: "retry_exhausted" };
       if (retryClaimed(result)) return { status: "retry_claimed" };
       if (result.status === "stale_owner" || result.status === "lease_expired") return lost();

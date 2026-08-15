@@ -192,6 +192,22 @@ describe("coordinateAuthenticatedSessionState", () => {
     await expect(claimed.authority.beginCredentialInteraction()).resolves.toEqual({ status: "unavailable" }); await expect(claimed.authority.beginCredentialInteraction()).resolves.toEqual({ status: "invalid_sequence" }); expect(attempts.beginCredentialInteraction).toHaveBeenCalledTimes(1);
   });
 
+  it.each([null, undefined, 0, "malformed"] as const)("rejects fulfilled %p lifecycle results without replay", async (malformed) => {
+    for (const operation of ["beginCredentialInteraction", "renewLease", "recordSubmitBarrier", "claimRetry", "completeAuthenticated"] as const) {
+      const { attempts, dependencies, probe } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" }); const acquired = await coordinate(dependencies); if (acquired.status !== "authentication_required") throw new Error("expected authority"); const claimed = claimAuthenticationMutationAuthority(acquired.authority); if (claimed.status !== "claimed") throw new Error("expected claim");
+      if (operation === "beginCredentialInteraction") attempts.beginCredentialInteraction.mockResolvedValueOnce(malformed as never);
+      if (operation === "renewLease") { await claimed.authority.beginCredentialInteraction(); attempts.renewLease.mockResolvedValueOnce(malformed as never); }
+      if (operation === "recordSubmitBarrier") { await claimed.authority.beginCredentialInteraction(); attempts.recordSubmitBarrier.mockResolvedValueOnce(malformed as never); }
+      if (operation === "claimRetry") attempts.claimRetry.mockResolvedValueOnce(malformed as never);
+      if (operation === "completeAuthenticated") attempts.completeAuthenticated.mockResolvedValueOnce(malformed as never);
+      const result = await claimed.authority[operation]();
+      expect(result).toEqual({ status: "unavailable" }); expect(JSON.stringify(result)).not.toMatch(/malformed|record|owner|token|generation/i);
+      if (operation === "claimRetry") await expect(claimed.authority.beginCredentialInteraction()).resolves.toEqual({ status: "invalid_sequence" });
+      else if (operation === "completeAuthenticated") await expect(claimed.authority.completeFailed({ failureClass: "transient_pre_interaction", operatorReason: "temporary_authentication_problem" })).resolves.toEqual({ status: "invalid_sequence" });
+      else await expect(claimed.authority[operation]()).resolves.toEqual({ status: "invalid_sequence" });
+    }
+  });
+
   it("consumes retry claims, exhaustion, and unsafe retry outcomes", async () => {
     for (const [outcome, expected] of [[{ status: "retry_claimed", retryCount: 1, record: retried() }, "retry_claimed"], [{ status: "retry_exhausted" }, "retry_exhausted"], [new Error("internal"), "unavailable"], [{ status: "unknown" }, "unavailable"]] as const) {
       const { attempts, dependencies, probe } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" }); const result = await coordinate(dependencies); if (result.status !== "authentication_required") throw new Error("expected authority"); const claimed = claimAuthenticationMutationAuthority(result.authority); if (claimed.status !== "claimed") throw new Error("expected claim");
