@@ -41,8 +41,14 @@ const isExact = (value: unknown): value is Awaited<ReturnType<Attempts["findExac
 const isCreated = (value: unknown): value is Awaited<ReturnType<Attempts["getOrCreate"]>> => isObject(value) && (value.status === "identity_conflict" && typeof value.existingAttemptId === "string" || (value.status === "created" || value.status === "found") && isAttempt(value.record));
 const isLeased = (value: unknown): value is Awaited<ReturnType<Attempts["acquireLease"]>> => isObject(value) && (value.status === "missing" || value.status === "not_applied" || ((value.status === "lease_held" || value.status === "reconciliation_required" || value.status === "terminal") && isAttempt(value.record)) || value.status === "lease_acquired" && isObject(value.owner) && isIdentity(value.owner.identity) && typeof value.owner.ownerToken === "string" && typeof value.owner.generation === "bigint" && isAttempt(value.record));
 const isReconciled = (value: unknown): value is Awaited<ReturnType<Attempts["reconcileExpiredLease"]>> => isObject(value) && (value.status === "missing" || value.status === "not_applied" || ((value.status === "lease_reconciled" || value.status === "lease_still_active" || value.status === "unowned" || value.status === "terminal") && isAttempt(value.record)));
-const isStatus = (value: unknown): value is Readonly<{ status: string }> => isObject(value) && typeof value.status === "string";
 const isProbe = (value: unknown): value is Awaited<ReturnType<AuthenticatedSessionProbe["observe"]>> => isObject(value) && (value.status === "unauthenticated" || value.status === "unavailable" || value.status === "authenticated" && value.observedAt instanceof Date && !Number.isNaN(value.observedAt.getTime()));
+const sameIdentity = (left: SessionAuthenticationAttemptIdentity, right: SessionAuthenticationAttemptIdentity) => left.bankCode === right.bankCode && left.runId === right.runId && left.attemptId === right.attemptId;
+const isAuthenticatedCompletion = (value: unknown, owner: { identity: SessionAuthenticationAttemptIdentity; generation: bigint }) => {
+  if (!isObject(value) || value.status !== "authenticated") return false;
+  const record = parseAttempt(value.record);
+  return record?.status === "authenticated" && sameIdentity(record.identity, owner.identity) && record.ownerToken === null && record.leaseExpiresAt === null && record.generation === owner.generation + 1n && record.terminalAt instanceof Date;
+};
+const isRestorationEvidence = (value: unknown, owner: { identity: SessionAuthenticationAttemptIdentity; generation: bigint }) => isObject(value) && isIdentity(value.identity) && sameIdentity(value.identity, owner.identity) && (value.interactionPhase === "no_credential_interaction" || value.interactionPhase === "credentials_may_have_reached_portal" || value.interactionPhase === "submit_may_have_been_dispatched") && value.terminalGeneration === owner.generation + 1n && value.authenticatedAt instanceof Date && !Number.isNaN(value.authenticatedAt.getTime());
 const retryState = (): AuthenticatedSessionState => ({ status: "retry_later", reason: "state_changed" });
 const ownershipChanged = (): AuthenticatedSessionState => ({ status: "retry_later", reason: "ownership_changed" });
 
@@ -129,13 +135,12 @@ export async function coordinateAuthenticatedSessionState(
     if (completion.mode === "attempt_only") {
       let result: unknown;
       try { result = await attempts.completeAuthenticated({ owner: leased.owner }); } catch { return ownershipChanged(); }
-      if (!isStatus(result)) return ownershipChanged();
-      return result.status === "authenticated" ? { status: "authenticated", source: "observed" } : ownershipChanged();
+      return isAuthenticatedCompletion(result, leased.owner) ? { status: "authenticated", source: "observed" } : ownershipChanged();
     }
     let restored: unknown;
     try { restored = await completion.resolver.resolveObservedRestoration(leased.owner); } catch { return { status: "needs_operator_action", reason: "restoration_state_conflict" }; }
-    if (!isStatus(restored)) return { status: "needs_operator_action", reason: "restoration_state_conflict" };
-    if (restored.status === "resolved" || restored.status === "already_resolved") return { status: "authenticated", source: "observed" };
+    if (!isObject(restored) || typeof restored.status !== "string") return { status: "needs_operator_action", reason: "restoration_state_conflict" };
+    if ((restored.status === "resolved" || restored.status === "already_resolved") && isRestorationEvidence(restored.evidence, leased.owner)) return { status: "authenticated", source: "observed" };
     if (restored.status === "active_mutation_owner") return { status: "in_progress", reason: "active_mutation_owner" };
     if (restored.status === "stale_owner" || restored.status === "lease_expired" || restored.status === "not_applied") return ownershipChanged();
     return { status: "needs_operator_action", reason: "restoration_state_conflict" };

@@ -120,9 +120,14 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
     const record = parseAttempt(value);
     return record?.status === "active" && record.interactionPhase === interactionPhase && record.identity.bankCode === state.owner.identity.bankCode && record.identity.runId === state.owner.identity.runId && record.identity.attemptId === state.owner.identity.attemptId && record.ownerToken === state.owner.ownerToken && record.generation === state.owner.generation && record.leaseExpiresAt instanceof Date;
   };
-  const terminal = (value: unknown, status: "authenticated" | "failed") => {
+  const terminal = (value: unknown, status: "authenticated" | "failed", failure?: SessionAuthenticationFailurePair) => {
     const record = parseAttempt(value);
-    return record?.status === status && record.identity.bankCode === state.owner.identity.bankCode && record.identity.runId === state.owner.identity.runId && record.identity.attemptId === state.owner.identity.attemptId && record.ownerToken === null && record.leaseExpiresAt === null && record.generation === state.owner.generation + 1n && record.terminalAt instanceof Date;
+    return record?.status === status && record.identity.bankCode === state.owner.identity.bankCode && record.identity.runId === state.owner.identity.runId && record.identity.attemptId === state.owner.identity.attemptId && record.ownerToken === null && record.leaseExpiresAt === null && record.generation === state.owner.generation + 1n && record.terminalAt instanceof Date && (!failure || record.status === "failed" && record.failureClass === failure.failureClass && record.operatorReason === failure.operatorReason);
+  };
+  const retryClaimed = (value: unknown) => {
+    if (!isObject(value) || value.status !== "retry_claimed" || (value.retryCount !== 1 && value.retryCount !== 2)) return false;
+    const record = parseAttempt(value.record);
+    return record?.status === "active" && record.identity.bankCode === state.owner.identity.bankCode && record.identity.runId === state.owner.identity.runId && record.identity.attemptId === state.owner.identity.attemptId && record.ownerToken === null && record.leaseExpiresAt === null && record.failureClass === null && record.operatorReason === null && record.terminalAt === null && record.generation === state.owner.generation + 1n && record.retryCount === value.retryCount;
   };
   const run = async (allowed: Phase, call: () => Promise<{ status: string }>, next: Phase): Promise<MutationAuthorityResult> => {
     if (phase !== allowed || pending) return invalidSequence();
@@ -135,13 +140,13 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
       phase = next; return { status: "authorized" };
     } catch { poison(); return unavailable(); }
   };
-  const complete = async (call: () => Promise<{ status: string }>): Promise<MutationAuthorityCompletionResult> => {
+  const complete = async (call: () => Promise<{ status: string }>, failure?: SessionAuthenticationFailurePair): Promise<MutationAuthorityCompletionResult> => {
     if (phase === "consumed" || pending) return completionInvalidSequence();
     phase = "consumed"; pending = true;
     try {
       const result = await call(); pending = false;
       if (result.status === "stale_owner" || result.status === "lease_expired") return completionLost();
-      return result.status === "authenticated" && terminal((result as { record?: unknown }).record, "authenticated") || result.status === "failed" && terminal((result as { record?: unknown }).record, "failed") ? { status: "completed" } : completionUnavailable();
+      return result.status === "authenticated" && terminal((result as { record?: unknown }).record, "authenticated") || result.status === "failed" && terminal((result as { record?: unknown }).record, "failed", failure) ? { status: "completed" } : completionUnavailable();
     } catch { pending = false; return completionUnavailable(); }
   };
   const claimRetry = async (): Promise<MutationAuthorityResult> => {
@@ -149,7 +154,8 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
     phase = "consumed"; pending = true;
     try {
       const result = await state.repository.claimRetry({ owner: state.owner }); pending = false;
-      if (result.status === "retry_claimed" || result.status === "retry_exhausted") return { status: result.status };
+      if (result.status === "retry_exhausted") return { status: "retry_exhausted" };
+      if (retryClaimed(result)) return { status: "retry_claimed" };
       if (result.status === "stale_owner" || result.status === "lease_expired") return lost();
       return unavailable();
     } catch { pending = false; return unavailable(); }
@@ -161,6 +167,6 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
     recordSubmitBarrier: () => run("interaction_started", () => state.repository.recordSubmitBarrier({ owner: state.owner }), "submit_barrier_recorded"),
     claimRetry,
     completeAuthenticated: () => complete(() => state.repository.completeAuthenticated({ owner: state.owner })),
-    completeFailed: (failure) => complete(() => state.repository.completeFailed({ owner: state.owner, ...failure })),
+    completeFailed: (failure) => complete(() => state.repository.completeFailed({ owner: state.owner, ...failure }), failure),
   }) };
 }
