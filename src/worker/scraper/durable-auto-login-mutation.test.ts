@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createBankAutoLoginStrategy, type BankAutoLoginPage, type BankAutoLoginStrategy } from "./auto-login";
 import { executeDurablyFencedAutoLogin } from "./durable-auto-login-mutation";
 import type {
@@ -93,6 +93,15 @@ describe("executeDurablyFencedAutoLogin", () => {
     const events: string[] = [];
     await execute(events, async (p) => { await p.click("submit"); });
     expect(events).toEqual(["barrier", "click:submit"]);
+  });
+
+  it("passes the executor lease duration to both mutation boundaries", async () => {
+    const events: string[] = [];
+    const beginCredentialInteraction = vi.fn().mockResolvedValue({ status: "interaction_started", record });
+    const recordSubmitBarrier = vi.fn().mockResolvedValue({ status: "recorded", record });
+    await executeDurablyFencedAutoLogin({ strategy: strategy(async (p) => { await p.fill("user", "alice"); await p.click("submit"); }), credential, page: page(events), attempts: { beginCredentialInteraction, renewLease: attempts(events).renewLease, recordSubmitBarrier }, owner, leaseDurationMs: 321 });
+    expect(beginCredentialInteraction).toHaveBeenCalledWith({ owner, leaseDurationMs: 321 });
+    expect(recordSubmitBarrier).toHaveBeenCalledWith({ owner, leaseDurationMs: 321 });
   });
 
   it.each(["already_recorded", "invalid_transition", "stale_owner", "lease_expired", "terminal", "missing", "not_applied"] as const)("blocks every non-authorizing barrier: %s", async (barrier) => {

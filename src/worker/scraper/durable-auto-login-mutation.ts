@@ -49,7 +49,7 @@ export async function executeDurablyFencedAutoLogin(input: Readonly<{
       if (denial) throw new Error("Durable auto-login mutation denied");
       try {
         const result = phase === "no_credential_interaction"
-          ? await input.attempts.beginCredentialInteraction({ owner: input.owner })
+          ? await input.attempts.beginCredentialInteraction({ owner: input.owner, leaseDurationMs: input.leaseDurationMs })
           : await input.attempts.renewLease({ owner: input.owner, leaseDurationMs: input.leaseDurationMs });
         const authorized = phase === "no_credential_interaction" ? result.status === "interaction_started" : result.status === "lease_renewed";
         if (!authorized) deny(blockFor(result.status));
@@ -63,7 +63,7 @@ export async function executeDurablyFencedAutoLogin(input: Readonly<{
     async click(selector) {
       if (denial) throw new Error("Durable auto-login mutation denied");
       try {
-        const result = await input.attempts.recordSubmitBarrier({ owner: input.owner });
+        const result = await input.attempts.recordSubmitBarrier({ owner: input.owner, leaseDurationMs: input.leaseDurationMs });
         if (result.status !== "recorded") deny(blockFor(result.status));
         phase = "submit_may_have_been_dispatched";
       } catch {

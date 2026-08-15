@@ -184,6 +184,48 @@ describe("coordinateAuthenticatedSessionState", () => {
     expect(attempts.completeAuthenticated).toHaveBeenCalledTimes(1);
   });
 
+  it("vaults the lease duration for begin and submit-boundary transitions", async () => {
+    const { attempts, dependencies, probe } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" });
+    const acquired = await coordinate(dependencies); if (acquired.status !== "authentication_required") throw new Error("expected authority");
+    const claimed = claimAuthenticationMutationAuthority(acquired.authority); if (claimed.status !== "claimed") throw new Error("expected claim");
+    await claimed.authority.beginCredentialInteraction(); await claimed.authority.recordSubmitBarrier();
+    expect(attempts.beginCredentialInteraction).toHaveBeenCalledWith({ owner, leaseDurationMs: 1_000 });
+    expect(attempts.recordSubmitBarrier).toHaveBeenCalledWith({ owner, leaseDurationMs: 1_000 });
+  });
+
+  it.each([
+    ["begin", "lease_renewed", interacting()],
+    ["renew", "interaction_started", interacting()],
+    ["barrier", "interaction_started", submitted()],
+  ] as const)("poisons cross-operation %s success statuses", async (operation, status, record) => {
+    const { attempts, dependencies, probe } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" });
+    const acquired = await coordinate(dependencies); if (acquired.status !== "authentication_required") throw new Error("expected authority");
+    const claimed = claimAuthenticationMutationAuthority(acquired.authority); if (claimed.status !== "claimed") throw new Error("expected claim");
+    if (operation !== "begin") await claimed.authority.beginCredentialInteraction();
+    if (operation === "begin") attempts.beginCredentialInteraction.mockResolvedValueOnce({ status, record } as never);
+    if (operation === "renew") attempts.renewLease.mockResolvedValueOnce({ status, record } as never);
+    if (operation === "barrier") attempts.recordSubmitBarrier.mockResolvedValueOnce({ status, record } as never);
+    const result = operation === "begin" ? await claimed.authority.beginCredentialInteraction() : operation === "renew" ? await claimed.authority.renewLease() : await claimed.authority.recordSubmitBarrier();
+    expect(result).toEqual({ status: "unavailable" });
+    await expect(claimed.authority.completeAuthenticated()).resolves.toEqual({ status: "invalid_sequence" });
+  });
+
+  it.each([
+    { label: "status only", result: { status: "interaction_started" } },
+    { label: "wrong phase", result: { status: "interaction_started", record: owned() } },
+    { label: "wrong identity", result: { status: "interaction_started", record: { ...interacting(), identity: { ...identity, attemptId: "other" } } } },
+    { label: "wrong owner", result: { status: "interaction_started", record: { ...interacting(), ownerToken: "other" } } },
+    { label: "wrong generation", result: { status: "interaction_started", record: { ...interacting(), generation: 1n } } },
+    { label: "invalid lease", result: { status: "interaction_started", record: { ...interacting(), leaseExpiresAt: new Date("invalid") } } },
+  ])("poisons malformed begin authorization with $label", async ({ result }) => {
+    const { attempts, dependencies, probe } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" });
+    const acquired = await coordinate(dependencies); if (acquired.status !== "authentication_required") throw new Error("expected authority");
+    const claimed = claimAuthenticationMutationAuthority(acquired.authority); if (claimed.status !== "claimed") throw new Error("expected claim");
+    attempts.beginCredentialInteraction.mockResolvedValueOnce(result as never);
+    await expect(claimed.authority.beginCredentialInteraction()).resolves.toEqual({ status: "unavailable" });
+    await expect(claimed.authority.recordSubmitBarrier()).resolves.toEqual({ status: "invalid_sequence" });
+  });
+
   it("poisons the lifecycle after a repository throw or non-authorizing result", async () => {
     const { attempts, dependencies, probe } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" });
     const result = await coordinate(dependencies); if (result.status !== "authentication_required") throw new Error("expected authority");
