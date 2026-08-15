@@ -141,6 +141,18 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
       phase = next; return { status: "authorized" };
     } catch { poison(); return unavailable(); }
   };
+  const renew = async (): Promise<MutationAuthorityResult> => {
+    if (phase === "consumed" || pending) return invalidSequence();
+    const expected = phase === "leased" ? "no_credential_interaction" : phase === "interaction_started" ? "credentials_may_have_reached_portal" : "submit_may_have_been_dispatched";
+    pending = true;
+    try {
+      const result = await state.repository.renewLease({ owner: state.owner, leaseDurationMs: state.leaseDurationMs }); pending = false;
+      if (!isRecord(result) || typeof result.status !== "string") { poison(); return unavailable(); }
+      if (result.status === "stale_owner" || result.status === "lease_expired") { poison(); return lost(); }
+      if (result.status !== "lease_renewed" || !active(result.record, expected)) { poison(); return unavailable(); }
+      return { status: "authorized" };
+    } catch { poison(); return unavailable(); }
+  };
   const complete = async (call: () => Promise<unknown>, failure?: SessionAuthenticationFailurePair): Promise<MutationAuthorityCompletionResult> => {
     if (phase === "consumed" || pending) return completionInvalidSequence();
     phase = "consumed"; pending = true;
@@ -165,8 +177,7 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
   };
   return { status: "claimed", authority: Object.freeze({
     beginCredentialInteraction: () => run("leased", () => state.repository.beginCredentialInteraction({ owner: state.owner, leaseDurationMs: state.leaseDurationMs }), "interaction_started", "interaction_started"),
-    // A blocked overlap never changes phase; a later serial renewal remains valid.
-    renewLease: () => run("interaction_started", () => state.repository.renewLease({ owner: state.owner, leaseDurationMs: state.leaseDurationMs }), "interaction_started", "lease_renewed"),
+    renewLease: renew,
     recordSubmitBarrier: () => run("interaction_started", () => state.repository.recordSubmitBarrier({ owner: state.owner, leaseDurationMs: state.leaseDurationMs }), "submit_barrier_recorded", "recorded"),
     claimRetry,
     completeAuthenticated: () => complete(() => state.repository.completeAuthenticated({ owner: state.owner })),
