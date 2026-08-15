@@ -52,10 +52,15 @@ export type ClaimRetryInput = Readonly<{ owner: SessionAuthenticationLeaseOwner 
 export type CompleteAuthenticatedInput = Readonly<{ owner: SessionAuthenticationLeaseOwner }>;
 export type CompleteFailedInput = Readonly<{ owner: SessionAuthenticationLeaseOwner } & SessionAuthenticationFailurePair>;
 export type ReconcileExpiredLeaseInput = Readonly<{ identity: SessionAuthenticationAttemptIdentity }>;
-export type ObservedRestorationEvidence = Readonly<{ authenticatedAt: Date }>;
+export type ObservedRestorationEvidence = Readonly<{
+  identity: SessionAuthenticationAttemptIdentity;
+  interactionPhase: CredentialInteractionPhase;
+  terminalGeneration: bigint;
+  authenticatedAt: Date;
+}>;
 export type ResolveObservedRestorationResult =
   | Readonly<{ status: "resolved"; evidence: ObservedRestorationEvidence }>
-  | Readonly<{ status: "already_resolved" }>
+  | Readonly<{ status: "already_resolved"; evidence: ObservedRestorationEvidence }>
   | Readonly<{ status: "missing"; missing: "authentication_attempt" | "expiry_episode" }>
   | Readonly<{ status: "identity_mismatch" | "stale_owner" | "lease_expired" | "active_mutation_owner" | "episode_not_resolvable" | "terminal_conflict" }>
   | SessionAuthenticationAttemptNotAppliedResult;

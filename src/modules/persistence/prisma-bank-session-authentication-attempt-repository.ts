@@ -24,6 +24,7 @@ import {
   type SessionAuthenticationAttemptRecord,
   type SessionAuthenticationAttemptRepository,
   type ObservedRestorationResolver,
+  type ObservedRestorationEvidence,
   type ResolveObservedRestorationResult,
   type SessionAuthenticationLeaseOwner,
 } from "../bank-sessions/session-authentication-attempt-repository";
@@ -38,6 +39,10 @@ function record(row: Row): SessionAuthenticationAttemptRecord {
   const parsed = parseSessionAuthenticationAttemptRecord(row);
   if (!parsed) throw new Error("Invalid durable session authentication attempt record");
   return parsed;
+}
+function observedRestorationEvidence(attempt: SessionAuthenticationAttemptRecord): ObservedRestorationEvidence {
+  if (attempt.status !== "authenticated") throw new Error("Observed restoration evidence requires an authenticated terminal attempt");
+  return { identity: attempt.identity, interactionPhase: attempt.interactionPhase, terminalGeneration: attempt.generation, authenticatedAt: attempt.terminalAt };
 }
 
 function assertLease(ownerToken: string, duration: number): void {
@@ -186,15 +191,17 @@ export class PrismaBankSessionAuthenticationAttemptRepository implements Session
         const attempts = await tx.$queryRaw<Array<Row & { leaseActive: boolean }>>`SELECT "bankCode", "runId", "attemptId", "status", "interactionPhase", "failureClass", "operatorReason", "retryCount", "ownerToken", "generation", "leaseExpiresAt", "terminalAt", "createdAt", "updatedAt", COALESCE("leaseExpiresAt" > NOW(), FALSE) AS "leaseActive" FROM "BankSessionAuthenticationAttempt" WHERE "bankCode" = ${owner.identity.bankCode} AND "runId" = ${owner.identity.runId} FOR UPDATE`;
         const attempt = attempts[0];
         if (!attempt) return { status: "missing", missing: "authentication_attempt" };
-        if (attempt.attemptId !== owner.identity.attemptId) return { status: "identity_mismatch" };
-        if (attempt.status !== "active") {
-          if (attempt.status !== "authenticated") return { status: "terminal_conflict" };
+        const current = record(attempt);
+        if (current.identity.attemptId !== owner.identity.attemptId) return { status: "identity_mismatch" };
+        if (current.status !== "active") {
+          if (current.status !== "authenticated") return { status: "terminal_conflict" };
+          const evidence = observedRestorationEvidence(current);
           const episode = (await tx.$queryRaw<Array<{ runId: string; consumerAttemptState: string | null }>>`SELECT "runId", "consumerAttemptState" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = ${owner.identity.bankCode} FOR UPDATE`)[0];
-          if (!episode) return { status: "already_resolved" };
+          if (!episode) return { status: "already_resolved", evidence };
           if (episode.runId !== owner.identity.runId) return { status: "identity_mismatch" };
-          return episode.consumerAttemptState === "resolved" ? { status: "already_resolved" } : { status: "terminal_conflict" };
+          return episode.consumerAttemptState === "resolved" ? { status: "already_resolved", evidence } : { status: "terminal_conflict" };
         }
-        if (attempt.ownerToken !== owner.ownerToken || attempt.generation !== owner.generation) return { status: "stale_owner" };
+        if (current.ownerToken !== owner.ownerToken || current.generation !== owner.generation) return { status: "stale_owner" };
         if (!attempt.leaseActive) return { status: "lease_expired" };
         const episode = (await tx.$queryRaw<Array<{ runId: string; consumerAttemptState: string | null; consumerClaimToken: string | null; consumerLeaseExpiresAt: Date | null; leaseActive: boolean }>>`SELECT "runId", "consumerAttemptState", "consumerClaimToken", "consumerLeaseExpiresAt", COALESCE("consumerLeaseExpiresAt" > NOW(), FALSE) AS "leaseActive" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = ${owner.identity.bankCode} FOR UPDATE`)[0];
         if (!episode) return { status: "missing", missing: "expiry_episode" };
@@ -202,11 +209,11 @@ export class PrismaBankSessionAuthenticationAttemptRepository implements Session
         const mutation = episode.consumerAttemptState === "mutation_started";
         if (mutation && (!episode.consumerClaimToken || !episode.consumerLeaseExpiresAt || episode.leaseActive)) return { status: "active_mutation_owner" };
         if (episode.consumerAttemptState !== "manual_recovery_required" && !mutation) return { status: "episode_not_resolvable" };
-        const authenticated = await tx.$queryRaw<Array<{ terminalAt: Date }>>`UPDATE "BankSessionAuthenticationAttempt" SET "status" = 'authenticated', "ownerToken" = NULL, "leaseExpiresAt" = NULL, "terminalAt" = NOW(), "generation" = "generation" + 1, "updatedAt" = NOW() WHERE "bankCode" = ${owner.identity.bankCode} AND "runId" = ${owner.identity.runId} AND "attemptId" = ${owner.identity.attemptId} AND "status" = 'active' AND "ownerToken" = ${owner.ownerToken} AND "generation" = ${owner.generation} AND "leaseExpiresAt" > NOW() RETURNING "terminalAt"`;
+        const authenticated = await tx.$queryRaw<Row[]>`UPDATE "BankSessionAuthenticationAttempt" SET "status" = 'authenticated', "ownerToken" = NULL, "leaseExpiresAt" = NULL, "terminalAt" = NOW(), "generation" = "generation" + 1, "updatedAt" = NOW() WHERE "bankCode" = ${owner.identity.bankCode} AND "runId" = ${owner.identity.runId} AND "attemptId" = ${owner.identity.attemptId} AND "status" = 'active' AND "ownerToken" = ${owner.ownerToken} AND "generation" = ${owner.generation} AND "leaseExpiresAt" > NOW() RETURNING "bankCode", "runId", "attemptId", "status", "interactionPhase", "failureClass", "operatorReason", "retryCount", "ownerToken", "generation", "leaseExpiresAt", "terminalAt", "createdAt", "updatedAt"`;
         if (authenticated.length !== 1) throw new Error("Observed restoration authentication CAS lost");
         const resolved = await tx.$executeRaw`UPDATE "BankSessionExpiryEpisode" SET "consumerAttemptState" = 'resolved', "consumerLeaseExpiresAt" = NULL, "updatedAt" = NOW() WHERE "bankCode" = ${owner.identity.bankCode} AND "runId" = ${owner.identity.runId} AND "consumerAttemptState" IN ('manual_recovery_required', 'mutation_started')`;
         if (resolved !== 1) throw new Error("Observed restoration expiry CAS lost");
-        return { status: "resolved", evidence: { authenticatedAt: authenticated[0].terminalAt } };
+        return { status: "resolved", evidence: observedRestorationEvidence(record(authenticated[0])) };
       }, { isolationLevel: "Serializable" });
     } catch (error) {
       const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined;
