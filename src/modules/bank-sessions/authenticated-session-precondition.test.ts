@@ -14,7 +14,7 @@ const input: CoordinateAuthenticatedSessionStateInput = {
   ownerToken: "caller-owner",
   leaseDurationMs: 1_000,
 };
-const authority = {} as AuthenticationMutationAuthority;
+const authority = Object.freeze(Object.create(null)) as AuthenticationMutationAuthority;
 const operatorReasons = [
   "temporary_authentication_problem",
   "protected_authentication_step_detected",
@@ -57,6 +57,24 @@ describe("coordinateAuthenticatedSessionPrecondition", () => {
 
   it.each(["cancelled", "invalid_request"] as const)("preserves coordinator %s", async (status) => {
     await expect(precondition({ status }).result).resolves.toEqual({ status });
+  });
+
+  it.each([
+    null, undefined, true, 1, "authenticated", {}, { status: "unknown" }, { status: "authenticated" },
+    { status: "authenticated", source: "wrong" }, { status: "retry_later" }, { status: "retry_later", reason: "wrong" },
+    { status: "in_progress" }, { status: "in_progress", reason: "wrong" }, { status: "needs_operator_action" },
+    { status: "needs_operator_action", reason: "wrong" }, { status: "authentication_required" },
+    { status: "authentication_required", authority: {} }, { status: "authentication_required", authority: Object.create(null) },
+    { status: "authentication_required", authority: Object.freeze({}) },
+    { status: "authentication_required", authority: Object.freeze(Object.assign(Object.create(null), { token: "leak" })) },
+    { status: "authenticated", source: "existing", authority }, { status: "retry_later", reason: "state_changed", owner: "leak" },
+    { status: "cancelled", generation: 1 }, { status: "invalid_request", raw: "leak" },
+  ])("fails closed for malformed coordinator output %# without running a mutation", async (coordinatorResult) => {
+    const { runner, result } = precondition(coordinatorResult);
+    const state = await result;
+    expect(state).toEqual({ status: "needs_operator_action", reason: "authentication_attempt_requires_review" });
+    expect(JSON.stringify(state)).not.toMatch(/authority|token|owner|generation|raw|leak/i);
+    expect(runner.run).not.toHaveBeenCalled();
   });
 
   it("coordinates before handing the exact authority to the runner once", async () => {
