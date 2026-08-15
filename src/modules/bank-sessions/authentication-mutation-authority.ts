@@ -129,7 +129,7 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
     const record = parseAttempt(value.record);
     return record?.status === "active" && record.identity.bankCode === state.owner.identity.bankCode && record.identity.runId === state.owner.identity.runId && record.identity.attemptId === state.owner.identity.attemptId && record.ownerToken === null && record.leaseExpiresAt === null && record.failureClass === null && record.operatorReason === null && record.terminalAt === null && record.generation === state.owner.generation + 1n && record.retryCount === value.retryCount;
   };
-  const run = async (allowed: Phase, call: () => Promise<unknown>, next: Phase): Promise<MutationAuthorityResult> => {
+  const run = async (allowed: Phase, call: () => Promise<unknown>, next: Phase, expectedStatus: string): Promise<MutationAuthorityResult> => {
     if (phase !== allowed || pending) return invalidSequence();
     pending = true;
     try {
@@ -137,7 +137,7 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
       if (!isRecord(result) || typeof result.status !== "string") { poison(); return unavailable(); }
       if (result.status === "stale_owner" || result.status === "lease_expired") { poison(); return lost(); }
       const expected = next === "interaction_started" ? "credentials_may_have_reached_portal" : "submit_may_have_been_dispatched";
-      if (!(["interaction_started", "lease_renewed", "recorded"] as string[]).includes(result.status) || !active(result.record, expected)) { poison(); return unavailable(); }
+      if (result.status !== expectedStatus || !active(result.record, expected)) { poison(); return unavailable(); }
       phase = next; return { status: "authorized" };
     } catch { poison(); return unavailable(); }
   };
@@ -164,10 +164,10 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
     } catch { pending = false; return unavailable(); }
   };
   return { status: "claimed", authority: Object.freeze({
-    beginCredentialInteraction: () => run("leased", () => state.repository.beginCredentialInteraction({ owner: state.owner }), "interaction_started"),
+    beginCredentialInteraction: () => run("leased", () => state.repository.beginCredentialInteraction({ owner: state.owner, leaseDurationMs: state.leaseDurationMs }), "interaction_started", "interaction_started"),
     // A blocked overlap never changes phase; a later serial renewal remains valid.
-    renewLease: () => run("interaction_started", () => state.repository.renewLease({ owner: state.owner, leaseDurationMs: state.leaseDurationMs }), "interaction_started"),
-    recordSubmitBarrier: () => run("interaction_started", () => state.repository.recordSubmitBarrier({ owner: state.owner }), "submit_barrier_recorded"),
+    renewLease: () => run("interaction_started", () => state.repository.renewLease({ owner: state.owner, leaseDurationMs: state.leaseDurationMs }), "interaction_started", "lease_renewed"),
+    recordSubmitBarrier: () => run("interaction_started", () => state.repository.recordSubmitBarrier({ owner: state.owner, leaseDurationMs: state.leaseDurationMs }), "submit_barrier_recorded", "recorded"),
     claimRetry,
     completeAuthenticated: () => complete(() => state.repository.completeAuthenticated({ owner: state.owner })),
     completeFailed: (failure) => complete(() => state.repository.completeFailed({ owner: state.owner, ...failure }), failure),

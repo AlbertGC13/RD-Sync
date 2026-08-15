@@ -45,8 +45,8 @@ export type GetOrCreateSessionAuthenticationAttemptInput = Readonly<{ identity: 
 export type FindExactSessionAuthenticationAttemptInput = Readonly<{ identity: SessionAuthenticationAttemptIdentity }>;
 export type AcquireSessionAuthenticationLeaseInput = Readonly<{ identity: SessionAuthenticationAttemptIdentity; ownerToken: string; leaseDurationMs: number }>;
 export type RenewSessionAuthenticationLeaseInput = Readonly<{ owner: SessionAuthenticationLeaseOwner; leaseDurationMs: number }>;
-export type BeginCredentialInteractionInput = Readonly<{ owner: SessionAuthenticationLeaseOwner }>;
-export type RecordSubmitBarrierInput = Readonly<{ owner: SessionAuthenticationLeaseOwner }>;
+export type BeginCredentialInteractionInput = Readonly<{ owner: SessionAuthenticationLeaseOwner; leaseDurationMs: number }>;
+export type RecordSubmitBarrierInput = Readonly<{ owner: SessionAuthenticationLeaseOwner; leaseDurationMs: number }>;
 export type ClaimRetryInput = Readonly<{ owner: SessionAuthenticationLeaseOwner }>;
 // PostgreSQL is the authoritative clock for terminal and lease timestamps.
 export type CompleteAuthenticatedInput = Readonly<{ owner: SessionAuthenticationLeaseOwner }>;

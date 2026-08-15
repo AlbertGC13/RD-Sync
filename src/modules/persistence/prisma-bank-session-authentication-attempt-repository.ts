@@ -47,7 +47,7 @@ function observedRestorationEvidence(attempt: SessionAuthenticationAttemptRecord
 
 function assertLease(ownerToken: string, duration: number): void {
   if (!ownerToken.trim()) throw new Error("Session authentication owner token must be nonblank");
-  if (!Number.isFinite(duration) || duration <= 0) throw new Error("Session authentication lease duration must be positive and finite");
+  if (!Number.isSafeInteger(duration) || duration <= 0) throw new Error("Session authentication lease duration must be a positive safe integer");
 }
 function assertObservedOwner(owner: SessionAuthenticationLeaseOwner): void {
   if (![owner.identity.bankCode, owner.identity.runId, owner.identity.attemptId, owner.ownerToken].every((value) => value.trim())) throw new Error("Observed restoration identity and owner must be nonblank");
@@ -138,14 +138,16 @@ export class PrismaBankSessionAuthenticationAttemptRepository implements Session
     const state = await this.ownerState(owner); return state.status === "current" ? { status: "not_applied" } : state;
   }
 
-  async beginCredentialInteraction({ owner }: BeginCredentialInteractionInput): Promise<BeginCredentialInteractionResult> {
-    const rows = await this.prisma.$queryRaw<Row[]>`UPDATE "BankSessionAuthenticationAttempt" SET "interactionPhase" = 'credentials_may_have_reached_portal', "updatedAt" = NOW() WHERE "bankCode" = ${owner.identity.bankCode} AND "runId" = ${owner.identity.runId} AND "attemptId" = ${owner.identity.attemptId} AND "status" = 'active' AND "ownerToken" = ${owner.ownerToken} AND "generation" = ${owner.generation} AND "leaseExpiresAt" > NOW() AND "interactionPhase" = 'no_credential_interaction' RETURNING "bankCode", "runId", "attemptId", "status", "interactionPhase", "failureClass", "operatorReason", "retryCount", "ownerToken", "generation", "leaseExpiresAt", "terminalAt", "createdAt", "updatedAt"`;
+  async beginCredentialInteraction({ owner, leaseDurationMs }: BeginCredentialInteractionInput): Promise<BeginCredentialInteractionResult> {
+    assertLease(owner.ownerToken, leaseDurationMs);
+    const rows = await this.prisma.$queryRaw<Row[]>`UPDATE "BankSessionAuthenticationAttempt" SET "interactionPhase" = 'credentials_may_have_reached_portal', "leaseExpiresAt" = NOW() + (${leaseDurationMs} * INTERVAL '1 millisecond'), "updatedAt" = NOW() WHERE "bankCode" = ${owner.identity.bankCode} AND "runId" = ${owner.identity.runId} AND "attemptId" = ${owner.identity.attemptId} AND "status" = 'active' AND "ownerToken" = ${owner.ownerToken} AND "generation" = ${owner.generation} AND "leaseExpiresAt" > NOW() AND "interactionPhase" = 'no_credential_interaction' RETURNING "bankCode", "runId", "attemptId", "status", "interactionPhase", "failureClass", "operatorReason", "retryCount", "ownerToken", "generation", "leaseExpiresAt", "terminalAt", "createdAt", "updatedAt"`;
     if (rows[0]) return { status: "interaction_started", record: record(rows[0]) };
     const state = await this.ownerState(owner); return state.status === "current" ? { status: "already_started", record: state.record } : state;
   }
 
-  async recordSubmitBarrier({ owner }: RecordSubmitBarrierInput): Promise<RecordSessionAuthenticationSubmitBarrierResult> {
-    const rows = await this.prisma.$queryRaw<Row[]>`UPDATE "BankSessionAuthenticationAttempt" SET "interactionPhase" = 'submit_may_have_been_dispatched', "updatedAt" = NOW() WHERE "bankCode" = ${owner.identity.bankCode} AND "runId" = ${owner.identity.runId} AND "attemptId" = ${owner.identity.attemptId} AND "status" = 'active' AND "ownerToken" = ${owner.ownerToken} AND "generation" = ${owner.generation} AND "leaseExpiresAt" > NOW() AND "interactionPhase" = 'credentials_may_have_reached_portal' RETURNING "bankCode", "runId", "attemptId", "status", "interactionPhase", "failureClass", "operatorReason", "retryCount", "ownerToken", "generation", "leaseExpiresAt", "terminalAt", "createdAt", "updatedAt"`;
+  async recordSubmitBarrier({ owner, leaseDurationMs }: RecordSubmitBarrierInput): Promise<RecordSessionAuthenticationSubmitBarrierResult> {
+    assertLease(owner.ownerToken, leaseDurationMs);
+    const rows = await this.prisma.$queryRaw<Row[]>`UPDATE "BankSessionAuthenticationAttempt" SET "interactionPhase" = 'submit_may_have_been_dispatched', "leaseExpiresAt" = NOW() + (${leaseDurationMs} * INTERVAL '1 millisecond'), "updatedAt" = NOW() WHERE "bankCode" = ${owner.identity.bankCode} AND "runId" = ${owner.identity.runId} AND "attemptId" = ${owner.identity.attemptId} AND "status" = 'active' AND "ownerToken" = ${owner.ownerToken} AND "generation" = ${owner.generation} AND "leaseExpiresAt" > NOW() AND "interactionPhase" = 'credentials_may_have_reached_portal' RETURNING "bankCode", "runId", "attemptId", "status", "interactionPhase", "failureClass", "operatorReason", "retryCount", "ownerToken", "generation", "leaseExpiresAt", "terminalAt", "createdAt", "updatedAt"`;
     if (rows[0]) return { status: "recorded", record: record(rows[0]) };
     const state = await this.ownerState(owner);
     if (state.status !== "current") return state;

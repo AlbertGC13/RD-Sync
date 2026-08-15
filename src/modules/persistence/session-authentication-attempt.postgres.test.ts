@@ -124,7 +124,7 @@ describe.skipIf(!url)("Session authentication attempt PostgreSQL contract", () =
     const replacement = await repo().acquireLease({ identity: id, ownerToken: "replacement", leaseDurationMs: 10_000 });
     if (replacement.status !== "lease_acquired") throw new Error("Expected replacement owner after reconciliation");
     expect(replacement.owner.generation).toBeGreaterThan(old.generation);
-    await expect(repo().beginCredentialInteraction({ owner: old })).resolves.toEqual({ status: "stale_owner" });
+    await expect(repo().beginCredentialInteraction({ owner: old, leaseDurationMs: 10_000 })).resolves.toEqual({ status: "stale_owner" });
   });
 
   it("does not label a failed renew CAS as expired when its diagnostic still sees an active current owner", async () => {
@@ -138,21 +138,68 @@ describe.skipIf(!url)("Session authentication attempt PostgreSQL contract", () =
 
   it("preserves monotonic interaction and requires one recorded submit barrier", async () => {
     const { id, owner: current } = await lease("barrier");
-    await expect(repo().recordSubmitBarrier({ owner: current })).resolves.toEqual({ status: "invalid_transition" });
-    await expect(repo().beginCredentialInteraction({ owner: current })).resolves.toMatchObject({ status: "interaction_started" });
-    await expect(repo().beginCredentialInteraction({ owner: current })).resolves.toMatchObject({ status: "already_started" });
-    await expect(repo().recordSubmitBarrier({ owner: current })).resolves.toMatchObject({ status: "recorded" });
-    await expect(repo().recordSubmitBarrier({ owner: current })).resolves.toMatchObject({ status: "already_recorded" });
+    await expect(repo().recordSubmitBarrier({ owner: current, leaseDurationMs: 10_000 })).resolves.toEqual({ status: "invalid_transition" });
+    await expect(repo().beginCredentialInteraction({ owner: current, leaseDurationMs: 10_000 })).resolves.toMatchObject({ status: "interaction_started" });
+    await expect(repo().beginCredentialInteraction({ owner: current, leaseDurationMs: 10_000 })).resolves.toMatchObject({ status: "already_started" });
+    await expect(repo().recordSubmitBarrier({ owner: current, leaseDurationMs: 10_000 })).resolves.toMatchObject({ status: "recorded" });
+    await expect(repo().recordSubmitBarrier({ owner: current, leaseDurationMs: 10_000 })).resolves.toMatchObject({ status: "already_recorded" });
     expect((await repo().findExact({ identity: id }))).toMatchObject({ status: "found", record: { interactionPhase: "submit_may_have_been_dispatched" } });
   });
 
   it("does not authorize a second submit barrier", async () => {
     const { owner } = await lease("second-submit");
-    await repo().beginCredentialInteraction({ owner });
-    await expect(repo().recordSubmitBarrier({ owner })).resolves.toMatchObject({ status: "recorded" });
-    const second = await repo().recordSubmitBarrier({ owner });
+    await repo().beginCredentialInteraction({ owner, leaseDurationMs: 10_000 });
+    await expect(repo().recordSubmitBarrier({ owner, leaseDurationMs: 10_000 })).resolves.toMatchObject({ status: "recorded" });
+    const second = await repo().recordSubmitBarrier({ owner, leaseDurationMs: 10_000 });
     expect(second.status).toBe("already_recorded");
     expect(second.status === "recorded").toBe(false);
+  });
+
+  it("renews near-expiry mutation boundaries from PostgreSQL NOW()", async () => {
+    const verify = async (name: string, barrier: boolean) => {
+      const { id, owner } = await lease(name);
+      if (barrier) await repo().beginCredentialInteraction({ owner, leaseDurationMs: 10_000 });
+      await pool!.query('UPDATE "BankSessionAuthenticationAttempt" SET "leaseExpiresAt" = NOW() + INTERVAL \'100 milliseconds\' WHERE "bankCode" = $1 AND "runId" = $2 AND "attemptId" = $3', [id.bankCode, id.runId, id.attemptId]);
+      const clock = await pool!.connect();
+      try {
+        const lower = (await clock.query<{ now: Date }>('SELECT NOW() AS "now"')).rows[0].now;
+        const result = barrier ? await repo().recordSubmitBarrier({ owner, leaseDurationMs: 10_000 }) : await repo().beginCredentialInteraction({ owner, leaseDurationMs: 10_000 });
+        const upper = (await clock.query<{ now: Date }>('SELECT NOW() AS "now"')).rows[0].now;
+        if (!(result.status === "recorded" || result.status === "interaction_started")) throw new Error("Expected mutation boundary transition");
+        expect(result.record.leaseExpiresAt!.getTime()).toBeGreaterThanOrEqual(lower.getTime() + 10_000);
+        expect(result.record.leaseExpiresAt!.getTime()).toBeLessThanOrEqual(upper.getTime() + 10_000);
+      } finally { clock.release(); }
+    };
+    await verify("near-expiry-begin", false);
+    await verify("near-expiry-barrier", true);
+  });
+
+  it("does not renew failed mutation boundaries and rolls back a forced SQL failure", async () => {
+    const { id, owner } = await lease("boundary-no-renew");
+    const before = await repo().findExact({ identity: id });
+    if (before.status !== "found") throw new Error("Expected attempt");
+    await expect(repo().recordSubmitBarrier({ owner, leaseDurationMs: 10_000 })).resolves.toEqual({ status: "invalid_transition" });
+    await expect(repo().findExact({ identity: id })).resolves.toEqual(before);
+    await pool!.query('CREATE FUNCTION fail_auth_boundary() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION \'forced\'; END $$; CREATE TRIGGER fail_auth_boundary BEFORE UPDATE ON "BankSessionAuthenticationAttempt" FOR EACH ROW EXECUTE FUNCTION fail_auth_boundary()');
+    await expect(repo().beginCredentialInteraction({ owner, leaseDurationMs: 10_000 })).rejects.toThrow("forced");
+    await pool!.query('DROP TRIGGER fail_auth_boundary ON "BankSessionAuthenticationAttempt"; DROP FUNCTION fail_auth_boundary()');
+    await expect(repo().findExact({ identity: id })).resolves.toEqual(before);
+  });
+
+  it("leaves phase and expiry unchanged for stale, expired, invalid, and replayed boundaries", async () => {
+    const unchanged = async (name: string, action: (owner: Awaited<ReturnType<typeof lease>>["owner"], id: ReturnType<typeof attemptIdentity>) => Promise<unknown>) => {
+      const { id, owner } = await lease(name); const before = await repo().findExact({ identity: id });
+      await action(owner, id); await expect(repo().findExact({ identity: id })).resolves.toEqual(before);
+    };
+    await unchanged("stale-token", (owner) => repo().beginCredentialInteraction({ owner: { ...owner, ownerToken: "wrong" }, leaseDurationMs: 10_000 }));
+    await unchanged("stale-generation", (owner) => repo().beginCredentialInteraction({ owner: { ...owner, generation: owner.generation + 1n }, leaseDurationMs: 10_000 }));
+    const expired = await lease("expired"); await expire(expired.id); const beforeExpired = await repo().findExact({ identity: expired.id });
+    await repo().beginCredentialInteraction({ owner: expired.owner, leaseDurationMs: 10_000 });
+    await expect(repo().findExact({ identity: expired.id })).resolves.toEqual(beforeExpired);
+    await unchanged("invalid-transition", (owner) => repo().recordSubmitBarrier({ owner, leaseDurationMs: 10_000 }));
+    const { id, owner } = await lease("replayed"); await repo().beginCredentialInteraction({ owner, leaseDurationMs: 10_000 });
+    const beforeReplay = await repo().findExact({ identity: id }); await repo().beginCredentialInteraction({ owner, leaseDurationMs: 10_000 });
+    await expect(repo().findExact({ identity: id })).resolves.toEqual(beforeReplay);
   });
 
   it("returns not_applied for ambiguous retry and completion diagnostics", async () => {
@@ -172,8 +219,8 @@ describe.skipIf(!url)("Session authentication attempt PostgreSQL contract", () =
     const next = await repo().acquireLease({ identity: id, ownerToken: "next", leaseDurationMs: 10_000 });
     if (next.status !== "lease_acquired") throw new Error("Expected replacement owner");
     expect(next.owner.generation).toBeGreaterThan(old.generation);
-    await expect(repo().beginCredentialInteraction({ owner: old })).resolves.toEqual({ status: "stale_owner" });
-    await expect(repo().recordSubmitBarrier({ owner: old })).resolves.toEqual({ status: "stale_owner" });
+    await expect(repo().beginCredentialInteraction({ owner: old, leaseDurationMs: 10_000 })).resolves.toEqual({ status: "stale_owner" });
+    await expect(repo().recordSubmitBarrier({ owner: old, leaseDurationMs: 10_000 })).resolves.toEqual({ status: "stale_owner" });
     await expect(repo().completeAuthenticated({ owner: old })).resolves.toEqual({ status: "stale_owner" });
     await expect(repo().completeAuthenticated({ owner: next.owner })).resolves.toMatchObject({ status: "authenticated", record: { retryCount: 1 } });
     await expect(repo().completeFailed({ owner: next.owner, failureClass: "transient_pre_interaction", operatorReason: "temporary_authentication_problem" })).resolves.toEqual({ status: "terminal" });
@@ -189,8 +236,8 @@ describe.skipIf(!url)("Session authentication attempt PostgreSQL contract", () =
     await expect(repo().findExact({ identity: retry.id })).resolves.toMatchObject({ status: "found", record: { status: "failed", retryCount: 2, generation: 6n, failureClass: "transient_pre_interaction", operatorReason: "temporary_authentication_problem" } });
     for (const phase of ["no", "credentials", "submit"] as const) {
       const current = await lease(`expired-${phase}`);
-      if (phase !== "no") await repo().beginCredentialInteraction({ owner: current.owner });
-      if (phase === "submit") await repo().recordSubmitBarrier({ owner: current.owner });
+       if (phase !== "no") await repo().beginCredentialInteraction({ owner: current.owner, leaseDurationMs: 10_000 });
+       if (phase === "submit") await repo().recordSubmitBarrier({ owner: current.owner, leaseDurationMs: 10_000 });
       await expire(current.id); const reconciled = await repo().reconcileExpiredLease({ identity: current.id });
       expect(reconciled).toMatchObject(phase === "no" ? { status: "lease_reconciled", record: { retryCount: 1, status: "active" } } : { status: "lease_reconciled", record: { status: "failed", failureClass: "interaction_outcome_uncertain" } });
       await expect(repo().completeAuthenticated({ owner: current.owner })).resolves.toMatchObject({ status: phase === "no" ? "stale_owner" : "terminal" });
@@ -199,8 +246,8 @@ describe.skipIf(!url)("Session authentication attempt PostgreSQL contract", () =
 
   it.each(["no_credential_interaction", "credentials_may_have_reached_portal", "submit_may_have_been_dispatched"] as const)("resolves manual recovery with exact durable evidence for %s", async (phase) => {
     const { id, owner } = await lease(`observed-${phase}`); await episode(id);
-    if (phase !== "no_credential_interaction") await repo().beginCredentialInteraction({ owner });
-    if (phase === "submit_may_have_been_dispatched") await repo().recordSubmitBarrier({ owner });
+    if (phase !== "no_credential_interaction") await repo().beginCredentialInteraction({ owner, leaseDurationMs: 10_000 });
+    if (phase === "submit_may_have_been_dispatched") await repo().recordSubmitBarrier({ owner, leaseDurationMs: 10_000 });
     const result = await repo().resolveObservedRestoration(owner);
     if (result.status !== "resolved") throw new Error("Expected observed restoration");
     expect(result.evidence).toMatchObject({ identity: id, interactionPhase: phase, terminalGeneration: owner.generation + 1n });

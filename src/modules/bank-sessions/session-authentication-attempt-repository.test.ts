@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   parseSessionAuthenticationAttemptRecord,
   type AcquireSessionAuthenticationLeaseResult,
@@ -82,6 +82,28 @@ describe("ObservedRestorationResolver", () => {
   });
 });
 
+describe("PrismaBankSessionAuthenticationAttemptRepository lease duration validation", () => {
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])("rejects invalid duration %p before issuing SQL", async (leaseDurationMs) => {
+    const query = vi.fn();
+    const repository = new PrismaBankSessionAuthenticationAttemptRepository({ $queryRaw: query } as never);
+    await expect(repository.acquireLease({ identity: owner.identity, ownerToken: owner.ownerToken, leaseDurationMs })).rejects.toThrow();
+    await expect(repository.renewLease({ owner, leaseDurationMs })).rejects.toThrow();
+    await expect(repository.beginCredentialInteraction({ owner, leaseDurationMs })).rejects.toThrow();
+    await expect(repository.recordSubmitBarrier({ owner, leaseDurationMs })).rejects.toThrow();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("accepts a positive safe-integer duration for every lease boundary", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    const repository = new PrismaBankSessionAuthenticationAttemptRepository({ $queryRaw: query } as never);
+    await repository.acquireLease({ identity: owner.identity, ownerToken: owner.ownerToken, leaseDurationMs: 1 });
+    await repository.renewLease({ owner, leaseDurationMs: 1 });
+    await repository.beginCredentialInteraction({ owner, leaseDurationMs: 1 });
+    await repository.recordSubmitBarrier({ owner, leaseDurationMs: 1 });
+    expect(query).toHaveBeenCalled();
+  });
+});
+
 type RepositoryMethods = Pick<SessionAuthenticationAttemptRepository,
   "getOrCreate" | "findExact" | "acquireLease" | "renewLease" | "beginCredentialInteraction" |
   "recordSubmitBarrier" | "claimRetry" | "completeAuthenticated" | "completeFailed" | "reconcileExpiredLease">;
@@ -92,6 +114,10 @@ declare const repository: SessionAuthenticationAttemptRepository;
 if (false) {
   // @ts-expect-error The generic repository operation is intentionally unavailable.
   void repository.execute;
+  // @ts-expect-error Mutation boundaries require an explicit lease renewal duration.
+  void repository.beginCredentialInteraction({ owner });
+  // @ts-expect-error Mutation boundaries require an explicit lease renewal duration.
+  void repository.recordSubmitBarrier({ owner });
 }
 
 const submitBarrierResults: readonly RecordSessionAuthenticationSubmitBarrierResult[] = [
