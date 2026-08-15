@@ -116,13 +116,22 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
   let phase: Phase = "leased";
   let pending = false;
   const poison = () => { phase = "consumed"; pending = false; };
+  const active = (value: unknown, interactionPhase: string) => {
+    const record = parseAttempt(value);
+    return record?.status === "active" && record.interactionPhase === interactionPhase && record.identity.bankCode === state.owner.identity.bankCode && record.identity.runId === state.owner.identity.runId && record.identity.attemptId === state.owner.identity.attemptId && record.ownerToken === state.owner.ownerToken && record.generation === state.owner.generation && record.leaseExpiresAt instanceof Date;
+  };
+  const terminal = (value: unknown, status: "authenticated" | "failed") => {
+    const record = parseAttempt(value);
+    return record?.status === status && record.identity.bankCode === state.owner.identity.bankCode && record.identity.runId === state.owner.identity.runId && record.identity.attemptId === state.owner.identity.attemptId && record.ownerToken === null && record.leaseExpiresAt === null && record.generation === state.owner.generation + 1n && record.terminalAt instanceof Date;
+  };
   const run = async (allowed: Phase, call: () => Promise<{ status: string }>, next: Phase): Promise<MutationAuthorityResult> => {
     if (phase !== allowed || pending) return invalidSequence();
     pending = true;
     try {
       const result = await call(); pending = false;
       if (result.status === "stale_owner" || result.status === "lease_expired") { poison(); return lost(); }
-      if (!(["interaction_started", "lease_renewed", "recorded"] as string[]).includes(result.status)) { poison(); return unavailable(); }
+      const expected = next === "interaction_started" ? "credentials_may_have_reached_portal" : "submit_may_have_been_dispatched";
+      if (!(["interaction_started", "lease_renewed", "recorded"] as string[]).includes(result.status) || !active((result as { record?: unknown }).record, expected)) { poison(); return unavailable(); }
       phase = next; return { status: "authorized" };
     } catch { poison(); return unavailable(); }
   };
@@ -132,7 +141,7 @@ export function claimAuthenticationMutationAuthority(authority: AuthenticationMu
     try {
       const result = await call(); pending = false;
       if (result.status === "stale_owner" || result.status === "lease_expired") return completionLost();
-      return result.status === "authenticated" || result.status === "failed" ? { status: "completed" } : completionUnavailable();
+      return result.status === "authenticated" && terminal((result as { record?: unknown }).record, "authenticated") || result.status === "failed" && terminal((result as { record?: unknown }).record, "failed") ? { status: "completed" } : completionUnavailable();
     } catch { pending = false; return completionUnavailable(); }
   };
   const claimRetry = async (): Promise<MutationAuthorityResult> => {
