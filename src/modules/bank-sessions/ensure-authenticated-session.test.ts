@@ -223,6 +223,26 @@ describe("coordinateAuthenticatedSessionState", () => {
     }
   });
 
+  it("allows one pending renewal, then permits a later serial renewal", async () => {
+    const { attempts, dependencies, probe } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" }); const acquired = await coordinate(dependencies); if (acquired.status !== "authentication_required") throw new Error("expected authority"); const claimed = claimAuthenticationMutationAuthority(acquired.authority); if (claimed.status !== "claimed") throw new Error("expected claim");
+    let release!: () => void; attempts.renewLease.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({ status: "lease_renewed", record: owned() }); }));
+    const first = claimed.authority.renewLease(); await expect(claimed.authority.renewLease()).resolves.toEqual({ status: "invalid_sequence" }); expect(attempts.renewLease).toHaveBeenCalledTimes(1);
+    release(); await expect(first).resolves.toEqual({ status: "authorized" }); attempts.renewLease.mockResolvedValueOnce({ status: "lease_renewed", record: owned() }); await expect(claimed.authority.renewLease()).resolves.toEqual({ status: "authorized" }); expect(attempts.renewLease).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { label: "wrong identity", record: { ...owned(), identity: { ...identity, attemptId: "other" } } },
+    { label: "wrong owner", record: { ...owned(), ownerToken: "other" } },
+    { label: "wrong generation", record: { ...owned(), generation: 1n } },
+    { label: "terminal record", record: authenticated() },
+    { label: "missing lease", record: { ...owned(), leaseExpiresAt: null } },
+    { label: "invalid lease", record: { ...owned(), leaseExpiresAt: new Date("invalid") } },
+    { label: "wrong durable phase", record: interacting() },
+  ])("poisons renewal with $label without a later repository operation", async ({ record }) => {
+    const { attempts, dependencies, probe } = setup(); probe.observe.mockResolvedValue({ status: "unauthenticated" }); const acquired = await coordinate(dependencies); if (acquired.status !== "authentication_required") throw new Error("expected authority"); const claimed = claimAuthenticationMutationAuthority(acquired.authority); if (claimed.status !== "claimed") throw new Error("expected claim"); attempts.renewLease.mockResolvedValueOnce({ status: "lease_renewed", record } as never);
+    await expect(claimed.authority.renewLease()).resolves.toEqual({ status: "unavailable" }); await expect(claimed.authority.beginCredentialInteraction()).resolves.toEqual({ status: "invalid_sequence" }); expect(attempts.renewLease).toHaveBeenCalledTimes(1); expect(attempts.beginCredentialInteraction).not.toHaveBeenCalled();
+  });
+
   it.each([
     { label: "status only", result: { status: "interaction_started" } },
     { label: "wrong phase", result: { status: "interaction_started", record: owned() } },
