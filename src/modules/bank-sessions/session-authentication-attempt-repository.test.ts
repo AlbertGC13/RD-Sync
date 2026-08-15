@@ -125,8 +125,8 @@ const reconcileExpiredLeaseResults: readonly ReconcileExpiredLeaseResult[] = [
 ];
 const notApplied: SessionAuthenticationAttemptNotAppliedResult = { status: "not_applied" };
 const observedRestorationResults: readonly ResolveObservedRestorationResult[] = [
-  { status: "resolved", evidence: { authenticatedAt: new Date("2026-08-13T01:00:00.000Z") } },
-  { status: "already_resolved" }, { status: "missing", missing: "authentication_attempt" },
+  { status: "resolved", evidence: { identity: owner.identity, interactionPhase: "no_credential_interaction", terminalGeneration: 2n, authenticatedAt: new Date("2026-08-13T01:00:00.000Z") } },
+  { status: "already_resolved", evidence: { identity: owner.identity, interactionPhase: "no_credential_interaction", terminalGeneration: 2n, authenticatedAt: new Date("2026-08-13T01:00:00.000Z") } }, { status: "missing", missing: "authentication_attempt" },
   { status: "missing", missing: "expiry_episode" }, { status: "identity_mismatch" },
   { status: "stale_owner" }, { status: "lease_expired" }, { status: "active_mutation_owner" },
   { status: "episode_not_resolvable" }, { status: "terminal_conflict" }, { status: "not_applied" },

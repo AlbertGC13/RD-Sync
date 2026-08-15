@@ -197,12 +197,16 @@ describe.skipIf(!url)("Session authentication attempt PostgreSQL contract", () =
     }
   });
 
-  it.each(["no_credential_interaction", "credentials_may_have_reached_portal", "submit_may_have_been_dispatched"])("resolves manual recovery while preserving %s", async (phase) => {
+  it.each(["no_credential_interaction", "credentials_may_have_reached_portal", "submit_may_have_been_dispatched"] as const)("resolves manual recovery with exact durable evidence for %s", async (phase) => {
     const { id, owner } = await lease(`observed-${phase}`); await episode(id);
     if (phase !== "no_credential_interaction") await repo().beginCredentialInteraction({ owner });
     if (phase === "submit_may_have_been_dispatched") await repo().recordSubmitBarrier({ owner });
-    await expect(repo().resolveObservedRestoration(owner)).resolves.toMatchObject({ status: "resolved" });
-    await expect(repo().findExact({ identity: id })).resolves.toMatchObject({ status: "found", record: { status: "authenticated", interactionPhase: phase, ownerToken: null, leaseExpiresAt: null, generation: owner.generation + 1n } });
+    const result = await repo().resolveObservedRestoration(owner);
+    if (result.status !== "resolved") throw new Error("Expected observed restoration");
+    expect(result.evidence).toMatchObject({ identity: id, interactionPhase: phase, terminalGeneration: owner.generation + 1n });
+    const durable = await repo().findExact({ identity: id });
+    if (durable.status !== "found" || durable.record.status !== "authenticated") throw new Error("Expected authenticated terminal attempt");
+    expect(result.evidence).toEqual({ identity: durable.record.identity, interactionPhase: durable.record.interactionPhase, terminalGeneration: durable.record.generation, authenticatedAt: durable.record.terminalAt });
     await expect(pool!.query('SELECT "consumerAttemptState", "consumerLeaseExpiresAt" FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [id.bankCode])).resolves.toMatchObject({ rows: [{ consumerAttemptState: "resolved", consumerLeaseExpiresAt: null }] });
   });
 
@@ -239,10 +243,11 @@ describe.skipIf(!url)("Session authentication attempt PostgreSQL contract", () =
     const failed = await lease("observed-failed"); await episode(failed.id); await repo().completeFailed({ owner: failed.owner, failureClass: "transient_pre_interaction", operatorReason: "temporary_authentication_problem" });
     await expect(repo().resolveObservedRestoration(failed.owner)).resolves.toEqual({ status: "terminal_conflict" });
     await pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [failed.id.bankCode]);
-    const resolved = await lease("observed-resolved"); await episode(resolved.id); await repo().resolveObservedRestoration(resolved.owner);
-    await expect(repo().resolveObservedRestoration(resolved.owner)).resolves.toEqual({ status: "already_resolved" });
+    const resolved = await lease("observed-resolved"); await episode(resolved.id); const first = await repo().resolveObservedRestoration(resolved.owner);
+    if (first.status !== "resolved") throw new Error("Expected observed restoration");
+    await expect(repo().resolveObservedRestoration(resolved.owner)).resolves.toEqual({ status: "already_resolved", evidence: first.evidence });
     await pool!.query('DELETE FROM "BankSessionExpiryEpisode" WHERE "bankCode" = $1', [resolved.id.bankCode]);
-    await expect(repo().resolveObservedRestoration(resolved.owner)).resolves.toEqual({ status: "already_resolved" });
+    await expect(repo().resolveObservedRestoration(resolved.owner)).resolves.toEqual({ status: "already_resolved", evidence: first.evidence });
     const conflict = await lease("observed-terminal-conflict"); await episode(conflict.id); await repo().completeAuthenticated({ owner: conflict.owner });
     await expect(repo().resolveObservedRestoration(conflict.owner)).resolves.toEqual({ status: "terminal_conflict" });
   });
