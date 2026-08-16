@@ -1442,7 +1442,7 @@ describe("executeScrapeTimeAutoLoginAuthenticationAttempt", () => {
   const trigger = { kind: "authentication_attempt" as const, id: "a".repeat(64) };
   const fence = { beginCredentialInteraction: vi.fn().mockResolvedValue({ status: "authorized" as const }), renewBeforeCredentialMutation: vi.fn().mockResolvedValue({ status: "authorized" as const }), recordSubmitBarrier: vi.fn().mockResolvedValue({ status: "authorized" as const }) };
 
-  it("keeps public authentication triggers inert and only the bridge authorizes durable execution", async () => {
+  it("keeps public authentication triggers inert and blocks forged, copied, or expired fences before dependencies", async () => {
     const deps = dependencies(vi.fn(async ({ page }) => {
       await page.fill("#username", "bank-user");
       await page.click("button[type='submit']");
@@ -1450,24 +1450,23 @@ describe("executeScrapeTimeAutoLoginAuthenticationAttempt", () => {
     }));
     const runner = createScrapeTimeAutoLoginRunner(deps);
     await expect(runner({ data: { bankId: "popular", runId: "run" } }, { trigger })).resolves.toMatchObject({ reason: "authentication_trigger_not_ready" });
-    await expect(executeScrapeTimeAutoLoginAuthenticationAttempt({ runnerDependencies: deps, job: { data: { bankId: "popular", runId: "run" } }, trigger, fence, signal: new AbortController().signal })).resolves.toEqual({ outcome: { status: "succeeded" }, durableResult: { status: "completed", outcome: { status: "succeeded" } } });
-    expect([deps.lock.acquire, deps.lock.release, fence.beginCredentialInteraction, fence.recordSubmitBarrier].map((call) => call.mock.calls.length)).toEqual([1, 1, 1, 1]);
+    for (const invalidFence of [fence, { ...fence }, Object.freeze({ ...fence })]) await expect(executeScrapeTimeAutoLoginAuthenticationAttempt({ runnerDependencies: deps, job: { data: { bankId: "popular", runId: "run" } }, trigger, fence: invalidFence as never, signal: new AbortController().signal })).resolves.toEqual({ outcome: null, durableResult: { status: "blocked" } });
+    expect([deps.adapterRegistry.get, deps.autoLoginConfigs.getByBankCode, deps.credentials.findByBankCode, deps.lock.acquire].map((call) => call.mock.calls.length)).toEqual([0, 0, 0, 0]);
   });
 
   it("does not accept forged option symbols and bypasses the legacy hook on the durable raw page", async () => {
     const deps = { ...dependencies(), beforeAutoLoginMutation: vi.fn(() => false) };
     const runner = createScrapeTimeAutoLoginRunner(deps);
     await expect(runner({ data: { bankId: "popular", runId: "run" } }, { trigger, [Symbol("capability")]: {} } as never)).resolves.toMatchObject({ reason: "invalid_trigger" });
-    await executeScrapeTimeAutoLoginAuthenticationAttempt({ runnerDependencies: deps, job: { data: { bankId: "popular", runId: "run" } }, trigger, fence, signal: new AbortController().signal });
+    await executeScrapeTimeAutoLoginAuthenticationAttempt({ runnerDependencies: deps, job: { data: { bankId: "popular", runId: "run" } }, trigger, fence: fence as never, signal: new AbortController().signal });
     expect(deps.beforeAutoLoginMutation).not.toHaveBeenCalled();
   });
 
-  it("makes duplicate and malformed durable execution sticky blocked", async () => {
-    const first = vi.fn().mockResolvedValue({ status: "succeeded" as const });
-    const deps = dependencies(first);
-    const input = { runnerDependencies: deps, job: { data: { bankId: "popular", runId: "run" } }, trigger, fence, signal: new AbortController().signal };
-    await expect(executeScrapeTimeAutoLoginAuthenticationAttempt(input)).resolves.toMatchObject({ durableResult: { status: "completed" } });
-    await expect(executeScrapeTimeAutoLoginAuthenticationAttempt(input)).resolves.toMatchObject({ durableResult: { status: "completed" } });
-    expect(first).toHaveBeenCalledTimes(2);
+  it("blocks repeated fake bridge calls without strategy execution", async () => {
+    const first = vi.fn().mockResolvedValue({ status: "succeeded" as const }); const deps = dependencies(first);
+    const input = { runnerDependencies: deps, job: { data: { bankId: "popular", runId: "run" } }, trigger, fence: fence as never, signal: new AbortController().signal };
+    await expect(executeScrapeTimeAutoLoginAuthenticationAttempt(input)).resolves.toEqual({ outcome: null, durableResult: { status: "blocked" } });
+    await expect(executeScrapeTimeAutoLoginAuthenticationAttempt(input)).resolves.toEqual({ outcome: null, durableResult: { status: "blocked" } });
+    expect(first).not.toHaveBeenCalled();
   });
 });

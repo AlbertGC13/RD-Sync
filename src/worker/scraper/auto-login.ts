@@ -13,7 +13,7 @@ import { decryptCredentialField, type AesGcmEnvelope, type KeyResolver } from ".
 import type { AutoLoginLock } from "../../modules/bank-auto-login-lock";
 import { parseAutoLoginTriggerIdentity } from "../../modules/bank-auto-login-trigger";
 import { executeDurablyFencedAutoLogin, type DurableAutoLoginMutationResult } from "./durable-auto-login-mutation";
-import type { CredentialMutationFence } from "./authenticated-session-mutation-runner";
+import { isCredentialMutationFence, type CredentialMutationFence } from "./authenticated-session-mutation-runner";
 
 export interface BankAutoLoginCredential {
   bankCode: string;
@@ -154,6 +154,7 @@ type AuthenticationCapabilityState = {
 };
 const authenticationCapability = Symbol("authentication capability");
 const authenticationCapabilities = new WeakMap<object, AuthenticationCapabilityState>();
+const consumedAuthenticationFences = new WeakSet<object>();
 type PrivateRunnerOptions = ScrapeTimeAutoLoginRunOptions & { [authenticationCapability]: object };
 
 export async function executeScrapeTimeAutoLoginAuthenticationAttempt(input: Readonly<{
@@ -162,16 +163,24 @@ export async function executeScrapeTimeAutoLoginAuthenticationAttempt(input: Rea
   trigger: Readonly<{ kind: "authentication_attempt"; id: string }>;
   fence: CredentialMutationFence;
   signal: AbortSignal;
-}>): Promise<Readonly<{ outcome: ScrapeTimeAutoLoginOutcome | null; durableResult?: DurableAutoLoginMutationResult }>> {
+}>): Promise<Readonly<{ outcome: ScrapeTimeAutoLoginOutcome | null; durableResult?: DurableAutoLoginMutationResult; runnerFailed?: true }>> {
+  if (!isCredentialMutationFence(input.fence) || consumedAuthenticationFences.has(input.fence)) {
+    return { outcome: null, durableResult: { status: "blocked" } };
+  }
+  consumedAuthenticationFences.add(input.fence);
   const capability = Object.freeze(Object.create(null));
   const state: AuthenticationCapabilityState = { fence: input.fence, signal: input.signal, calls: 0 };
   authenticationCapabilities.set(capability, state);
   try {
-    const outcome = await createScrapeTimeAutoLoginRunner(input.runnerDependencies)(input.job, {
-      trigger: input.trigger,
-      [authenticationCapability]: capability,
-    } as PrivateRunnerOptions);
-    return { outcome, durableResult: state.durableResult };
+    try {
+      const outcome = await createScrapeTimeAutoLoginRunner(input.runnerDependencies)(input.job, {
+        trigger: input.trigger,
+        [authenticationCapability]: capability,
+      } as PrivateRunnerOptions);
+      return { outcome, durableResult: state.durableResult };
+    } catch {
+      return { outcome: null, durableResult: state.durableResult, runnerFailed: true };
+    }
   } finally {
     authenticationCapabilities.delete(capability);
   }
