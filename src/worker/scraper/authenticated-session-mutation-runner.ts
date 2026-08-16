@@ -46,10 +46,11 @@ export function createAuthenticatedSessionMutationRunner({ execution, heartbeat 
         catch { fail(); return { status: "blocked" } as const; }
       });
       const fence: CredentialMutationFence = { beginCredentialInteraction: () => guarded(() => claimed.authority.beginCredentialInteraction(), "interaction_started"), recordSubmitBarrier: () => guarded(() => claimed.authority.recordSubmitBarrier(), "submit_barrier_recorded") };
-      let scheduler: Readonly<{ stop(): Promise<void> }>;
-      try { scheduler = heartbeat.start(() => guarded(() => claimed.authority.renewLease()).then(() => undefined)); } catch { return { status: "unresolved" }; }
+      let scheduler: Readonly<{ stop(): Promise<void> }>; let stopped = false;
+      try { scheduler = heartbeat.start(() => stopped ? Promise.resolve() : guarded(() => claimed.authority.renewLease()).then(() => undefined)); } catch { return { status: "unresolved" }; }
       let result: unknown = null;
       try { result = await execution.execute({ fence, signal: controller.signal }); } catch { result = null; }
+      stopped = true;
       try { await scheduler.stop(); } catch { fail(); }
       await gate.drain();
       if (sticky) return { status: "unresolved" };
