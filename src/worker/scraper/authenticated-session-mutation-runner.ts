@@ -4,7 +4,7 @@ import type { AuthenticatedSessionMutationRunner, AuthenticatedSessionMutationRu
 import type { SessionAuthenticationFailurePair } from "../../modules/bank-sessions/session-authentication-attempt-repository";
 
 export type AuthenticationExecutionResult = Readonly<{ status: "succeeded" | "transient_unavailable" | "cancelled" | "blocked" }> | Readonly<{ status: "rejected"; cause: "protected_or_mfa" | "incompatible_flow" | "structural_configuration" | "unknown" }>;
-export interface CredentialMutationFence { beginCredentialInteraction(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; recordSubmitBarrier(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; }
+export interface CredentialMutationFence { beginCredentialInteraction(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; renewBeforeCredentialMutation(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; recordSubmitBarrier(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; }
 export interface AuthenticationExecution { execute(input: Readonly<{ fence: CredentialMutationFence; signal: AbortSignal }>): Promise<AuthenticationExecutionResult>; }
 export interface AuthenticationHeartbeatScheduler { start(heartbeat: () => Promise<void>): Readonly<{ stop(): Promise<void> }>; }
 export type AuthenticatedSessionMutationRunnerDependencies = Readonly<{ execution: AuthenticationExecution; heartbeat: AuthenticationHeartbeatScheduler }>;
@@ -45,7 +45,7 @@ export function createAuthenticatedSessionMutationRunner({ execution, heartbeat 
         try { const result = await operation(); if (!exact(result, ["status"]) || (result as Record<PropertyKey, unknown>).status !== "authorized") { fail(); return { status: "blocked" } as const; } if (advance) phase = advance; return { status: "authorized" } as const; }
         catch { fail(); return { status: "blocked" } as const; }
       });
-      const fence: CredentialMutationFence = { beginCredentialInteraction: () => guarded(() => claimed.authority.beginCredentialInteraction(), "interaction_started"), recordSubmitBarrier: () => guarded(() => claimed.authority.recordSubmitBarrier(), "submit_barrier_recorded") };
+      const fence: CredentialMutationFence = { beginCredentialInteraction: () => guarded(() => claimed.authority.beginCredentialInteraction(), "interaction_started"), renewBeforeCredentialMutation: () => guarded(() => claimed.authority.renewLease()), recordSubmitBarrier: () => guarded(() => claimed.authority.recordSubmitBarrier(), "submit_barrier_recorded") };
       let scheduler: Readonly<{ stop(): Promise<void> }>; let stopped = false;
       try { scheduler = heartbeat.start(() => stopped ? Promise.resolve() : guarded(() => claimed.authority.renewLease()).then(() => undefined)); } catch { return { status: "unresolved" }; }
       let result: unknown = null;
