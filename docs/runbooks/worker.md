@@ -141,6 +141,8 @@ Expected evidence:
 
 Cleanup is scoped to the test's UUID database records.
 
+`bank-session-expiry-publication` jobs already queued are not retired by WU5a and still route through the existing consumer. WU5b will validate and acknowledge them inertly, without ingestion or mutation; this is not active yet. Deploy WU5a only in the complete coordinated feature-branch cutover artifact, never independently to `main`.
+
 Safety boundaries:
 
 - The database URL must target a disposable test service, never `DATABASE_URL`,

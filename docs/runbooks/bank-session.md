@@ -98,6 +98,8 @@ When `RD_SYNC_SESSION_MONITOR=enabled`, the ingestion worker performs live CDP c
 
 The expiry runtime is alert/outbox-only. It does not create expiry episodes, schedule publication jobs, observe publication state, or require Redis for monitoring. Existing durable episode and manual-resolution rows remain untouched. Publication retirement is in progress; authenticated-ingestion activation is not part of this runbook change.
 
+Los trabajos `bank-session-expiry-publication` ya encolados todavía no se retiran con WU5a y continúan pasando por el consumidor existente. WU5b los validará y confirmará como inertes, sin ingesta ni mutación; ese comportamiento aún no está activo. WU5a solo se despliega dentro del artefacto completo del corte coordinado de ramas, nunca de forma independiente a `main`.
+
 | Status | Meaning |
 |--------|---------|
 | `active` | Session is live and the dashboard loaded correctly |

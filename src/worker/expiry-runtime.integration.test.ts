@@ -66,7 +66,7 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
     const timers: number[] = [];
     const clearedTimers: number[] = [];
     const ownersSeen = new Set<string>();
-    const alerts: Array<{ safeSummary: string }> = [];
+    const alerts: Array<{ status: string; safeSummary: string; checkedAt: string }> = [];
     const runtimeTickGate: { wait?: Promise<void>; release?: () => void; signalReplicaATick?: () => void } = {};
     const runtimeTickStats = new Map<string, { calls: number; active: number; max: number }>();
     let releaseClaimBarrier!: () => void;
@@ -148,6 +148,12 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
     await Promise.all([runtimeA.tick(), runtimeB.tick()]);
     expect(await prisma.bankSessionExpiryEpisode.count({ where: { bankCode } })).toBe(0);
     expect(monitorAudits).toEqual(["bank_session.expired", "bank_session.expired"]);
+    expect(alerts).toHaveLength(2);
+    for (const alert of alerts) {
+      expect(alert).toEqual(expect.objectContaining({ status: "expired", safeSummary: "Synthetic expiry" }));
+      expect(alert.checkedAt).toEqual(expect.any(String));
+      expect(Number.isNaN(Date.parse(alert.checkedAt))).toBe(false);
+    }
 
     await prisma.manualRecoveryResolution.create({
       data: {
@@ -177,8 +183,6 @@ describe.skipIf(!RUN_INTEGRATION)("expiry runtime integration (requires dedicate
       },
     });
     expect(await prisma.auditEvent.count({ where: manualAuditWhere })).toBe(2);
-    expect(alerts).toEqual(expect.arrayContaining([{ safeSummary: "Synthetic expiry" }]));
-
     runtimeTickGate.wait = new Promise<void>((resolve) => { runtimeTickGate.release = resolve; });
     const replicaATickEntered = new Promise<void>((resolve) => { runtimeTickGate.signalReplicaATick = resolve; });
     const replicaAStats = runtimeTickStats.get("replica-a")!;
