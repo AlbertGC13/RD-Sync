@@ -7,6 +7,7 @@ import {
   MAX_LOCK_TTL_MS,
   LOCK_KEY_PREFIX,
 } from "./index";
+import { createAuthenticationAttemptTrigger } from "../bank-auto-login-trigger";
 
 class InMemoryLockStore {
   private store = new Map<string, string>();
@@ -267,6 +268,62 @@ describe("AutoLoginLock", () => {
     it("throws when store is missing (fail-fast)", () => {
       // Force an undefined store to exercise the runtime guard (TS would catch this normally).
       expect(() => createAutoLoginLock({ store: undefined as unknown as import("./index").LockStore })).toThrow("LockStore is required");
+    });
+  });
+
+  describe("typed trigger compatibility", () => {
+    const expiry = { kind: "session_expiry", id: "evt-001" } as const;
+    const authenticationAttempt = createAuthenticationAttemptTrigger({ bankCode: "popular", runId: "run-1", attemptId: "attempt-1" });
+
+    it("maps a session-expiry object to the exact legacy key and contends with legacy callers", async () => {
+      const { lock } = setup();
+      expect(buildLockKey("popular", expiry)).toBe("autologin:lock:popular:evt-001");
+      const legacy = await lock.acquire("popular", "evt-001");
+      expect(await lock.acquire("popular", expiry)).toBeNull();
+      expect(await lock.release("popular", expiry, legacy!.leaseToken)).toBe(true);
+      const typed = await lock.acquire("popular", expiry);
+      expect(await lock.renew("popular", "evt-001", typed!.leaseToken)).toBe(true);
+    });
+
+    it("uses a stable, separated v2 key for authentication attempts", async () => {
+      const { lock } = setup();
+      const expected = `autologin:lock:v2:popular:authentication_attempt:${authenticationAttempt.id}`;
+      expect(buildLockKey("popular", authenticationAttempt)).toBe(expected);
+      expect(buildLockKey("popular", { kind: "session_expiry", id: authenticationAttempt.id })).not.toBe(expected);
+      expect(await lock.acquire("popular", authenticationAttempt)).not.toBeNull();
+      expect(await lock.acquire("popular", authenticationAttempt)).toBeNull();
+      expect(await lock.acquire("banreservas", authenticationAttempt)).not.toBeNull();
+      const other = createAuthenticationAttemptTrigger({ bankCode: "popular", runId: "run-1", attemptId: "attempt-2" });
+      expect(await lock.acquire("popular", other)).not.toBeNull();
+    });
+
+    it("preserves owner, expiry, renew, and fencing semantics for authentication attempts", async () => {
+      let timeMs = 1_000_000;
+      const now = () => timeMs;
+      const lock = createAutoLoginLock({ store: new InMemoryLockStore(now), defaultTtlMs: 1_000, now });
+      const first = await lock.acquire("popular", authenticationAttempt);
+      expect(await lock.release("popular", authenticationAttempt, "wrong-token")).toBe(false);
+      expect(await lock.renew("popular", authenticationAttempt, first!.leaseToken)).toBe(true);
+      timeMs += 2_000;
+      const second = await lock.acquire("popular", authenticationAttempt);
+      expect(second!.fencingToken).toBe(2);
+      expect(await lock.release("popular", authenticationAttempt, first!.leaseToken)).toBe(false);
+      expect(await lock.release("popular", authenticationAttempt, second!.leaseToken)).toBe(true);
+    });
+
+    it("rejects malformed triggers before calling the store", async () => {
+      const calls: string[] = [];
+      const lock = createAutoLoginLock({
+        store: {
+          acquireSlot: async () => { calls.push("acquire"); return 1; },
+          releaseIfOwner: async () => { calls.push("release"); return true; },
+          renewIfOwner: async () => { calls.push("renew"); return true; },
+        },
+      });
+      await expect(lock.acquire("popular", { kind: "authentication_attempt", id: "raw-id" } as never)).rejects.toThrow(LockValidationError);
+      await expect(lock.release("Popular", expiry, "lease")).rejects.toThrow(LockValidationError);
+      await expect(lock.renew("popular", { kind: "session_expiry", id: "secret", owner: "x" } as never, "lease")).rejects.toThrow(LockValidationError);
+      expect(calls).toEqual([]);
     });
   });
 });

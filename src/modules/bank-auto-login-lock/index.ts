@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
 
+import { parseAutoLoginTriggerIdentity, type AutoLoginTriggerIdentity } from "../bank-auto-login-trigger";
+
 export interface AcquiredLock {
   leaseToken: string;
   fencingToken: number;
@@ -7,9 +9,9 @@ export interface AcquiredLock {
 }
 
 export interface AutoLoginLock {
-  acquire(bankCode: string, expiredEventId: string, ttlMs?: number): Promise<AcquiredLock | null>;
-  release(bankCode: string, expiredEventId: string, leaseToken: string): Promise<boolean>;
-  renew(bankCode: string, expiredEventId: string, leaseToken: string, ttlMs?: number): Promise<boolean>;
+  acquire(bankCode: string, trigger: string | AutoLoginTriggerIdentity, ttlMs?: number): Promise<AcquiredLock | null>;
+  release(bankCode: string, trigger: string | AutoLoginTriggerIdentity, leaseToken: string): Promise<boolean>;
+  renew(bankCode: string, trigger: string | AutoLoginTriggerIdentity, leaseToken: string, ttlMs?: number): Promise<boolean>;
 }
 
 export interface AcquireSlotParams {
@@ -77,8 +79,24 @@ function validateTtlMs(ttlMs: number, maxTtlMs?: number): void {
   ]);
 }
 
-export const buildLockKey = (bankCode: string, expiredEventId: string): string =>
-  `${LOCK_KEY_PREFIX}:${bankCode}:${expiredEventId}`;
+export const buildLockKey = (bankCode: string, trigger: string | AutoLoginTriggerIdentity): string => {
+  if (typeof trigger === "string") return `${LOCK_KEY_PREFIX}:${bankCode}:${trigger}`;
+  return trigger.kind === "session_expiry"
+    ? `${LOCK_KEY_PREFIX}:${bankCode}:${trigger.id}`
+    : `${LOCK_KEY_PREFIX}:v2:${bankCode}:authentication_attempt:${trigger.id}`;
+};
+
+function validateTrigger(trigger: string | AutoLoginTriggerIdentity): string | AutoLoginTriggerIdentity {
+  if (typeof trigger === "string") {
+    validateEventId(trigger);
+    return trigger;
+  }
+  try {
+    return parseAutoLoginTriggerIdentity(trigger);
+  } catch {
+    throw new LockValidationError("trigger", "must be a valid auto-login trigger identity");
+  }
+}
 
 const defaultGenerateLeaseToken = (): string => randomBytes(16).toString("hex");
 export function createAutoLoginLock(options: {
@@ -93,31 +111,31 @@ export function createAutoLoginLock(options: {
   if (!store) throw new Error("LockStore is required");
 
   return {
-    async acquire(bankCode, expiredEventId, ttlMs?) {
+    async acquire(bankCode, trigger, ttlMs?) {
       validateBankCode(bankCode);
-      validateEventId(expiredEventId);
+      const validatedTrigger = validateTrigger(trigger);
       const effectiveTtlMs = ttlMs ?? defaultTtlMs;
       validateTtlMs(effectiveTtlMs, maxTtlMs);
-      const key = buildLockKey(bankCode, expiredEventId);
+      const key = buildLockKey(bankCode, validatedTrigger);
       const leaseToken = generateLeaseToken();
       const currentTime = now();
       const fencingToken = await store.acquireSlot({ key, leaseToken, ttlMs: effectiveTtlMs, nowMs: currentTime });
       if (fencingToken === null) return null;
       return { leaseToken, fencingToken, expiresAt: currentTime + effectiveTtlMs };
     },
-    async release(bankCode, expiredEventId, leaseToken) {
+    async release(bankCode, trigger, leaseToken) {
       validateBankCode(bankCode);
-      validateEventId(expiredEventId);
+      const validatedTrigger = validateTrigger(trigger);
       validateLeaseToken(leaseToken);
-      return store.releaseIfOwner(buildLockKey(bankCode, expiredEventId), leaseToken);
+      return store.releaseIfOwner(buildLockKey(bankCode, validatedTrigger), leaseToken);
     },
-    async renew(bankCode, expiredEventId, leaseToken, ttlMs?) {
+    async renew(bankCode, trigger, leaseToken, ttlMs?) {
       validateBankCode(bankCode);
-      validateEventId(expiredEventId);
+      const validatedTrigger = validateTrigger(trigger);
       validateLeaseToken(leaseToken);
       const effectiveTtlMs = ttlMs ?? defaultTtlMs;
       validateTtlMs(effectiveTtlMs, maxTtlMs);
-      return store.renewIfOwner({ key: buildLockKey(bankCode, expiredEventId), expectedLeaseToken: leaseToken, newTtlMs: effectiveTtlMs, nowMs: now() });
+      return store.renewIfOwner({ key: buildLockKey(bankCode, validatedTrigger), expectedLeaseToken: leaseToken, newTtlMs: effectiveTtlMs, nowMs: now() });
     },
   };
 }
