@@ -49,6 +49,7 @@ export const BANK_SESSION_ACTIONS = {
   EXPIRED: "bank_session.expired",
   RESTORED: "bank_session.restored",
   UNAVAILABLE: "bank_session.unavailable",
+  LEGACY_EXPIRY_PUBLICATION_RETIRED: "bank_session.legacy_expiry_publication_retired",
 } as const;
 
 export const BANK_BROWSER_CAPACITY_ACTIONS = {

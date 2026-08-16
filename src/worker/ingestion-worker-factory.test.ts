@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -14,7 +15,7 @@ import type { IngestionResult } from "./queues/index";
 // Fake Worker
 // ---------------------------------------------------------------------------
 
-type JobHandler = (job: WorkerJob) => Promise<IngestionResult>;
+type JobHandler = (job: WorkerJob) => Promise<unknown>;
 
 class FakeWorker implements WorkerHandle {
   readonly queueName: string;
@@ -124,15 +125,16 @@ describe("createIngestionWorker", () => {
     expect(result).toEqual(successResult);
   });
 
-  it("routes only the exact expiry publication job name to its consumer", async () => {
+  it("routes only the exact expiry publication job name to the retired handler without invoking the processor", async () => {
     const { Ctor, instances } = makeFakeWorkerCtor();
-    const expiryPublicationConsumer = vi.fn(async () => ({ status: "ignored" }));
+    const consumeRetiredExpiryPublicationJob = vi.fn(async () => ({ status: "acknowledged" }));
     const processor = makeSuccessProcessor();
-    createIngestionWorker({ connection: fakeConnection, processor, expiryPublicationConsumer, WorkerCtor: Ctor });
+    createIngestionWorker({ connection: fakeConnection, processor, consumeRetiredExpiryPublicationJob, WorkerCtor: Ctor });
 
-    await instances[0].handler({ ...fakeJob, name: expiryPublicationJobName });
+    const data = { arbitrary: { unknown: true } };
+    await expect(instances[0].handler({ ...fakeJob, name: expiryPublicationJobName, data })).resolves.toEqual({ status: "acknowledged" });
 
-    expect(expiryPublicationConsumer).toHaveBeenCalledWith(fakeJob.data);
+    expect(consumeRetiredExpiryPublicationJob).toHaveBeenCalledWith(data);
     expect(processor).not.toHaveBeenCalled();
   });
 
@@ -142,6 +144,14 @@ describe("createIngestionWorker", () => {
 
     await expect(instances[0].handler({ ...fakeJob, name: "unknown" })).rejects.toThrow("Unsupported BullMQ job name");
     await expect(instances[0].handler({ ...fakeJob, name: expiryPublicationJobName })).rejects.toThrow("Unsupported BullMQ job name");
+  });
+
+  it("composes the retired handler in production without the legacy claim consumer", async () => {
+    const source = await readFile(new URL("./ingestion-worker.ts", import.meta.url), "utf8");
+
+    expect(source).toContain("createRetiredExpiryPublicationConsumer");
+    expect(source).toContain("auditSink: defaultAuditSink");
+    expect(source).not.toContain("createExpiryPublicationConsumer");
   });
 
   it("the worker handler does NOT swallow an unexpected processor throw", async () => {
