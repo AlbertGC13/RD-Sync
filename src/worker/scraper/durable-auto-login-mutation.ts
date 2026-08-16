@@ -1,86 +1,58 @@
-import type { CredentialInteractionPhase } from "../../modules/bank-sessions/session-authentication-attempt";
-import type {
-  SessionAuthenticationAttemptRepository,
-  SessionAuthenticationLeaseOwner,
-} from "../../modules/bank-sessions/session-authentication-attempt-repository";
 import type {
   BankAutoLoginCredential,
   BankAutoLoginOutcome,
   BankAutoLoginPage,
   BankAutoLoginStrategy,
 } from "./auto-login";
-
-type DurableAttempts = Pick<SessionAuthenticationAttemptRepository, "beginCredentialInteraction" | "renewLease" | "recordSubmitBarrier">;
-type DurableBlockReason = "ownership_lost" | "durable_state_changed" | "persistence_unavailable";
+import type { CredentialMutationFence } from "./authenticated-session-mutation-runner";
 
 export type DurableAutoLoginMutationResult =
-  | Readonly<{ status: "completed"; outcome: BankAutoLoginOutcome; interactionPhase: CredentialInteractionPhase }>
-  | Readonly<{ status: "blocked"; reason: DurableBlockReason; interactionPhase: CredentialInteractionPhase }>;
+  | Readonly<{ status: "completed"; outcome: BankAutoLoginOutcome }>
+  | Readonly<{ status: "blocked" }>;
+
+const authorized = (value: unknown) => typeof value === "object" && value !== null
+  && Reflect.ownKeys(value).length === 1
+  && Reflect.ownKeys(value)[0] === "status"
+  && (value as Record<PropertyKey, unknown>).status === "authorized";
 
 export async function executeDurablyFencedAutoLogin(input: Readonly<{
   strategy: BankAutoLoginStrategy;
   credential: BankAutoLoginCredential;
   page: BankAutoLoginPage;
-  attempts: DurableAttempts;
-  owner: SessionAuthenticationLeaseOwner;
-  leaseDurationMs: number;
+  fence: CredentialMutationFence;
+  signal: AbortSignal;
 }>): Promise<DurableAutoLoginMutationResult> {
-  if (!Number.isSafeInteger(input.leaseDurationMs) || input.leaseDurationMs <= 0) {
-    throw new Error("Lease duration must be a positive safe integer");
-  }
-
-  let phase: CredentialInteractionPhase = "no_credential_interaction";
-  let denial: DurableBlockReason | undefined;
-  let clickFailed = false;
-
-  const blockFor = (status: string): DurableBlockReason =>
-    status === "stale_owner" || status === "lease_expired" ? "ownership_lost" : "durable_state_changed";
-  const deny = (reason: DurableBlockReason): never => {
-    denial ??= reason;
-    throw new Error("Durable auto-login mutation denied");
+  let started = false;
+  let blocked = input.signal.aborted;
+  const fail = () => { blocked = true; };
+  const denied = () => { throw new Error("Credential mutation blocked"); };
+  const fence = async (operation: () => Promise<unknown>) => {
+    if (blocked || input.signal.aborted) { fail(); denied(); }
+    try { if (!authorized(await operation())) { fail(); denied(); } }
+    catch { fail(); denied(); }
   };
-
+  const raw = (operation: () => void | Promise<void>) => {
+    if (input.signal.aborted) { fail(); denied(); }
+    try { return operation(); } catch { fail(); denied(); }
+  };
   const page: BankAutoLoginPage = {
     currentUrl: () => input.page.currentUrl(),
     hasVisibleSelector: (selector, timeoutMs) => input.page.hasVisibleSelector(selector, timeoutMs),
     protectedStateDetectionWindowMs: input.page.protectedStateDetectionWindowMs,
     async fill(selector, value) {
-      if (!value) return input.page.fill(selector, value);
-      if (denial) throw new Error("Durable auto-login mutation denied");
-      try {
-        const result = phase === "no_credential_interaction"
-          ? await input.attempts.beginCredentialInteraction({ owner: input.owner, leaseDurationMs: input.leaseDurationMs })
-          : await input.attempts.renewLease({ owner: input.owner, leaseDurationMs: input.leaseDurationMs });
-        const authorized = phase === "no_credential_interaction" ? result.status === "interaction_started" : result.status === "lease_renewed";
-        if (!authorized) deny(blockFor(result.status));
-        if (phase === "no_credential_interaction") phase = "credentials_may_have_reached_portal";
-      } catch {
-        if (denial) throw new Error("Durable auto-login mutation denied");
-        deny("persistence_unavailable");
+      if (!value) {
+        try { await input.page.fill(selector, value); } catch { /* Cleanup cannot repair a prior failure. */ }
+        return;
       }
-      return input.page.fill(selector, value);
+      await fence(started ? () => input.fence.renewBeforeCredentialMutation() : () => input.fence.beginCredentialInteraction());
+      try { await raw(() => input.page.fill(selector, value)); started = true; } catch { fail(); denied(); }
     },
     async click(selector) {
-      if (denial) throw new Error("Durable auto-login mutation denied");
-      try {
-        const result = await input.attempts.recordSubmitBarrier({ owner: input.owner, leaseDurationMs: input.leaseDurationMs });
-        if (result.status !== "recorded") deny(blockFor(result.status));
-        phase = "submit_may_have_been_dispatched";
-      } catch {
-        if (denial) throw new Error("Durable auto-login mutation denied");
-        deny("persistence_unavailable");
-      }
-      try {
-        return await input.page.click(selector);
-      } catch (error) {
-        clickFailed = true;
-        throw error;
-      }
+      await fence(() => input.fence.recordSubmitBarrier());
+      try { await raw(() => input.page.click(selector)); } catch { fail(); denied(); }
     },
   };
-
-  const outcome = await input.strategy.autoLogin({ credential: input.credential, page });
-  if (denial) return { status: "blocked", reason: denial, interactionPhase: phase };
-  if (clickFailed) return { status: "blocked", reason: "durable_state_changed", interactionPhase: phase };
-  return { status: "completed", outcome, interactionPhase: phase };
+  let outcome: BankAutoLoginOutcome | undefined;
+  try { outcome = await input.strategy.autoLogin({ credential: input.credential, page }); } catch { fail(); }
+  return blocked || input.signal.aborted || !outcome ? { status: "blocked" } : { status: "completed", outcome };
 }
