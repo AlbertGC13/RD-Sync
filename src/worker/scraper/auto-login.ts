@@ -11,6 +11,7 @@ import {
 } from "./browser-runtime";
 import { decryptCredentialField, type AesGcmEnvelope, type KeyResolver } from "../../modules/bank-credentials/crypto";
 import type { AutoLoginLock } from "../../modules/bank-auto-login-lock";
+import { parseAutoLoginTriggerIdentity } from "../../modules/bank-auto-login-trigger";
 
 export interface BankAutoLoginCredential {
   bankCode: string;
@@ -54,6 +55,8 @@ export type BankAutoLoginAdminActionReason =
   | "unauthorized_login_page"
   | "unknown_post_submit_state"
   | "browser_unavailable"
+  | "invalid_trigger"
+  | "authentication_trigger_not_ready"
   | "auto_login_execution_failed";
 
 export type BankAutoLoginOutcome =
@@ -101,6 +104,10 @@ export interface ScrapeTimeAutoLoginRunnerJob {
     expiredEventId?: string;
     runId?: string;
   };
+}
+
+export interface ScrapeTimeAutoLoginRunOptions {
+  trigger?: unknown;
 }
 
 export interface ScrapeTimeAutoLoginCredentialRecord {
@@ -333,11 +340,16 @@ async function recordBrowserCleanupFailure(
   return Promise.resolve(recordCleanupFailure?.({ bankCode, failure })).then(() => undefined);
 }
 export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerDependencies) {
-  return async function runScrapeTimeAutoLogin(job: ScrapeTimeAutoLoginRunnerJob): Promise<ScrapeTimeAutoLoginOutcome | null> {
-    const expiredEventId = job.data.expiredEventId;
-    if (!expiredEventId) return null;
+  return async function runScrapeTimeAutoLogin(
+    job: ScrapeTimeAutoLoginRunnerJob,
+    options?: ScrapeTimeAutoLoginRunOptions,
+  ): Promise<ScrapeTimeAutoLoginOutcome | null> {
+    const trigger = resolveRunnerTrigger(job, options, arguments.length > 1);
+    if (trigger.status === "invalid") return needsAdminAction("invalid_trigger");
+    if (trigger.status === "authentication_attempt") return needsAdminAction("authentication_trigger_not_ready");
+    if (trigger.status === "none") return null;
 
-    const outcome = await resolveScrapeTimeAutoLoginOutcome(deps, job, expiredEventId);
+    const outcome = await resolveScrapeTimeAutoLoginOutcome(deps, job, trigger.expiredEventId);
     if (outcome.status === "needs_admin_action" && outcome.reason === "unknown_post_submit_state") {
       try {
         await deps.recordFailure?.(job.data.bankId, new Date());
@@ -348,7 +360,7 @@ export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerD
     try {
       await deps.afterAutoLoginOutcome?.({
         bankCode: job.data.bankId,
-        expiredEventId,
+        expiredEventId: trigger.expiredEventId,
         runId: job.data.runId,
         outcome,
       });
@@ -357,6 +369,47 @@ export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerD
     }
     return outcome;
   };
+}
+
+type RunnerTriggerResolution =
+  | { status: "legacy"; expiredEventId: string }
+  | { status: "authentication_attempt" }
+  | { status: "invalid" }
+  | { status: "none" };
+
+function resolveRunnerTrigger(
+  job: ScrapeTimeAutoLoginRunnerJob,
+  options: unknown,
+  hasOptions: boolean,
+): RunnerTriggerResolution {
+  const legacyExpiredEventId = job.data.expiredEventId;
+  if (!hasOptions) return legacyExpiredEventId ? { status: "legacy", expiredEventId: legacyExpiredEventId } : { status: "none" };
+
+  const parsedOptions = readRunnerOptions(options);
+  if (!parsedOptions) return { status: "invalid" };
+  if (!parsedOptions.hasTrigger) return legacyExpiredEventId ? { status: "legacy", expiredEventId: legacyExpiredEventId } : { status: "none" };
+
+  let trigger;
+  try {
+    trigger = parseAutoLoginTriggerIdentity(parsedOptions.trigger);
+  } catch {
+    return { status: "invalid" };
+  }
+  if (legacyExpiredEventId !== undefined) return { status: "invalid" };
+  return trigger.kind === "session_expiry"
+    ? { status: "legacy", expiredEventId: trigger.id }
+    : { status: "authentication_attempt" };
+}
+
+function readRunnerOptions(value: unknown): { hasTrigger: boolean; trigger?: unknown } | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return null;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length === 0) return { hasTrigger: false };
+  if (keys.length !== 1 || keys[0] !== "trigger") return null;
+  const descriptor = Object.getOwnPropertyDescriptor(value, "trigger");
+  if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) return null;
+  return { hasTrigger: true, trigger: descriptor.value };
 }
 
 async function resolveScrapeTimeAutoLoginOutcome(

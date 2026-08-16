@@ -842,6 +842,153 @@ describe("createScrapeTimeAutoLoginRunner", () => {
     };
   }
 
+  function createDependencyProbe() {
+    const adapterRegistry = { get: vi.fn() };
+    const autoLoginConfigs = { getByBankCode: vi.fn() };
+    const credentials = { findByBankCode: vi.fn() };
+    const lock = { acquire: vi.fn(), release: vi.fn() };
+    const cdpUrlForBankCode = vi.fn();
+    const ensureBrowser = vi.fn();
+    const recordCredentialDecryptUse = vi.fn();
+    const recordFailure = vi.fn();
+    const beforeAutoLoginMutation = vi.fn();
+    const afterAutoLoginOutcome = vi.fn();
+    const resolvingKey = vi.fn(() => key);
+    return {
+      run: createScrapeTimeAutoLoginRunner({
+        adapterRegistry,
+        autoLoginConfigs,
+        credentials,
+        keyResolver: resolvingKey,
+        lock,
+        cdpUrlForBankCode,
+        ensureBrowser,
+        recordCredentialDecryptUse,
+        recordFailure,
+        beforeAutoLoginMutation,
+        afterAutoLoginOutcome,
+      }),
+      dependencyMocks: [
+        adapterRegistry.get, autoLoginConfigs.getByBankCode, credentials.findByBankCode,
+        lock.acquire, lock.release, cdpUrlForBankCode, ensureBrowser,
+        recordCredentialDecryptUse, recordFailure, beforeAutoLoginMutation,
+        afterAutoLoginOutcome, resolvingKey,
+      ],
+    };
+  }
+
+  function expectNoDependencyCalls(dependencyMocks: ReturnType<typeof createDependencyProbe>["dependencyMocks"]) {
+    for (const dependency of dependencyMocks) expect(dependency).not.toHaveBeenCalled();
+  }
+
+  it("preserves the legacy expiry path and page identity when no options are provided", async () => {
+    const page = makePage();
+    const autoLogin = vi.fn().mockResolvedValue({ status: "succeeded" as const });
+    const acquire = vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 });
+    const release = vi.fn().mockResolvedValue(true);
+    const afterAutoLoginOutcome = vi.fn();
+    const run = createScrapeTimeAutoLoginRunner({
+      adapterRegistry: { get: vi.fn().mockReturnValue({ bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin }) }) },
+      autoLoginConfigs: { getByBankCode: vi.fn().mockResolvedValue({ autoLoginEnabled: true, breakerState: "closed" }) },
+      credentials: { findByBankCode: vi.fn().mockResolvedValue(encryptedCredentialRecord()) },
+      keyResolver,
+      lock: { acquire, release },
+      cdpUrlForBankCode: vi.fn().mockReturnValue("http://127.0.0.1:9222"),
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(page)),
+      afterAutoLoginOutcome,
+    });
+
+    await expect(run({ data: { bankId: "popular", expiredEventId: "E1", runId: "run-1" } })).resolves.toEqual({ status: "succeeded" });
+
+    expect(autoLogin).toHaveBeenCalledWith({ credential, page });
+    expect(acquire).toHaveBeenCalledWith("popular", "E1");
+    expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
+    expect(afterAutoLoginOutcome).toHaveBeenCalledWith({ bankCode: "popular", expiredEventId: "E1", runId: "run-1", outcome: { status: "succeeded" } });
+  });
+
+  it("executes an explicit session-expiry trigger through the exact legacy path", async () => {
+    const page = makePage();
+    const autoLogin = vi.fn().mockResolvedValue({ status: "succeeded" as const });
+    const acquire = vi.fn().mockResolvedValue({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 123 });
+    const release = vi.fn().mockResolvedValue(true);
+    const afterAutoLoginOutcome = vi.fn();
+    const run = createScrapeTimeAutoLoginRunner({
+      adapterRegistry: { get: vi.fn().mockReturnValue({ bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin }) }) },
+      autoLoginConfigs: { getByBankCode: vi.fn().mockResolvedValue({ autoLoginEnabled: true, breakerState: "closed" }) },
+      credentials: { findByBankCode: vi.fn().mockResolvedValue(encryptedCredentialRecord()) },
+      keyResolver,
+      lock: { acquire, release },
+      cdpUrlForBankCode: vi.fn().mockReturnValue("http://127.0.0.1:9222"),
+      ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(page)),
+      afterAutoLoginOutcome,
+    });
+
+    await expect(run({ data: { bankId: "popular", runId: "run-1" } }, { trigger: { kind: "session_expiry", id: "E1" } })).resolves.toEqual({ status: "succeeded" });
+
+    expect(autoLogin).toHaveBeenCalledWith({ credential, page });
+    expect(acquire).toHaveBeenCalledWith("popular", "E1");
+    expect(release).toHaveBeenCalledWith("popular", "E1", "lease-1");
+    expect(afterAutoLoginOutcome).toHaveBeenCalledWith({ bankCode: "popular", expiredEventId: "E1", runId: "run-1", outcome: { status: "succeeded" } });
+  });
+
+  it("rejects conflicting identities before every dependency", async () => {
+    const { run, dependencyMocks } = createDependencyProbe();
+
+    await expect(run({ data: { bankId: "popular", expiredEventId: "E1" } }, { trigger: { kind: "session_expiry", id: "E1" } })).resolves.toEqual({
+      status: "needs_admin_action", reason: "invalid_trigger", safeSummary: "Bank auto-login requires admin action",
+    });
+
+    expectNoDependencyCalls(dependencyMocks);
+  });
+
+  it("rejects malformed options and triggers without invoking accessors or dependencies", async () => {
+    let getterReads = 0;
+    const getterOptions = {};
+    Object.defineProperty(getterOptions, "trigger", { enumerable: true, get: () => { getterReads += 1; return { kind: "session_expiry", id: "E1" }; } });
+    const hiddenTrigger = { kind: "session_expiry", id: "E1" };
+    Object.defineProperty(hiddenTrigger, "extra", { value: "hidden" });
+    const symbolTrigger = { kind: "session_expiry", id: "E1", [Symbol("extra")]: true };
+    const getterTrigger = { kind: "session_expiry" };
+    Object.defineProperty(getterTrigger, "id", { enumerable: true, get: () => { getterReads += 1; return "E1"; } });
+    const malformedTriggers = [null, 1, [], new Date(), {}, { kind: "unknown", id: "E1" }, { kind: "session_expiry", id: " " }, { kind: "session_expiry", id: "a".repeat(65) }, { kind: "session_expiry", id: "E1", extra: true }, hiddenTrigger, symbolTrigger, getterTrigger];
+    const executeStrategy = vi.fn();
+    const malformedOptions = [null, 1, [], new Date(), { extra: true }, getterOptions, { trigger: undefined }, { trigger: { kind: "session_expiry", id: "E1" }, executeStrategy }];
+
+    for (const options of malformedOptions) {
+      const { run, dependencyMocks } = createDependencyProbe();
+      await expect(run({ data: { bankId: "popular" } }, options as never)).resolves.toMatchObject({ status: "needs_admin_action", reason: "invalid_trigger" });
+      expectNoDependencyCalls(dependencyMocks);
+    }
+    for (const trigger of malformedTriggers) {
+      const { run, dependencyMocks } = createDependencyProbe();
+      await expect(run({ data: { bankId: "popular" } }, { trigger })).resolves.toMatchObject({ status: "needs_admin_action", reason: "invalid_trigger" });
+      expectNoDependencyCalls(dependencyMocks);
+    }
+
+    expect(getterReads).toBe(0);
+    expect(executeStrategy).not.toHaveBeenCalled();
+  });
+
+  it("returns a fixed fail-closed outcome for authentication attempts without metadata or dependencies", async () => {
+    const rawTrigger = "a".repeat(64);
+    const { run, dependencyMocks } = createDependencyProbe();
+
+    const result = await run({ data: { bankId: "popular", runId: "run-1" } }, { trigger: { kind: "authentication_attempt", id: rawTrigger } });
+
+    expect(result).toEqual({ status: "needs_admin_action", reason: "authentication_trigger_not_ready", safeSummary: "Bank auto-login requires admin action" });
+    expect(JSON.stringify(result)).not.toContain(rawTrigger);
+    expect(JSON.stringify(result)).not.toContain("run-1");
+    expectNoDependencyCalls(dependencyMocks);
+  });
+
+  it("returns null without dependencies when neither a legacy expiry nor explicit trigger exists", async () => {
+    const { run, dependencyMocks } = createDependencyProbe();
+
+    await expect(run({ data: { bankId: "popular" } }, {})).resolves.toBeNull();
+
+    expectNoDependencyCalls(dependencyMocks);
+  });
+
   it("does not call the mutation hook when config is off or credentials are absent", async () => {
     const beforeAutoLoginMutation = vi.fn();
     for (const [config, storedCredential] of [
