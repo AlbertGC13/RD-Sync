@@ -94,9 +94,9 @@ Because the profile is persistent, cookies survive browser restarts. After the i
 
 ## What the session monitor does
 
-The API-process monitor is deliberately dormant. `RD_SYNC_SESSION_MONITOR=enabled` does not start polling; a dedicated always-on producer bootstrap is required before background monitoring can be activated. The status endpoint still performs a live, read-only session check and reports these three states:
+When `RD_SYNC_SESSION_MONITOR=enabled`, the ingestion worker performs live CDP checks and emits only safe alert transitions and monitor audits. The status endpoint still performs a live, read-only session check and reports these three states:
 
-The dormant B1 implementation stores one durable expiry episode per bank and guarantees canonical expiry and restoration audit records exactly once when a future lifecycle owner activates it. The creation winner makes one best-effort expiry-notification attempt, and the identity-safe close winner makes one best-effort restoration-notification attempt. Notification delivery and retry are not durable and have no exactly-once guarantee. If PostgreSQL is unavailable and the process is lost before an episode is persisted, B1 cannot recover that observation. It has no publication, outbox, queue, or consumer path.
+The expiry runtime is alert/outbox-only. It does not create expiry episodes, schedule publication jobs, observe publication state, or require Redis for monitoring. Existing durable episode and manual-resolution rows remain untouched. Publication retirement is in progress; authenticated-ingestion activation is not part of this runbook change.
 
 | Status | Meaning |
 |--------|---------|
@@ -152,7 +152,7 @@ Response shape:
 |----------|---------|-------------|
 | `RD_SYNC_SCRAPER` | — | Set to `popular-cdp` to enable the CDP-backed scraper and session checker |
 | `RD_SYNC_CDP_URL` | `http://127.0.0.1:9222` | Global CDP endpoint for the running Brave session (bind to 127.0.0.1 only). Single-bank-only fallback — with 2+ registered banks each must set a distinct `RD_SYNC_BANK_<BANK>_CDP_URL` |
-| `RD_SYNC_SESSION_MONITOR` | — | Reserved for a future dedicated monitor bootstrap; it does not activate API-process polling |
+| `RD_SYNC_SESSION_MONITOR` | — | Set to `enabled` in the ingestion worker to activate alert/outbox-only monitoring |
 | `RD_SYNC_SESSION_CHECK_INTERVAL_MS` | `300000` (5 min) | Poll interval in milliseconds; minimum 60000 (1 min) |
 | `RD_SYNC_ALERT_SMTP_URL` | — | SMTP URL for alert emails; falls back to console.warn if absent |
 | `RD_SYNC_ADMIN_EMAIL` | — | Recipient address for alert emails |
