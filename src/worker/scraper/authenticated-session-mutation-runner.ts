@@ -4,13 +4,16 @@ import type { AuthenticatedSessionMutationRunner, AuthenticatedSessionMutationRu
 import type { SessionAuthenticationFailurePair } from "../../modules/bank-sessions/session-authentication-attempt-repository";
 
 export type AuthenticationExecutionResult = Readonly<{ status: "succeeded" | "transient_unavailable" | "cancelled" | "blocked" }> | Readonly<{ status: "rejected"; cause: "protected_or_mfa" | "incompatible_flow" | "structural_configuration" | "unknown" }>;
-export interface CredentialMutationFence { beginCredentialInteraction(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; renewBeforeCredentialMutation(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; recordSubmitBarrier(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; }
+declare const credentialMutationFenceBrand: unique symbol;
+export interface CredentialMutationFence { readonly [credentialMutationFenceBrand]: typeof credentialMutationFenceBrand; beginCredentialInteraction(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; renewBeforeCredentialMutation(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; recordSubmitBarrier(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; }
 export interface AuthenticationExecution { execute(input: Readonly<{ fence: CredentialMutationFence; signal: AbortSignal }>): Promise<AuthenticationExecutionResult>; }
 export interface AuthenticationHeartbeatScheduler { start(heartbeat: () => Promise<void>): Readonly<{ stop(): Promise<void> }>; }
 export type AuthenticatedSessionMutationRunnerDependencies = Readonly<{ execution: AuthenticationExecution; heartbeat: AuthenticationHeartbeatScheduler }>;
 
 type Phase = "leased" | "interaction_started" | "submit_barrier_recorded";
 type Decision = Readonly<{ kind: "authenticated" }> | Readonly<{ kind: "retry" }> | Readonly<{ kind: "failed"; failure: SessionAuthenticationFailurePair }>;
+const activeCredentialMutationFences = new WeakSet<object>();
+export const isCredentialMutationFence = (value: unknown): value is CredentialMutationFence => typeof value === "object" && value !== null && activeCredentialMutationFences.has(value);
 const isRecord = (value: unknown): value is Record<PropertyKey, unknown> => typeof value === "object" && value !== null;
 const exact = (value: unknown, keys: readonly string[]) => isRecord(value) && Reflect.ownKeys(value).length === keys.length && Reflect.ownKeys(value).every((key) => typeof key === "string" && keys.includes(key));
 const executionResult = (value: unknown): AuthenticationExecutionResult | null => {
@@ -38,18 +41,21 @@ export function createAuthenticatedSessionMutationRunner({ execution, heartbeat 
     async run(authority: AuthenticationMutationAuthority): Promise<AuthenticatedSessionMutationRunnerResult> {
       const claimed = claimAuthenticationMutationAuthority(authority);
       if (claimed.status !== "claimed") return { status: "unresolved" };
-      const gate = new Gate(); const controller = new AbortController(); let phase: Phase = "leased"; let sticky = false;
+      const gate = new Gate(); const controller = new AbortController(); let phase: Phase = "leased"; let sticky = false; let active = false;
       const fail = () => { if (!sticky) { sticky = true; controller.abort(); } };
       const guarded = (operation: () => Promise<unknown>, advance?: Phase) => gate.run(async () => {
-        if (sticky) return { status: "blocked" } as const;
+        if (!active || sticky) return { status: "blocked" } as const;
         try { const result = await operation(); if (!exact(result, ["status"]) || (result as Record<PropertyKey, unknown>).status !== "authorized") { fail(); return { status: "blocked" } as const; } if (advance) phase = advance; return { status: "authorized" } as const; }
         catch { fail(); return { status: "blocked" } as const; }
       });
-      const fence: CredentialMutationFence = { beginCredentialInteraction: () => guarded(() => claimed.authority.beginCredentialInteraction(), "interaction_started"), renewBeforeCredentialMutation: () => guarded(() => claimed.authority.renewLease()), recordSubmitBarrier: () => guarded(() => claimed.authority.recordSubmitBarrier(), "submit_barrier_recorded") };
+      const fence = Object.freeze({ beginCredentialInteraction: () => guarded(() => claimed.authority.beginCredentialInteraction(), "interaction_started"), renewBeforeCredentialMutation: () => guarded(() => claimed.authority.renewLease()), recordSubmitBarrier: () => guarded(() => claimed.authority.recordSubmitBarrier(), "submit_barrier_recorded") }) as CredentialMutationFence;
       let scheduler: Readonly<{ stop(): Promise<void> }>; let stopped = false;
       try { scheduler = heartbeat.start(() => stopped ? Promise.resolve() : guarded(() => claimed.authority.renewLease()).then(() => undefined)); } catch { return { status: "unresolved" }; }
       let result: unknown = null;
+      active = true;
+      activeCredentialMutationFences.add(fence);
       try { result = await execution.execute({ fence, signal: controller.signal }); } catch { result = null; }
+      finally { active = false; activeCredentialMutationFences.delete(fence); }
       stopped = true;
       try { await scheduler.stop(); } catch { fail(); }
       await gate.drain();
