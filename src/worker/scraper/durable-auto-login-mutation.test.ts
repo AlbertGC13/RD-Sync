@@ -17,7 +17,8 @@ function raw(events: string[], overrides: Partial<BankAutoLoginPage> = {}): Bank
 }
 function fence(events: string[], outcomes: Partial<Record<"begin" | "renew" | "barrier", unknown>> = {}): CredentialMutationFence {
   const call = (name: "begin" | "renew" | "barrier") => async () => { events.push(name); const value = Object.hasOwn(outcomes, name) ? outcomes[name] : { status: "authorized" }; if (value === "throw") throw new Error("sensitive"); return value as { status: "authorized" | "blocked" }; };
-  return { beginCredentialInteraction: call("begin"), renewBeforeCredentialMutation: call("renew"), recordSubmitBarrier: call("barrier") };
+  // Test-only fake: production fences are nominal and issued by the lifecycle runner.
+  return { beginCredentialInteraction: call("begin"), renewBeforeCredentialMutation: call("renew"), recordSubmitBarrier: call("barrier") } as unknown as CredentialMutationFence;
 }
 function strategy(run: (page: BankAutoLoginPage) => Promise<void>, outcome: BankAutoLoginOutcome = { status: "succeeded" }): BankAutoLoginStrategy {
   return { bankCode: "popular", autoLogin: async ({ page }) => { try { await run(page); return outcome; } catch { return { status: "succeeded" }; } } };
