@@ -30,7 +30,7 @@ import { Worker } from "bullmq";
 
 import { buildRedisConnectionOptions } from "./queues/bullmq-queue";
 import { createIngestionWorker, type WorkerConstructor } from "./ingestion-worker-factory";
-import { createExpiryPublicationConsumer } from "./expiry-publication-consumer";
+import { createRetiredExpiryPublicationConsumer } from "./expiry-publication-consumer";
 import { createDefaultExpiryRuntime } from "./expiry-runtime";
 import { resolveDefaultAlertSink } from "./alerts/email-alert-sink";
 import { bankAdapterRegistry } from "../modules/bank-adapters/registry";
@@ -42,7 +42,7 @@ import { createAuditEvent } from "../modules/audit";
 import { BANK_AUTOLOGIN_ACTIONS, BANK_CREDENTIAL_ACTIONS } from "../modules/audit/bank-actions";
 import { getPrismaClient } from "../modules/persistence/prisma-client";
 import { PrismaBankSessionExpiryEpisodeRepository } from "../modules/persistence/prisma-bank-session-expiry-episode-repository";
-import { popularBankCode, popularScraperProfile } from "../modules/bank-adapters/popular";
+import { popularBankCode } from "../modules/bank-adapters/popular";
 import { popularPortalConfig } from "../modules/bank-adapters/popular-portal";
 import { createAcquireBrowserSlotFromEnv, createEnsureBrowserForBank, resolveBankBrowserEnv } from "./scraper/browser-runtime";
 import { createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, parseAutoLoginSelectorTimeoutMs, type BankAutoLoginStrategy } from "./scraper/auto-login";
@@ -151,15 +151,8 @@ const processor = createIngestionProcessor({
   expiryEpisodes,
 });
 
-const expiryPublicationConsumer = createExpiryPublicationConsumer({
-  episodes: expiryEpisodes,
-  gate: { check: async () => "eligible" },
-  ingest: processor,
-  resolveAccountFingerprint(bankCode) {
-    return bankCode === popularScraperProfile.bankId
-      ? popularScraperProfile.accountFingerprint
-      : undefined;
-  },
+const consumeRetiredExpiryPublicationJob = createRetiredExpiryPublicationConsumer({
+  auditSink: defaultAuditSink,
 });
 
 // ---------------------------------------------------------------------------
@@ -169,7 +162,7 @@ const expiryPublicationConsumer = createExpiryPublicationConsumer({
 const worker = createIngestionWorker({
   connection,
   processor,
-  expiryPublicationConsumer,
+  consumeRetiredExpiryPublicationJob,
   concurrency: 2,
   // Bind the real bullmq Worker at the composition root; the factory stays
   // bullmq-free. The cast is the single adapter seam between the library and

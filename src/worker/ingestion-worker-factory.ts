@@ -18,7 +18,7 @@ export const INGESTION_QUEUE_NAME = ingestionJobName;
 /** Minimal BullMQ Job surface the worker handler needs. */
 export interface WorkerJob {
   name?: string;
-  data: IngestionJob["data"];
+  data: unknown;
 }
 
 /** Minimal BullMQ Worker surface the factory returns. */
@@ -42,7 +42,7 @@ export interface CreateIngestionWorkerOptions {
   connection: { host: string; port: number; password?: string; maxRetriesPerRequest: null };
   /** Ingestion processor — called once per job. */
   processor: (job: IngestionJob) => Promise<IngestionResult>;
-  expiryPublicationConsumer?: (data: unknown) => Promise<unknown>;
+  consumeRetiredExpiryPublicationJob?: (data: unknown) => Promise<unknown>;
   /** How many jobs to process in parallel.  Defaults to 2. */
   concurrency?: number;
   /**
@@ -74,10 +74,10 @@ export function createIngestionWorker(options: CreateIngestionWorkerOptions): Wo
     INGESTION_QUEUE_NAME,
     async (job: WorkerJob): Promise<unknown> => {
       if (job.name === INGESTION_QUEUE_NAME) {
-        return options.processor({ data: job.data });
+        return options.processor({ data: job.data as IngestionJob["data"] });
       }
-      if (job.name === expiryPublicationJobName && options.expiryPublicationConsumer) {
-        return options.expiryPublicationConsumer(job.data);
+      if (job.name === expiryPublicationJobName && options.consumeRetiredExpiryPublicationJob) {
+        return options.consumeRetiredExpiryPublicationJob(job.data);
       }
       throw new Error("Unsupported BullMQ job name");
     },
