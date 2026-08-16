@@ -849,6 +849,7 @@ describe("createScrapeTimeAutoLoginRunner", () => {
     const lock = { acquire: vi.fn(), release: vi.fn() };
     const cdpUrlForBankCode = vi.fn();
     const ensureBrowser = vi.fn();
+    const recordLockReleaseFailure = vi.fn();
     const recordCredentialDecryptUse = vi.fn();
     const recordFailure = vi.fn();
     const beforeAutoLoginMutation = vi.fn();
@@ -863,6 +864,7 @@ describe("createScrapeTimeAutoLoginRunner", () => {
         lock,
         cdpUrlForBankCode,
         ensureBrowser,
+        recordLockReleaseFailure,
         recordCredentialDecryptUse,
         recordFailure,
         beforeAutoLoginMutation,
@@ -871,7 +873,7 @@ describe("createScrapeTimeAutoLoginRunner", () => {
       dependencyMocks: [
         adapterRegistry.get, autoLoginConfigs.getByBankCode, credentials.findByBankCode,
         lock.acquire, lock.release, cdpUrlForBankCode, ensureBrowser,
-        recordCredentialDecryptUse, recordFailure, beforeAutoLoginMutation,
+        recordLockReleaseFailure, recordCredentialDecryptUse, recordFailure, beforeAutoLoginMutation,
         afterAutoLoginOutcome, resolvingKey,
       ],
     };
@@ -945,6 +947,11 @@ describe("createScrapeTimeAutoLoginRunner", () => {
     let getterReads = 0;
     const getterOptions = {};
     Object.defineProperty(getterOptions, "trigger", { enumerable: true, get: () => { getterReads += 1; return { kind: "session_expiry", id: "E1" }; } });
+    const hiddenOptionExtra = { trigger: { kind: "session_expiry", id: "E1" } };
+    Object.defineProperty(hiddenOptionExtra, "extra", { value: true });
+    const symbolOptionExtra = { trigger: { kind: "session_expiry", id: "E1" }, [Symbol("extra")]: true };
+    const hiddenOptionTrigger = {};
+    Object.defineProperty(hiddenOptionTrigger, "trigger", { value: { kind: "session_expiry", id: "E1" } });
     const hiddenTrigger = { kind: "session_expiry", id: "E1" };
     Object.defineProperty(hiddenTrigger, "extra", { value: "hidden" });
     const symbolTrigger = { kind: "session_expiry", id: "E1", [Symbol("extra")]: true };
@@ -952,7 +959,7 @@ describe("createScrapeTimeAutoLoginRunner", () => {
     Object.defineProperty(getterTrigger, "id", { enumerable: true, get: () => { getterReads += 1; return "E1"; } });
     const malformedTriggers = [null, 1, [], new Date(), {}, { kind: "unknown", id: "E1" }, { kind: "session_expiry", id: " " }, { kind: "session_expiry", id: "a".repeat(65) }, { kind: "session_expiry", id: "E1", extra: true }, hiddenTrigger, symbolTrigger, getterTrigger];
     const executeStrategy = vi.fn();
-    const malformedOptions = [null, 1, [], new Date(), { extra: true }, getterOptions, { trigger: undefined }, { trigger: { kind: "session_expiry", id: "E1" }, executeStrategy }];
+    const malformedOptions = [null, 1, [], new Date(), { extra: true }, getterOptions, hiddenOptionExtra, symbolOptionExtra, hiddenOptionTrigger, { trigger: undefined }, { trigger: { kind: "session_expiry", id: "E1" }, executeStrategy }];
 
     for (const options of malformedOptions) {
       const { run, dependencyMocks } = createDependencyProbe();
@@ -987,6 +994,55 @@ describe("createScrapeTimeAutoLoginRunner", () => {
     await expect(run({ data: { bankId: "popular" } }, {})).resolves.toBeNull();
 
     expectNoDependencyCalls(dependencyMocks);
+  });
+
+  it("distinguishes omitted or empty options from an explicit null trigger", async () => {
+    const omitted = createDependencyProbe();
+    const empty = createDependencyProbe();
+    const explicitNull = createDependencyProbe();
+
+    await expect(omitted.run({ data: { bankId: "popular" } })).resolves.toBeNull();
+    await expect(empty.run({ data: { bankId: "popular" } }, {})).resolves.toBeNull();
+    await expect(explicitNull.run({ data: { bankId: "popular" } }, { trigger: null })).resolves.toMatchObject({ status: "needs_admin_action", reason: "invalid_trigger" });
+
+    expectNoDependencyCalls(omitted.dependencyMocks);
+    expectNoDependencyCalls(empty.dependencyMocks);
+    expectNoDependencyCalls(explicitNull.dependencyMocks);
+  });
+
+  it("preserves the existing local and runner outcome ordering for legacy and explicit expiry triggers", async () => {
+    const directEvents: string[] = [];
+    await executeScrapeTimeAutoLoginTrigger({
+      bankCode: "popular", expiredEventId: "E1", credential, cdpUrl: "http://127.0.0.1:9222",
+      adapter: { bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin: async () => { directEvents.push("strategy"); return { status: "succeeded" }; } }) },
+      lock: { acquire: async () => ({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 1 }), release: async () => { directEvents.push("lock.release"); return true; } },
+      ensureBrowser: async () => ({ status: "ready", page: makePage(), close: async () => { directEvents.push("browser.close"); } }),
+      afterAutoLoginOutcome: async () => { directEvents.push("direct.outcome"); },
+    });
+    // Direct execution emits its local hook before release; the runner does not inject that hook.
+    expect(directEvents).toEqual(["strategy", "browser.close", "direct.outcome", "lock.release"]);
+
+    async function runWithEvents(options?: { trigger?: unknown }) {
+      const events: string[] = [];
+      const run = createScrapeTimeAutoLoginRunner({
+        adapterRegistry: { get: () => ({ bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin: async () => { events.push("strategy"); return { status: "succeeded" as const }; } }) }) },
+        autoLoginConfigs: { getByBankCode: async () => ({ autoLoginEnabled: true, breakerState: "closed" as const }) },
+        credentials: { findByBankCode: async () => encryptedCredentialRecord() }, keyResolver,
+        lock: { acquire: async () => ({ leaseToken: "lease-1", fencingToken: 1, expiresAt: 1 }), release: async () => { events.push("lock.release"); return true; } },
+        cdpUrlForBankCode: () => "http://127.0.0.1:9222",
+        ensureBrowser: async () => ({ status: "ready", page: makePage(), close: async () => { events.push("browser.close"); } }),
+        afterAutoLoginOutcome: async () => { events.push("runner.outcome"); },
+      });
+      const job = { data: { bankId: "popular", ...(options ? {} : { expiredEventId: "E1" }) } };
+      if (options) await run(job, options);
+      else await run(job);
+      return events;
+    }
+
+    const legacyEvents = await runWithEvents();
+    const explicitEvents = await runWithEvents({ trigger: { kind: "session_expiry", id: "E1" } });
+    expect(legacyEvents).toEqual(["strategy", "browser.close", "lock.release", "runner.outcome"]);
+    expect(explicitEvents).toEqual(legacyEvents);
   });
 
   it("does not call the mutation hook when config is off or credentials are absent", async () => {
