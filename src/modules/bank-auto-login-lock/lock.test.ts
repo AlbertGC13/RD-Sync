@@ -7,12 +7,15 @@ import {
   MAX_LOCK_TTL_MS,
   LOCK_KEY_PREFIX,
 } from "./index";
+import { createAuthenticationAttemptTrigger } from "../bank-auto-login-trigger";
 
 class InMemoryLockStore {
   private store = new Map<string, string>();
   private counters = new Map<string, number>();
+  readonly calls = { acquire: [] as string[], release: [] as string[], renew: [] as string[] };
   constructor(private readonly now?: () => number) {}
   async acquireSlot({ key, leaseToken, ttlMs, nowMs }: { key: string; leaseToken: string; ttlMs: number; nowMs: number }): Promise<number | null> {
+    this.calls.acquire.push(key);
     const raw = this.store.get(key);
     if (raw) {
       const d = JSON.parse(raw) as { expiresAt: number; fencingToken: number };
@@ -26,6 +29,7 @@ class InMemoryLockStore {
     return ft;
   }
   async releaseIfOwner(key: string, expected: string): Promise<boolean> {
+    this.calls.release.push(key);
     const raw = this.store.get(key);
     if (!raw) return false;
     const d = JSON.parse(raw) as { leaseToken: string; expiresAt: number };
@@ -35,6 +39,7 @@ class InMemoryLockStore {
     return true;
   }
   async renewIfOwner({ key, expectedLeaseToken: expected, newTtlMs, nowMs }: { key: string; expectedLeaseToken: string; newTtlMs: number; nowMs: number }): Promise<boolean> {
+    this.calls.renew.push(key);
     const raw = this.store.get(key);
     if (!raw) return false;
     const d = JSON.parse(raw) as { leaseToken: string; fencingToken: number; expiresAt: number };
@@ -267,6 +272,79 @@ describe("AutoLoginLock", () => {
     it("throws when store is missing (fail-fast)", () => {
       // Force an undefined store to exercise the runtime guard (TS would catch this normally).
       expect(() => createAutoLoginLock({ store: undefined as unknown as import("./index").LockStore })).toThrow("LockStore is required");
+    });
+  });
+
+  describe("typed trigger compatibility", () => {
+    const expiry = { kind: "session_expiry", id: "evt-001" } as const;
+    const authenticationAttempt = createAuthenticationAttemptTrigger({ bankCode: "popular", runId: "run-1", attemptId: "attempt-1" });
+
+    it("maps a session-expiry object to the exact legacy key and contends with legacy callers", async () => {
+      const { lock } = setup();
+      expect(buildLockKey("popular", expiry)).toBe("autologin:lock:popular:evt-001");
+      const legacy = await lock.acquire("popular", "evt-001");
+      expect(await lock.acquire("popular", expiry)).toBeNull();
+      expect(await lock.release("popular", expiry, legacy!.leaseToken)).toBe(true);
+      const typed = await lock.acquire("popular", expiry);
+      expect(await lock.renew("popular", "evt-001", typed!.leaseToken)).toBe(true);
+    });
+
+    it("uses a stable, separated v2 key for authentication attempts", async () => {
+      const { lock } = setup();
+      const expected = `autologin:lock:v2:popular:authentication_attempt:${authenticationAttempt.id}`;
+      expect(buildLockKey("popular", authenticationAttempt)).toBe(expected);
+      expect(buildLockKey("popular", { kind: "session_expiry", id: authenticationAttempt.id })).not.toBe(expected);
+      expect(await lock.acquire("popular", authenticationAttempt)).not.toBeNull();
+      expect(await lock.acquire("popular", authenticationAttempt)).toBeNull();
+      expect(await lock.acquire("banreservas", authenticationAttempt)).not.toBeNull();
+      const other = createAuthenticationAttemptTrigger({ bankCode: "popular", runId: "run-1", attemptId: "attempt-2" });
+      expect(await lock.acquire("popular", other)).not.toBeNull();
+    });
+
+    it("preserves owner, expiry, renew, and fencing semantics for authentication attempts", async () => {
+      let timeMs = 1_000_000;
+      const now = () => timeMs;
+      const lock = createAutoLoginLock({ store: new InMemoryLockStore(now), defaultTtlMs: 1_000, now });
+      const first = await lock.acquire("popular", authenticationAttempt);
+      expect(await lock.release("popular", authenticationAttempt, "wrong-token")).toBe(false);
+      expect(await lock.renew("popular", authenticationAttempt, first!.leaseToken)).toBe(true);
+      timeMs += 2_000;
+      const second = await lock.acquire("popular", authenticationAttempt);
+      expect(second!.fencingToken).toBe(2);
+      expect(await lock.release("popular", authenticationAttempt, first!.leaseToken)).toBe(false);
+      expect(await lock.release("popular", authenticationAttempt, second!.leaseToken)).toBe(true);
+    });
+
+    it("rejects malformed triggers before calling the store", async () => {
+      const calls: string[] = [];
+      const lock = createAutoLoginLock({
+        store: {
+          acquireSlot: async () => { calls.push("acquire"); return 1; },
+          releaseIfOwner: async () => { calls.push("release"); return true; },
+          renewIfOwner: async () => { calls.push("renew"); return true; },
+        },
+      });
+      await expect(lock.acquire("popular", { kind: "authentication_attempt", id: "raw-id" } as never)).rejects.toThrow(LockValidationError);
+      await expect(lock.release("Popular", expiry, "lease")).rejects.toThrow(LockValidationError);
+      await expect(lock.renew("popular", { kind: "session_expiry", id: "secret", owner: "x" } as never, "lease")).rejects.toThrow(LockValidationError);
+      expect(calls).toEqual([]);
+    });
+
+    it("passes exact legacy and v2 keys to every store operation", async () => {
+      const { lock, store } = setup();
+      const legacyKey = "autologin:lock:popular:evt-001";
+      const legacy = await lock.acquire("popular", "evt-001");
+      await lock.renew("popular", { kind: "session_expiry", id: "evt-001" }, legacy!.leaseToken);
+      await lock.release("popular", { kind: "session_expiry", id: "evt-001" }, legacy!.leaseToken);
+      const v2Key = `autologin:lock:v2:popular:authentication_attempt:${authenticationAttempt.id}`;
+      const authentication = await lock.acquire("popular", authenticationAttempt);
+      await lock.renew("popular", authenticationAttempt, authentication!.leaseToken);
+      await lock.release("popular", authenticationAttempt, authentication!.leaseToken);
+
+      expect(store.calls.acquire).toEqual([legacyKey, v2Key]);
+      expect(store.calls.renew).toEqual([legacyKey, v2Key]);
+      expect(store.calls.release).toEqual([legacyKey, v2Key]);
+      expect(v2Key).toContain("ff9d00d3b688af1a16ee47e5a774614f23cd33224d6c4278d5ccfcb530e9c5bd");
     });
   });
 });
