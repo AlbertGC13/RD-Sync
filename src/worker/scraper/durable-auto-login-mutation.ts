@@ -31,6 +31,10 @@ export async function executeDurablyFencedAutoLogin(input: Readonly<{
     try { if (!authorized(await operation())) { fail(); denied(); } }
     catch { fail(); denied(); }
   };
+  const raw = (operation: () => void | Promise<void>) => {
+    if (input.signal.aborted) { fail(); denied(); }
+    try { return operation(); } catch { fail(); denied(); }
+  };
   const page: BankAutoLoginPage = {
     currentUrl: () => input.page.currentUrl(),
     hasVisibleSelector: (selector, timeoutMs) => input.page.hasVisibleSelector(selector, timeoutMs),
@@ -41,11 +45,11 @@ export async function executeDurablyFencedAutoLogin(input: Readonly<{
         return;
       }
       await fence(started ? () => input.fence.renewBeforeCredentialMutation() : () => input.fence.beginCredentialInteraction());
-      try { await input.page.fill(selector, value); started = true; } catch { fail(); denied(); }
+      try { await raw(() => input.page.fill(selector, value)); started = true; } catch { fail(); denied(); }
     },
     async click(selector) {
       await fence(() => input.fence.recordSubmitBarrier());
-      try { await input.page.click(selector); } catch { fail(); denied(); }
+      try { await raw(() => input.page.click(selector)); } catch { fail(); denied(); }
     },
   };
   let outcome: BankAutoLoginOutcome | undefined;

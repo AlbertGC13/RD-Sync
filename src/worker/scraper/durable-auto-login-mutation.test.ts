@@ -76,6 +76,17 @@ describe("executeDurablyFencedAutoLogin", () => {
     await expect(execute(events, async (page) => { during.abort(); try { await page.fill("u", "x"); } catch {} }, {}, raw(events), during.signal)).resolves.toEqual({ status: "blocked" });
     expect(events).toEqual([]);
   });
+  it.each([[
+    "begin", async (page: BankAutoLoginPage) => { try { await page.fill("user", "alice"); } catch {} }, ["begin"],
+  ], [
+    "renew", async (page: BankAutoLoginPage) => { try { await page.fill("user", "alice"); await page.fill("password", "secret"); } catch {} try { await page.click("submit"); } catch {} }, ["begin", "fill:user:alice", "renew"],
+  ], [
+    "barrier", async (page: BankAutoLoginPage) => { try { await page.click("submit"); } catch {} }, ["barrier"],
+  ]] as const)("does not invoke raw actions when authorized %s returns after cancellation", async (method, run, expected) => {
+    const events: string[] = []; const controller = new AbortController(); const mutationFence = fence(events); const aborting = async () => { events.push(method); controller.abort(); return { status: "authorized" as const }; };
+    const result = await executeDurablyFencedAutoLogin({ strategy: strategy(run), credential, page: raw(events), fence: { ...mutationFence, [method === "begin" ? "beginCredentialInteraction" : method === "renew" ? "renewBeforeCredentialMutation" : "recordSubmitBarrier"]: aborting }, signal: controller.signal });
+    expect([events, result]).toEqual([expected, { status: "blocked" }]);
+  });
   it("places a fresh barrier immediately before every raw click", async () => {
     const events: string[] = [];
     await execute(events, async (page) => { await page.click("one"); await page.click("two"); });
