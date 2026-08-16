@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { encryptCredentialField } from "../../modules/bank-credentials/crypto";
-import { CREDENTIAL_SCRUB_TIMEOUT_MS, DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS, createBankAutoLoginStrategy, createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginTrigger, parseAutoLoginSelectorTimeoutMs, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
+import { CREDENTIAL_SCRUB_TIMEOUT_MS, DEFAULT_VISIBLE_SELECTOR_TIMEOUT_MS, createBankAutoLoginStrategy, createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, executeScrapeTimeAutoLoginAuthenticationAttempt, executeScrapeTimeAutoLoginTrigger, parseAutoLoginSelectorTimeoutMs, unavailableScrapeTimeAutoLoginBrowserOpener, type BankAutoLoginPage } from "./auto-login";
 import { MIN_PROTECTED_STATE_DETECTION_WINDOW_MS, type BankPortalConfig } from "./login-mutation-guard";
 
 const portalConfig: BankPortalConfig = {
@@ -1425,5 +1425,48 @@ describe("createScrapeTimeAutoLoginBrowserOpener", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("executeScrapeTimeAutoLoginAuthenticationAttempt", () => {
+  const key = Buffer.alloc(32, 7);
+  const dependencies = (autoLogin = vi.fn().mockResolvedValue({ status: "succeeded" as const })) => ({
+    adapterRegistry: { get: vi.fn(() => ({ bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin }) })) },
+    autoLoginConfigs: { getByBankCode: vi.fn().mockResolvedValue({ autoLoginEnabled: true, breakerState: "closed" }) },
+    credentials: { findByBankCode: vi.fn().mockResolvedValue({ bankCode: "popular", isActive: true, keyVersion: 1, encryptedUsernameEnvelope: JSON.stringify(encryptCredentialField("bank-user", () => key)), encryptedPasswordEnvelope: JSON.stringify(encryptCredentialField("bank-password", () => key)) }) },
+    keyResolver: () => key,
+    lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease", fencingToken: 1, expiresAt: 1 }), release: vi.fn().mockResolvedValue(true) },
+    cdpUrlForBankCode: vi.fn(() => "http://127.0.0.1:9222"),
+    ensureBrowser: vi.fn().mockResolvedValue(readyBrowser(makePage())),
+  });
+  const trigger = { kind: "authentication_attempt" as const, id: "a".repeat(64) };
+  const fence = { beginCredentialInteraction: vi.fn().mockResolvedValue({ status: "authorized" as const }), renewBeforeCredentialMutation: vi.fn().mockResolvedValue({ status: "authorized" as const }), recordSubmitBarrier: vi.fn().mockResolvedValue({ status: "authorized" as const }) };
+
+  it("keeps public authentication triggers inert and blocks forged, copied, or expired fences before dependencies", async () => {
+    const deps = dependencies(vi.fn(async ({ page }) => {
+      await page.fill("#username", "bank-user");
+      await page.click("button[type='submit']");
+      return { status: "succeeded" as const };
+    }));
+    const runner = createScrapeTimeAutoLoginRunner(deps);
+    await expect(runner({ data: { bankId: "popular", runId: "run" } }, { trigger })).resolves.toMatchObject({ reason: "authentication_trigger_not_ready" });
+    for (const invalidFence of [fence, { ...fence }, Object.freeze({ ...fence })]) await expect(executeScrapeTimeAutoLoginAuthenticationAttempt({ runnerDependencies: deps, job: { data: { bankId: "popular", runId: "run" } }, trigger, fence: invalidFence as never, signal: new AbortController().signal })).resolves.toEqual({ outcome: null, durableResult: { status: "blocked" } });
+    expect([deps.adapterRegistry.get, deps.autoLoginConfigs.getByBankCode, deps.credentials.findByBankCode, deps.lock.acquire].map((call) => call.mock.calls.length)).toEqual([0, 0, 0, 0]);
+  });
+
+  it("does not accept forged option symbols and bypasses the legacy hook on the durable raw page", async () => {
+    const deps = { ...dependencies(), beforeAutoLoginMutation: vi.fn(() => false) };
+    const runner = createScrapeTimeAutoLoginRunner(deps);
+    await expect(runner({ data: { bankId: "popular", runId: "run" } }, { trigger, [Symbol("capability")]: {} } as never)).resolves.toMatchObject({ reason: "invalid_trigger" });
+    await executeScrapeTimeAutoLoginAuthenticationAttempt({ runnerDependencies: deps, job: { data: { bankId: "popular", runId: "run" } }, trigger, fence: fence as never, signal: new AbortController().signal });
+    expect(deps.beforeAutoLoginMutation).not.toHaveBeenCalled();
+  });
+
+  it("blocks repeated fake bridge calls without strategy execution", async () => {
+    const first = vi.fn().mockResolvedValue({ status: "succeeded" as const }); const deps = dependencies(first);
+    const input = { runnerDependencies: deps, job: { data: { bankId: "popular", runId: "run" } }, trigger, fence: fence as never, signal: new AbortController().signal };
+    await expect(executeScrapeTimeAutoLoginAuthenticationAttempt(input)).resolves.toEqual({ outcome: null, durableResult: { status: "blocked" } });
+    await expect(executeScrapeTimeAutoLoginAuthenticationAttempt(input)).resolves.toEqual({ outcome: null, durableResult: { status: "blocked" } });
+    expect(first).not.toHaveBeenCalled();
   });
 });

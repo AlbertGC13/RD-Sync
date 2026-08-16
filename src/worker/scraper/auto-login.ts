@@ -12,6 +12,8 @@ import {
 import { decryptCredentialField, type AesGcmEnvelope, type KeyResolver } from "../../modules/bank-credentials/crypto";
 import type { AutoLoginLock } from "../../modules/bank-auto-login-lock";
 import { parseAutoLoginTriggerIdentity } from "../../modules/bank-auto-login-trigger";
+import { executeDurablyFencedAutoLogin, type DurableAutoLoginMutationResult } from "./durable-auto-login-mutation";
+import { isCredentialMutationFence, type CredentialMutationFence } from "./authenticated-session-mutation-runner";
 
 export interface BankAutoLoginCredential {
   bankCode: string;
@@ -142,6 +144,46 @@ export interface ScrapeTimeAutoLoginRunnerDependencies {
   recordFailure?(bankCode: string, occurredAt: Date): void | Promise<void>;
   beforeAutoLoginMutation?(metadata: AutoLoginMutationHookMetadata): boolean | Promise<boolean>;
   afterAutoLoginOutcome?(metadata: AutoLoginOutcomeHookMetadata): void | Promise<void>;
+}
+
+type AuthenticationCapabilityState = {
+  fence: CredentialMutationFence;
+  signal: AbortSignal;
+  calls: number;
+  durableResult?: DurableAutoLoginMutationResult;
+};
+const authenticationCapability = Symbol("authentication capability");
+const authenticationCapabilities = new WeakMap<object, AuthenticationCapabilityState>();
+const consumedAuthenticationFences = new WeakSet<object>();
+type PrivateRunnerOptions = ScrapeTimeAutoLoginRunOptions & { [authenticationCapability]: object };
+
+export async function executeScrapeTimeAutoLoginAuthenticationAttempt(input: Readonly<{
+  runnerDependencies: ScrapeTimeAutoLoginRunnerDependencies;
+  job: ScrapeTimeAutoLoginRunnerJob;
+  trigger: Readonly<{ kind: "authentication_attempt"; id: string }>;
+  fence: CredentialMutationFence;
+  signal: AbortSignal;
+}>): Promise<Readonly<{ outcome: ScrapeTimeAutoLoginOutcome | null; durableResult?: DurableAutoLoginMutationResult; runnerFailed?: true }>> {
+  if (!isCredentialMutationFence(input.fence) || consumedAuthenticationFences.has(input.fence)) {
+    return { outcome: null, durableResult: { status: "blocked" } };
+  }
+  consumedAuthenticationFences.add(input.fence);
+  const capability = Object.freeze(Object.create(null));
+  const state: AuthenticationCapabilityState = { fence: input.fence, signal: input.signal, calls: 0 };
+  authenticationCapabilities.set(capability, state);
+  try {
+    try {
+      const outcome = await createScrapeTimeAutoLoginRunner(input.runnerDependencies)(input.job, {
+        trigger: input.trigger,
+        [authenticationCapability]: capability,
+      } as PrivateRunnerOptions);
+      return { outcome, durableResult: state.durableResult };
+    } catch {
+      return { outcome: null, durableResult: state.durableResult, runnerFailed: true };
+    }
+  } finally {
+    authenticationCapabilities.delete(capability);
+  }
 }
 
 const SAFE_ADMIN_ACTION_SUMMARY = "Bank auto-login requires admin action";
@@ -346,10 +388,10 @@ export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerD
   ): Promise<ScrapeTimeAutoLoginOutcome | null> {
     const trigger = resolveRunnerTrigger(job, options, arguments.length > 1);
     if (trigger.status === "invalid") return needsAdminAction("invalid_trigger");
-    if (trigger.status === "authentication_attempt") return needsAdminAction("authentication_trigger_not_ready");
+    if (trigger.status === "authentication_attempt" && !trigger.capability) return needsAdminAction("authentication_trigger_not_ready");
     if (trigger.status === "none") return null;
 
-    const outcome = await resolveScrapeTimeAutoLoginOutcome(deps, job, trigger.expiredEventId);
+    const outcome = await resolveScrapeTimeAutoLoginOutcome(deps, job, trigger.expiredEventId, trigger.status === "authentication_attempt" ? trigger.capability : undefined);
     if (outcome.status === "needs_admin_action" && outcome.reason === "unknown_post_submit_state") {
       try {
         await deps.recordFailure?.(job.data.bankId, new Date());
@@ -373,7 +415,7 @@ export function createScrapeTimeAutoLoginRunner(deps: ScrapeTimeAutoLoginRunnerD
 
 type RunnerTriggerResolution =
   | { status: "legacy"; expiredEventId: string }
-  | { status: "authentication_attempt" }
+  | { status: "authentication_attempt"; expiredEventId: string; capability?: AuthenticationCapabilityState }
   | { status: "invalid" }
   | { status: "none" };
 
@@ -398,24 +440,34 @@ function resolveRunnerTrigger(
   if (legacyExpiredEventId !== undefined) return { status: "invalid" };
   return trigger.kind === "session_expiry"
     ? { status: "legacy", expiredEventId: trigger.id }
-    : { status: "authentication_attempt" };
+    : { status: "authentication_attempt", expiredEventId: trigger.id, capability: parsedOptions.capability };
 }
 
-function readRunnerOptions(value: unknown): { hasTrigger: boolean; trigger?: unknown } | null {
+function readRunnerOptions(value: unknown): { hasTrigger: boolean; trigger?: unknown; capability?: AuthenticationCapabilityState } | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return null;
   const keys = Reflect.ownKeys(value);
   if (keys.length === 0) return { hasTrigger: false };
-  if (keys.length !== 1 || keys[0] !== "trigger") return null;
+  const privateCapability = keys.find((key) => key === authenticationCapability);
+  if (keys.length !== (privateCapability ? 2 : 1) || !keys.includes("trigger")) return null;
   const descriptor = Object.getOwnPropertyDescriptor(value, "trigger");
   if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) return null;
-  return { hasTrigger: true, trigger: descriptor.value };
+  const capability = privateCapability
+    ? (() => {
+      const capabilityDescriptor = Object.getOwnPropertyDescriptor(value, authenticationCapability);
+      return capabilityDescriptor && "value" in capabilityDescriptor && typeof capabilityDescriptor.value === "object" && capabilityDescriptor.value !== null
+        ? authenticationCapabilities.get(capabilityDescriptor.value)
+        : undefined;
+    })()
+    : undefined;
+  return { hasTrigger: true, trigger: descriptor.value, capability };
 }
 
 async function resolveScrapeTimeAutoLoginOutcome(
   deps: ScrapeTimeAutoLoginRunnerDependencies,
   job: ScrapeTimeAutoLoginRunnerJob,
   expiredEventId: string,
+  capability?: AuthenticationCapabilityState,
 ): Promise<ScrapeTimeAutoLoginOutcome> {
     const bankCode = job.data.bankId;
     const adapter = safelyResolveAdapter(deps, bankCode);
@@ -437,7 +489,7 @@ async function resolveScrapeTimeAutoLoginOutcome(
     if (credentialResolution.status === "not_found") return skipped("credential_unavailable");
     if (isAdminActionOutcome(credentialResolution)) return credentialResolution;
 
-    return executeScrapeTimeAutoLoginTrigger({
+    return executeScrapeTimeAutoLoginTriggerInternal({
       bankCode,
       expiredEventId,
       adapter,
@@ -447,7 +499,7 @@ async function resolveScrapeTimeAutoLoginOutcome(
       ensureBrowser: (url) => deps.ensureBrowser(bankCode, url),
       recordLockReleaseFailure: deps.recordLockReleaseFailure,
       beforeAutoLoginMutation: deps.beforeAutoLoginMutation,
-    });
+    }, capability);
 }
 
 function safelyResolveAdapter(
@@ -529,6 +581,13 @@ function parseCredentialEnvelope(json: string): AesGcmEnvelope {
 }
 
 export async function executeScrapeTimeAutoLoginTrigger(context: ScrapeTimeAutoLoginTriggerContext): Promise<ScrapeTimeAutoLoginOutcome> {
+  return executeScrapeTimeAutoLoginTriggerInternal(context);
+}
+
+async function executeScrapeTimeAutoLoginTriggerInternal(
+  context: ScrapeTimeAutoLoginTriggerContext,
+  capability?: AuthenticationCapabilityState,
+): Promise<ScrapeTimeAutoLoginOutcome> {
   if (context.adapter.bankCode !== context.bankCode) return needsAdminAction("unsupported_bank");
   if (context.adapter.bankCode !== context.credential.bankCode) return needsAdminAction("credential_bank_mismatch");
 
@@ -548,7 +607,7 @@ export async function executeScrapeTimeAutoLoginTrigger(context: ScrapeTimeAutoL
   if (!acquired) return manualRequired("lock_busy");
 
   try {
-    return await runOwnedAutoLogin(context, cdpUrl);
+    return await runOwnedAutoLogin(context, cdpUrl, capability);
   } finally {
     await releaseOwnedLock(context, acquired.leaseToken);
   }
@@ -572,7 +631,11 @@ async function recordLockReleaseFailure(context: ScrapeTimeAutoLoginTriggerConte
   }
 }
 
-async function runOwnedAutoLogin(context: ScrapeTimeAutoLoginTriggerContext, cdpUrl: string): Promise<ScrapeTimeAutoLoginOutcome> {
+async function runOwnedAutoLogin(
+  context: ScrapeTimeAutoLoginTriggerContext,
+  cdpUrl: string,
+  capability?: AuthenticationCapabilityState,
+): Promise<ScrapeTimeAutoLoginOutcome> {
   let browser: ScrapeTimeAutoLoginBrowserResult | undefined;
 
   try {
@@ -586,9 +649,19 @@ async function runOwnedAutoLogin(context: ScrapeTimeAutoLoginTriggerContext, cdp
 
   let outcome: BankAutoLoginOutcome;
   try {
-    outcome = await context.adapter.createAutoLoginStrategy().autoLogin({
-      credential: context.credential,
-      page: withAutoLoginMutationHook(browser.page, context),
+    if (capability) {
+      capability.calls += 1;
+      if (capability.calls !== 1) capability.durableResult = { status: "blocked" };
+      else {
+        const durable = await executeDurablyFencedAutoLogin({
+          strategy: context.adapter.createAutoLoginStrategy(), credential: context.credential,
+          page: browser.page, fence: capability.fence, signal: capability.signal,
+        });
+        capability.durableResult = isDurableAutoLoginResult(durable) ? durable : { status: "blocked" };
+      }
+      outcome = capability.durableResult.status === "completed" ? capability.durableResult.outcome : needsAdminAction("auto_login_execution_failed");
+    } else outcome = await context.adapter.createAutoLoginStrategy().autoLogin({
+      credential: context.credential, page: withAutoLoginMutationHook(browser.page, context),
     });
   } catch {
     outcome = needsAdminAction("portal_state_unavailable");
@@ -611,6 +684,15 @@ async function runOwnedAutoLogin(context: ScrapeTimeAutoLoginTriggerContext, cdp
     // Outcome observability must not replace the protected-flow outcome.
   }
   return outcome;
+}
+
+function isDurableAutoLoginResult(value: unknown): value is DurableAutoLoginMutationResult {
+  if (value === null || typeof value !== "object") return false;
+  const status = Object.getOwnPropertyDescriptor(value, "status");
+  const outcome = Object.getOwnPropertyDescriptor(value, "outcome");
+  if (!status || !("value" in status) || typeof status.value !== "string") return false;
+  return (status.value === "blocked" && Reflect.ownKeys(value).length === 1)
+    || (status.value === "completed" && !!outcome && "value" in outcome && Reflect.ownKeys(value).length === 2);
 }
 
 function withAutoLoginMutationHook(page: BankAutoLoginPage, context: ScrapeTimeAutoLoginTriggerContext): BankAutoLoginPage {
