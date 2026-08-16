@@ -18,17 +18,25 @@ const SESSION_EXPIRY_ID_RE = /^[a-zA-Z0-9-]{1,64}$/;
 const AUTHENTICATION_ATTEMPT_ID_RE = /^[a-f0-9]{64}$/;
 const MAX_ID_LENGTH = 256;
 
-function hasExactKeys(value: object, keys: readonly string[]): boolean {
-  const ownKeys = Object.keys(value).sort();
-  return ownKeys.length === keys.length
-    && ownKeys.every((key, index) => key === keys[index])
-    && !Object.getOwnPropertySymbols(value).some((symbol) => Object.prototype.propertyIsEnumerable.call(value, symbol));
-}
-
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === null || prototype === Object.prototype;
+}
+
+function readExactDataProperties(value: unknown, keys: readonly string[]): Record<string, unknown> | null {
+  if (!isPlainRecord(value)) return null;
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.length !== keys.length || ownKeys.some((key) => typeof key !== "string" || !keys.includes(key))) return null;
+
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const result: Record<string, unknown> = {};
+  for (const key of keys) {
+    const descriptor = descriptors[key];
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) return null;
+    result[key] = descriptor.value;
+  }
+  return result;
 }
 
 function validateNonblankId(field: string, value: unknown): asserts value is string {
@@ -38,24 +46,26 @@ function validateNonblankId(field: string, value: unknown): asserts value is str
 }
 
 export function parseAutoLoginTriggerIdentity(value: unknown): AutoLoginTriggerIdentity {
-  if (!isPlainRecord(value) || !hasExactKeys(value, ["id", "kind"])) {
+  const trigger = readExactDataProperties(value, ["id", "kind"]);
+  if (!trigger) {
     throw new AutoLoginTriggerValidationError("must be a plain object with exactly kind and id");
   }
-  validateNonblankId("id", value.id);
-  if (value.kind === "session_expiry" && SESSION_EXPIRY_ID_RE.test(value.id)) return { kind: value.kind, id: value.id };
-  if (value.kind === "authentication_attempt" && AUTHENTICATION_ATTEMPT_ID_RE.test(value.id)) return { kind: value.kind, id: value.id };
+  validateNonblankId("id", trigger.id);
+  if (trigger.kind === "session_expiry" && SESSION_EXPIRY_ID_RE.test(trigger.id)) return { kind: trigger.kind, id: trigger.id };
+  if (trigger.kind === "authentication_attempt" && AUTHENTICATION_ATTEMPT_ID_RE.test(trigger.id)) return { kind: trigger.kind, id: trigger.id };
   throw new AutoLoginTriggerValidationError("kind or id is not recognized");
 }
 
 export function createAuthenticationAttemptTrigger(identity: SessionAuthenticationAttemptIdentity): AutoLoginTriggerIdentity {
-  if (!isPlainRecord(identity) || !hasExactKeys(identity, ["attemptId", "bankCode", "runId"])) {
+  const attemptIdentity = readExactDataProperties(identity, ["attemptId", "bankCode", "runId"]);
+  if (!attemptIdentity) {
     throw new AutoLoginTriggerValidationError("authentication attempt must have exactly bankCode, runId, and attemptId");
   }
-  validateNonblankId("bankCode", identity.bankCode);
-  validateNonblankId("runId", identity.runId);
-  validateNonblankId("attemptId", identity.attemptId);
+  validateNonblankId("bankCode", attemptIdentity.bankCode);
+  validateNonblankId("runId", attemptIdentity.runId);
+  validateNonblankId("attemptId", attemptIdentity.attemptId);
   return {
     kind: "authentication_attempt",
-    id: createHash("sha256").update(JSON.stringify([identity.runId, identity.attemptId])).digest("hex"),
+    id: createHash("sha256").update(JSON.stringify([attemptIdentity.runId, attemptIdentity.attemptId])).digest("hex"),
   };
 }

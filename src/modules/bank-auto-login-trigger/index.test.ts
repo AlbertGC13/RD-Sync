@@ -33,12 +33,28 @@ describe("auto-login trigger identity", () => {
     expect(() => parseAutoLoginTriggerIdentity({ kind: "authentication_attempt", id })).toThrow(AutoLoginTriggerValidationError);
   });
 
+  it("rejects hidden, symbolic, and accessor trigger fields without invoking accessors", () => {
+    const hidden = { kind: "session_expiry", id: "evt-001" };
+    Object.defineProperty(hidden, "owner", { value: "secret" });
+    const symbolic = { kind: "session_expiry", id: "evt-001", [Symbol("owner")]: "secret" };
+    let getterInvoked = false;
+    const accessor = { kind: "session_expiry", get id() { getterInvoked = true; return "evt-001"; } };
+    const nonEnumerableRequired = { kind: "session_expiry" };
+    Object.defineProperty(nonEnumerableRequired, "id", { value: "evt-001" });
+
+    for (const input of [hidden, symbolic, accessor, nonEnumerableRequired]) {
+      expect(() => parseAutoLoginTriggerIdentity(input)).toThrow(AutoLoginTriggerValidationError);
+    }
+    expect(getterInvoked).toBe(false);
+  });
+
   it("creates a stable opaque digest from run and attempt without embedding the bank", () => {
     const first = createAuthenticationAttemptTrigger({ bankCode: "popular", runId: "run-1", attemptId: "attempt-1" });
     expect(first).toEqual(createAuthenticationAttemptTrigger({ bankCode: "popular", runId: "run-1", attemptId: "attempt-1" }));
     expect(first).not.toEqual(createAuthenticationAttemptTrigger({ bankCode: "popular", runId: "run-2", attemptId: "attempt-1" }));
     expect(first).not.toEqual(createAuthenticationAttemptTrigger({ bankCode: "popular", runId: "run-1", attemptId: "attempt-2" }));
     expect(first).toEqual({ kind: "authentication_attempt", id: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(first.id).toBe("ff9d00d3b688af1a16ee47e5a774614f23cd33224d6c4278d5ccfcb530e9c5bd");
     expect(JSON.stringify(first)).not.toContain("popular");
     expect(JSON.stringify(first)).not.toContain("run-1");
     expect(JSON.stringify(first)).not.toContain("attempt-1");
@@ -51,5 +67,20 @@ describe("auto-login trigger identity", () => {
     { bankCode: "popular", runId: "run-1", attemptId: "", generation: 1 },
   ])("rejects malformed authentication attempt identities %#", (identity) => {
     expect(() => createAuthenticationAttemptTrigger(identity as never)).toThrow(AutoLoginTriggerValidationError);
+  });
+
+  it("rejects hidden, symbolic, and accessor authentication identity fields without invoking accessors", () => {
+    const hidden = { bankCode: "popular", runId: "run-1", attemptId: "attempt-1" };
+    Object.defineProperty(hidden, "generation", { value: 1 });
+    const symbolic = { bankCode: "popular", runId: "run-1", attemptId: "attempt-1", [Symbol("owner")]: "secret" };
+    let getterInvoked = false;
+    const accessor = { bankCode: "popular", runId: "run-1", get attemptId() { getterInvoked = true; return "attempt-1"; } };
+    const nonEnumerableRequired = { bankCode: "popular", runId: "run-1" };
+    Object.defineProperty(nonEnumerableRequired, "attemptId", { value: "attempt-1" });
+
+    for (const identity of [hidden, symbolic, accessor, nonEnumerableRequired]) {
+      expect(() => createAuthenticationAttemptTrigger(identity as never)).toThrow(AutoLoginTriggerValidationError);
+    }
+    expect(getterInvoked).toBe(false);
   });
 });
