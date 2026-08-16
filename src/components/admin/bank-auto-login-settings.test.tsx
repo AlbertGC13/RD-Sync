@@ -8,6 +8,8 @@ import {
   fetchCredentialMetadata,
   saveBankCredentials,
   toggleAutoLogin,
+  fetchManualRecoveryEligibility,
+  resolveManualRecovery,
 } from "./bank-auto-login-settings";
 
 describe("BankAutoLoginSettings", () => {
@@ -81,6 +83,17 @@ describe("BankAutoLoginSettings", () => {
     expect(fetchImpl).toHaveBeenCalledWith(
       "/api/bank-credentials/popular/auto-login",
       expect.objectContaining({ method: "PATCH", body: JSON.stringify({ enabled: true }) }),
+    );
+  });
+
+  it("uses the manual recovery endpoint without exposing episode details to the browser", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ eligible: true }), { status: 200 }));
+
+    await expect(fetchManualRecoveryEligibility("popular", fetchImpl)).resolves.toBe(true);
+    await expect(resolveManualRecovery({ bankCode: "popular", decision: { outcome: "resolved_no_retry", reason: "closed_without_retry" }, fetchImpl })).resolves.toBe(true);
+    expect(fetchImpl).toHaveBeenLastCalledWith(
+      "/api/bank-sessions/manual-recovery?bankCode=popular",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ decision: { outcome: "resolved_no_retry", reason: "closed_without_retry" } }) }),
     );
   });
 });
