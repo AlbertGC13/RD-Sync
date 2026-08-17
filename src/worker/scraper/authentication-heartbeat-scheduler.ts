@@ -42,7 +42,8 @@ export function createFixedDelayAuthenticationHeartbeatScheduler<TimerHandle = R
   return {
     start(heartbeat) {
       let stopped = false;
-      let pending: TimerHandle | undefined;
+      let timerHandle!: TimerHandle;
+      let hasPendingTimer = false;
       let inFlight: Promise<void> | undefined;
       let failed = false;
       let failure: unknown;
@@ -53,11 +54,11 @@ export function createFixedDelayAuthenticationHeartbeatScheduler<TimerHandle = R
       };
       const scheduleNext = (initial = false): void => {
         if (stopped || failed) return;
-        try { pending = schedule(onTimer, dependencies.delayMs); }
+        try { timerHandle = schedule(onTimer, dependencies.delayMs); hasPendingTimer = true; }
         catch (error) { rememberFailure(error); if (initial) throw error; }
       };
       const onTimer = (): void => {
-        pending = undefined;
+        hasPendingTimer = false;
         if (stopped || failed || inFlight) return;
         const current = Promise.resolve().then(heartbeat);
         inFlight = current;
@@ -72,12 +73,13 @@ export function createFixedDelayAuthenticationHeartbeatScheduler<TimerHandle = R
         stop(): Promise<void> {
           if (stopPromise) return stopPromise;
           stopped = true;
-          const timer = pending;
-          pending = undefined;
+          const timer = timerHandle;
+          const hasPending = hasPendingTimer;
+          hasPendingTimer = false;
           stopPromise = (async () => {
             let cancelFailure: unknown;
             let cancelled = false;
-            if (timer !== undefined) {
+            if (hasPending) {
               try { cancel(timer); } catch (error) { cancelled = true; cancelFailure = error; }
             }
             try { await inFlight; } catch (error) { rememberFailure(error); }

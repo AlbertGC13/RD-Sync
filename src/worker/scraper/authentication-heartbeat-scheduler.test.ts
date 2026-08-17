@@ -154,6 +154,25 @@ describe("createFixedDelayAuthenticationHeartbeatScheduler", () => {
     expect(calls).toBe(0);
   });
 
+  it.each([undefined, null, 0, false, {}] as const)("cancels an initial timer with handle %j exactly once", async (timerHandle) => {
+    let callback!: () => void;
+    const cancelled: unknown[] = [];
+    const scheduler = createFixedDelayAuthenticationHeartbeatScheduler<typeof timerHandle>({
+      delayMs: 1,
+      schedule: (next) => { callback = next; return timerHandle; },
+      cancel: (handle) => { cancelled.push(handle); },
+    });
+    let calls = 0;
+    const handle = scheduler.start(async () => { calls += 1; });
+
+    await handle.stop();
+    await handle.stop();
+    expect(cancelled).toEqual([timerHandle]);
+    callback();
+    await flush();
+    expect(calls).toBe(0);
+  });
+
   it("waits for an in-flight heartbeat while stopping", async () => {
     const timers = new ManualTimers();
     const heartbeat = deferred<void>();
