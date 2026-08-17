@@ -144,13 +144,12 @@ function makeFakeScheduler(): FakeScheduler {
 // ---------------------------------------------------------------------------
 
 describe("checkPopularSessionHealth — active session", () => {
-  it("returns active when URL includes /dashboard and Producto is visible", async () => {
+  it("returns active only for the exact trusted dashboard URL with Producto visible", async () => {
     const page = new FakeSessionProbePage({
       urlAfterGoto: "https://ib.bpd.com.do/dashboard",
       waitForVisibleTextResult: true,
     });
     const result = await checkPopularSessionHealth(page, {
-      baseUrl: "https://ib.bpd.com.do",
       clock: () => new Date("2026-01-01T00:00:00.000Z"),
     });
 
@@ -159,12 +158,12 @@ describe("checkPopularSessionHealth — active session", () => {
     expect(result.checkedAt).toBe("2026-01-01T00:00:00.000Z");
   });
 
-  it("navigates to {baseUrl}/dashboard", async () => {
+  it("navigates only to the trusted dashboard URL", async () => {
     const page = new FakeSessionProbePage({
       urlAfterGoto: "https://ib.bpd.com.do/dashboard",
       waitForVisibleTextResult: true,
     });
-    await checkPopularSessionHealth(page, { baseUrl: "https://ib.bpd.com.do" });
+    await checkPopularSessionHealth(page);
 
     expect(page.operations[0]).toBe("goto:https://ib.bpd.com.do/dashboard");
   });
@@ -180,6 +179,19 @@ describe("checkPopularSessionHealth — expired: redirect", () => {
 
     expect(result.status).toBe("expired");
     expect(result.safeSummary).toBe("Bank session expired or requires verification");
+  });
+});
+
+describe("checkPopularSessionHealth — bounded navigation", () => {
+  it.each([
+    "https://evil.example/dashboard",
+    "https://ib.bpd.com.do/dashboard/evil",
+    "https://ib.bpd.com.do/dashboard?next=https://evil.example",
+  ])("rejects a foreign or non-exact dashboard URL: %s", async (urlAfterGoto) => {
+    const page = new FakeSessionProbePage({ urlAfterGoto, waitForVisibleTextResult: true });
+
+    await expect(checkPopularSessionHealth(page)).resolves.toMatchObject({ status: "expired" });
+    expect(page.operations).not.toContainEqual(expect.stringContaining("waitForVisibleText"));
   });
 });
 
@@ -274,6 +286,28 @@ describe("createCdpSessionChecker — unconfigured CDP fallback", () => {
 });
 
 describe("createCdpSessionChecker — cleanup in finally", () => {
+  it("closes its separate page and CDP handle after a successful check", async () => {
+    let pageClosed = false;
+    let browserClosed = false;
+    const page: import("../../worker/scraper/navigation/popular-cdp").CdpPageLike = {
+      url: () => "https://ib.bpd.com.do/dashboard",
+      goto: async () => undefined,
+      waitForSelector: async () => undefined,
+      waitForTimeout: async () => undefined,
+      evaluate: async <T>() => null as unknown as T,
+      close: async () => { pageClosed = true; },
+    };
+    const browser: CdpBrowserLike = {
+      contexts: () => [{ newPage: async () => page }],
+      newPage: async () => page,
+      close: async () => { browserClosed = true; },
+    };
+
+    await expect(createCdpSessionChecker({ connect: async () => browser }).check()).resolves.toMatchObject({ status: "active" });
+    expect(pageClosed).toBe(true);
+    expect(browserClosed).toBe(true);
+  });
+
   it("closes page and browser even when check throws internally", async () => {
     const pageCloses: number[] = [];
     const browserCloses: number[] = [];
