@@ -109,6 +109,51 @@ describe("createAuthenticatedIngestionDeliveryProcessor", () => {
     await expect(processor({ data: payload() })).resolves.toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
   });
 
+  it("rejects nested authentication accessors without invoking them", async () => {
+    let accessed = false;
+    const authentication = Object.defineProperty({ version: 1 }, "attemptId", { enumerable: true, get: () => { accessed = true; throw new Error("raw-sentinel"); } });
+    const { processor, authenticate, downstream, complete } = setup();
+    await processor({ data: { ...payload(), authentication } });
+    expect(accessed).toBe(false); expect(authenticate).not.toHaveBeenCalled(); expect(downstream).not.toHaveBeenCalled();
+    expect(JSON.stringify(complete.mock.calls)).not.toContain("raw-sentinel");
+  });
+
+  it.each([
+    Object.assign({ version: 1, attemptId: "attempt-1" }, { [Symbol("hidden")]: true }),
+    Object.defineProperty({ version: 1, attemptId: "attempt-1" }, "hidden", { value: true }),
+    Object.assign(Object.create({ attemptId: "attempt-1" }), { version: 1 }),
+    Object.assign(Object.create({ extra: true }), { version: 1, attemptId: "attempt-1" }),
+    { version: 1, attemptId: "attempt-1", extra: true },
+    { version: 1 },
+  ])("rejects hostile nested authentication records", async (authentication) => {
+    const { processor, authenticate, downstream, complete } = setup();
+    await processor({ data: { ...payload(), authentication } });
+    expect(authenticate).not.toHaveBeenCalled(); expect(downstream).not.toHaveBeenCalled();
+    expect(complete).toHaveBeenCalledWith({ runId: "run-1", status: "failed", reason: "invalid_authenticated_ingestion_delivery" });
+  });
+
+  it("accepts a null-prototype nested authentication record", async () => {
+    const authentication = Object.assign(Object.create(null), { version: 1, attemptId: "attempt-1" });
+    const { processor, authenticate, downstream } = setup();
+    await expect(processor({ data: { ...payload(), authentication } })).resolves.toEqual(result);
+    expect(authenticate).toHaveBeenCalledTimes(1); expect(downstream).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats forged authenticated precondition results as operator review", async () => {
+    const { processor, downstream, complete } = setup({ status: "authenticated", extra: "raw-sentinel" });
+    await processor({ data: payload() });
+    expect(downstream).not.toHaveBeenCalled(); expect(complete).toHaveBeenCalledWith({ runId: "run-1", status: "needs_admin_action", reason: "authentication_precondition_requires_review" });
+    expect(JSON.stringify(complete.mock.calls)).not.toContain("raw-sentinel");
+  });
+
+  it("rejects an outer data accessor without invoking it", async () => {
+    let accessed = false;
+    const job = Object.defineProperty({}, "data", { enumerable: true, get: () => { accessed = true; throw new Error("raw-sentinel"); } });
+    const { processor, authenticate, downstream, complete } = setup();
+    await expect(processor(job as { data: unknown })).rejects.toEqual(new AuthenticatedIngestionInvalidJobError());
+    expect(accessed).toBe(false); expect(authenticate).not.toHaveBeenCalled(); expect(downstream).not.toHaveBeenCalled(); expect(complete).not.toHaveBeenCalled();
+  });
+
   it("is assignable to the existing factory processor shape", () => {
     const factoryCompatible: (job: { data: unknown }) => Promise<IngestionResult> = createAuthenticatedIngestionDeliveryProcessor<IngestionResult>({
       authenticate: async () => ({ status: "authenticated" }),
