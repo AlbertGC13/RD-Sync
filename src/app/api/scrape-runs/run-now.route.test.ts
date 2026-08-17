@@ -53,6 +53,10 @@ describe("POST /api/scrape-runs/run-now", () => {
           runId: "popular-manual-run",
           bankId: "popular",
           accountFingerprint: "popular-0000000000",
+          authentication: {
+            version: 1,
+            attemptId: "auth-attempt-v1:de0938f0201b05dd2b025ca6c9ad5ba57eb82b23d24bb020cb89887f99008e01",
+          },
         },
       },
     ]);

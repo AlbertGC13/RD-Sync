@@ -56,6 +56,10 @@ describe("scheduleIngestionRunNow", () => {
           runId: "run-popular-now",
           bankId: "popular",
           accountFingerprint: "popular-0000000000",
+          authentication: {
+            version: 1,
+            attemptId: "auth-attempt-v1:d743851183d7c5ec7d8b87fd750d60886a6656597b5c9d5e8435849129066999",
+          },
         },
         options: {
           jobId: "run-popular-now",

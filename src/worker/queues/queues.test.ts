@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
 
 import {
   createIngestionProcessor,
   createIngestionQueueOptions,
+  deriveAuthenticatedIngestionAttemptId,
   ingestionJobName,
   scheduleIngestionJob,
   type IngestionJobData,
@@ -13,6 +15,7 @@ import type { BankMovement } from "../../modules/transactions";
 import { InMemoryAuditSink } from "../../modules/audit";
 import { BANK_AUTOLOGIN_ACTIONS } from "../../modules/audit/bank-actions";
 import { InMemoryBankSessionExpiryEpisodeRepository } from "../../modules/bank-sessions/expiry-episodes";
+import { InMemoryScheduledIngestionQueue } from "../../app/api/scrape-runs/defaults";
 
 const jobData: IngestionJobData = {
   runId: "run-1",
@@ -347,7 +350,15 @@ describe("BullMQ ingestion scheduling", () => {
     expect(queue.addCalls).toEqual([
       {
         name: "bank-transaction-ingestion",
-        data: jobData,
+        data: {
+          runId: "run-1",
+          bankId: "popular",
+          accountFingerprint: "acct-main",
+          authentication: {
+            version: 1,
+            attemptId: "auth-attempt-v1:0802674dadacdf86fce600258dabacdfd1e73a48953678879dd1fdacf2efa94f",
+          },
+        },
         options: {
           jobId: "run-1",
           attempts: 3,
@@ -358,6 +369,122 @@ describe("BullMQ ingestion scheduling", () => {
       },
     ]);
     expect(createIngestionQueueOptions("run-2").jobId).toBe("run-2");
+  });
+});
+
+describe("durable authenticated ingestion identity", () => {
+  it("derives the independently calculated V1 golden attempt id", () => {
+    expect(deriveAuthenticatedIngestionAttemptId("popular", "run-1")).toBe(
+      "auth-attempt-v1:0802674dadacdf86fce600258dabacdfd1e73a48953678879dd1fdacf2efa94f",
+    );
+  });
+
+  it("is stable for the same bank and run, regardless of account fingerprint", () => {
+    const first = deriveAuthenticatedIngestionAttemptId("popular", "run-1");
+    const second = deriveAuthenticatedIngestionAttemptId("popular", "run-1");
+
+    expect(first).toBe(second);
+    expect(first).toBe(deriveAuthenticatedIngestionAttemptId("popular", "run-1"));
+    expect(first).not.toBe(deriveAuthenticatedIngestionAttemptId("banreservas", "run-1"));
+    expect(first).not.toBe(deriveAuthenticatedIngestionAttemptId("popular", "run-2"));
+  });
+
+  it("uses unambiguous UTF-8 length-prefixed fields for delimiter and Unicode collision pairs", () => {
+    expect(deriveAuthenticatedIngestionAttemptId("a", "bc")).not.toBe(
+      deriveAuthenticatedIngestionAttemptId("ab", "c"),
+    );
+    expect(deriveAuthenticatedIngestionAttemptId("banco|\u0000", "cuenta:á")).not.toBe(
+      deriveAuthenticatedIngestionAttemptId("banco", "|\u0000cuenta:á"),
+    );
+  });
+
+  it("returns only the safe fixed-format digest and rejects blank identity inputs", () => {
+    const attemptId = deriveAuthenticatedIngestionAttemptId("popular|\u0000", "run:á");
+
+    expect(attemptId).toMatch(/^auth-attempt-v1:[a-f0-9]{64}$/);
+    expect(attemptId).not.toContain("popular");
+    expect(attemptId).not.toContain("run");
+    expect(() => deriveAuthenticatedIngestionAttemptId(" ", "run-1")).toThrow(
+      "Invalid ingestion identity.",
+    );
+    expect(() => deriveAuthenticatedIngestionAttemptId("popular", "\t")).toThrow(
+      "Invalid ingestion identity.",
+    );
+  });
+
+  it("uses no runtime entropy, clock, owner token, or fingerprint in the derivation", async () => {
+    const source = await readFile(new URL("./index.ts", import.meta.url), "utf8");
+    const start = source.indexOf("export function deriveAuthenticatedIngestionAttemptId");
+    const end = source.indexOf("export function createIngestionProcessor", start);
+    const derivation = source.slice(start, end);
+
+    expect(derivation).not.toMatch(/randomUUID|Date|Math\.random|ownerToken|accountFingerprint/);
+  });
+
+  it("persists the exact V1 envelope through the in-memory queue", async () => {
+    const queue = new InMemoryScheduledIngestionQueue();
+
+    await scheduleIngestionJob(queue, {
+      runId: "run-memory",
+      bankId: "popular",
+      accountFingerprint: "fingerprint-a",
+    });
+
+    expect(queue.jobs).toEqual([{
+      name: ingestionJobName,
+      data: {
+        runId: "run-memory",
+        bankId: "popular",
+        accountFingerprint: "fingerprint-a",
+        authentication: {
+          version: 1,
+          attemptId: deriveAuthenticatedIngestionAttemptId("popular", "run-memory"),
+        },
+      },
+      options: createIngestionQueueOptions("run-memory"),
+    }]);
+  });
+
+  it("keeps the scheduled attempt id stable when only the account fingerprint changes", async () => {
+    const queue = new FakeQueue();
+
+    await scheduleIngestionJob(queue, {
+      runId: "run-stable",
+      bankId: "popular",
+      accountFingerprint: "fingerprint-a",
+    });
+    await scheduleIngestionJob(queue, {
+      runId: "run-stable",
+      bankId: "popular",
+      accountFingerprint: "fingerprint-b",
+    });
+
+    expect(queue.addCalls.map((call) => call.data.authentication?.attemptId)).toEqual([
+      deriveAuthenticatedIngestionAttemptId("popular", "run-stable"),
+      deriveAuthenticatedIngestionAttemptId("popular", "run-stable"),
+    ]);
+  });
+
+  it("does not change legacy processor behavior when it receives the V1 envelope", async () => {
+    const scrapeRuns = new FakeScrapeRunRepository();
+    const processor = createIngestionProcessor({
+      scrapeRuns,
+      transactions: new FakeTransactionRepository({ inserted: 0, skipped: 0 }),
+      scraper: { collect: async () => ({ status: "collected" as const, movements: [] }) },
+    });
+
+    await expect(processor({
+      data: {
+        runId: "run-v1",
+        bankId: "popular",
+        accountFingerprint: "acct-main",
+        authentication: { version: 1, attemptId: deriveAuthenticatedIngestionAttemptId("popular", "run-v1") },
+      },
+    })).resolves.toEqual({ status: "succeeded", inserted: 0, skipped: 0 });
+    expect(scrapeRuns.transitions).toEqual([
+      { runId: "run-v1", status: "running" },
+      { runId: "run-v1", status: "succeeded", insertedCount: 0, skippedCount: 0 },
+    ]);
   });
 });
 

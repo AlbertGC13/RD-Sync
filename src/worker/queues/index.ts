@@ -1,5 +1,5 @@
 import type { JobsOptions } from "bullmq";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { createAuditEvent, type AuditSink } from "../../modules/audit";
 import { BANK_AUTOLOGIN_ACTIONS } from "../../modules/audit/bank-actions";
@@ -11,7 +11,7 @@ import { redactDiagnosticText, type ScrapeCollectionResult } from "../scraper";
 
 export type ScrapeRunStatus = "queued" | "running" | "succeeded" | "failed" | "needs_admin_action" | "throttled";
 
-export interface IngestionJobData {
+export interface IngestionSchedulingInput {
   runId: string;
   /**
    * Canonical bank code (`Bank.code`), e.g. `"popular"`. Named `bankId` for
@@ -19,9 +19,23 @@ export interface IngestionJobData {
    * the value is a domain code, NOT the Prisma `Bank.id` cuid.
    */
   bankId: string;
+  accountFingerprint: string;
+}
+
+export interface AuthenticatedIngestionEnvelope {
+  version: 1;
+  attemptId: string;
+}
+
+export interface AuthenticatedIngestionJobData extends IngestionSchedulingInput {
+  authentication: AuthenticatedIngestionEnvelope;
+}
+
+export interface IngestionJobData extends IngestionSchedulingInput {
   /** Stable session-expiry event id. When present, the processor may run the canonical scrape-time auto-login trigger before collection. */
   expiredEventId?: string;
-  accountFingerprint: string;
+  /** Optional so previously queued legacy jobs stay processor-compatible. */
+  authentication?: AuthenticatedIngestionEnvelope;
 }
 
 export interface IngestionJob {
@@ -116,6 +130,29 @@ export interface QueueLike {
 export const ingestionJobName = "bank-transaction-ingestion";
 const SYSTEM_INGESTION_ACTOR = "system:ingestion-worker";
 const SYSTEM_AUTOLOGIN_ACTOR = "system:auto-login";
+const AUTHENTICATED_INGESTION_ATTEMPT_DOMAIN = "rd-sync:authenticated-ingestion-attempt:v1\0";
+const AUTHENTICATED_INGESTION_ATTEMPT_VERSION = 1;
+
+function encodeAuthenticatedIngestionAttemptField(value: string): string {
+  return `${Buffer.byteLength(value, "utf8")}:${value}`;
+}
+
+export function deriveAuthenticatedIngestionAttemptId(bankId: string, runId: string): string {
+  if (!/\S/.test(bankId) || !/\S/.test(runId)) {
+    throw new Error("Invalid ingestion identity.");
+  }
+
+  const canonicalInput = [
+    String(AUTHENTICATED_INGESTION_ATTEMPT_VERSION),
+    bankId,
+    runId,
+  ].map(encodeAuthenticatedIngestionAttemptField).join("");
+  const digest = createHash("sha256")
+    .update(`${AUTHENTICATED_INGESTION_ATTEMPT_DOMAIN}${canonicalInput}`, "utf8")
+    .digest("hex");
+
+  return `auth-attempt-v1:${digest}`;
+}
 
 export function createIngestionProcessor(dependencies: IngestionProcessorDependencies) {
   const now = dependencies.now ?? (() => new Date());
@@ -354,8 +391,17 @@ export function createIngestionQueueOptions(runId: string): JobsOptions {
   };
 }
 
-export async function scheduleIngestionJob(queue: QueueLike, data: IngestionJobData): Promise<void> {
-  await queue.add(ingestionJobName, data, createIngestionQueueOptions(data.runId));
+export async function scheduleIngestionJob(queue: QueueLike, data: IngestionSchedulingInput): Promise<void> {
+  const payload: AuthenticatedIngestionJobData = {
+    runId: data.runId,
+    bankId: data.bankId,
+    accountFingerprint: data.accountFingerprint,
+    authentication: {
+      version: AUTHENTICATED_INGESTION_ATTEMPT_VERSION,
+      attemptId: deriveAuthenticatedIngestionAttemptId(data.bankId, data.runId),
+    },
+  };
+  await queue.add(ingestionJobName, payload, createIngestionQueueOptions(data.runId));
 }
 
 function normalizeMovements(movements: readonly BankMovement[], scrapeRunId: string): TransactionRecord[] {
