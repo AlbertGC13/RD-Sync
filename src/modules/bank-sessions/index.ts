@@ -73,18 +73,20 @@ export interface SessionProbePage {
 // ---------------------------------------------------------------------------
 
 export interface CheckPopularSessionHealthOptions {
-  baseUrl?: string;
   waitTimeoutMs?: number;
   clock?: () => Date;
 }
+
+const POPULAR_PORTAL_ORIGIN = "https://ib.bpd.com.do";
+const POPULAR_DASHBOARD_URL = `${POPULAR_PORTAL_ORIGIN}/dashboard`;
 
 /**
  * Probes the Popular portal dashboard to determine whether the bank session
  * is active or expired.
  *
  * Steps:
- *   1. goto {baseUrl}/dashboard
- *   2. currentUrl() does not include "/dashboard" → expired
+ *   1. goto the trusted Popular /dashboard URL
+ *   2. currentUrl() is not exactly that URL → expired
  *   3. waitForVisibleText("Producto") returns false → expired
  *   4. Otherwise → active
  *
@@ -96,17 +98,21 @@ export async function checkPopularSessionHealth(
   options: CheckPopularSessionHealthOptions = {},
 ): Promise<BankSessionCheckResult> {
   const {
-    baseUrl = "https://ib.bpd.com.do",
     waitTimeoutMs = 15_000,
     clock = () => new Date(),
   } = options;
 
   const checkedAt = clock().toISOString();
 
-  await page.goto(`${baseUrl}/dashboard`);
+  await page.goto(POPULAR_DASHBOARD_URL);
 
-  const url = await page.currentUrl();
-  if (!url.includes("/dashboard")) {
+  let url: URL;
+  try {
+    url = new URL(await page.currentUrl());
+  } catch {
+    return { status: "expired", checkedAt, safeSummary: SUMMARY_EXPIRED };
+  }
+  if (url.href !== POPULAR_DASHBOARD_URL) {
     return { status: "expired", checkedAt, safeSummary: SUMMARY_EXPIRED };
   }
 
@@ -126,7 +132,6 @@ export async function checkPopularSessionHealth(
 
 export interface CdpSessionCheckerOptions {
   cdpUrl?: string;
-  baseUrl?: string;
   waitTimeoutMs?: number;
   connect?: (cdpUrl: string) => Promise<CdpBrowserLike>;
   clock?: () => Date;
@@ -148,7 +153,6 @@ export function createCdpSessionChecker(
 ): CdpSessionChecker {
   const {
     cdpUrl = DEFAULT_CDP_URL,
-    baseUrl = "https://ib.bpd.com.do",
     waitTimeoutMs = 15_000,
     connect = connectPlaywrightOverCdp<CdpBrowserLike>,
     clock = () => new Date(),
@@ -183,7 +187,7 @@ export function createCdpSessionChecker(
         cdpPage = await openCdpPageInDefaultContext(browser);
 
         const probePage = new CdpPopularPortalPage(cdpPage);
-        return await checkPopularSessionHealth(probePage, { baseUrl, waitTimeoutMs, clock });
+        return await checkPopularSessionHealth(probePage, { waitTimeoutMs, clock });
       } finally {
         if (cdpPage !== null) {
           try {
