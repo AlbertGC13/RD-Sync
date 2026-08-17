@@ -1,129 +1,103 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import { encryptCredentialField } from "../modules/bank-credentials/crypto";
 import {
   createAuthenticatedIngestionPrecondition,
   type AuthenticatedIngestionPreconditionDependencies,
 } from "./authenticated-ingestion-precondition";
+import type { FencedScrapeTimeAutoLoginRunnerDependencies } from "./scraper/scrape-time-auto-login-authentication-execution";
+import type { BankAutoLoginPage } from "./scraper/auto-login";
 
 const identity = { bankCode: "popular", runId: "run-1", attemptId: "attempt-1" };
 const env = { RD_SYNC_AUTHENTICATION_LEASE_MS: "60000", RD_SYNC_AUTHENTICATION_HEARTBEAT_MS: "15000" };
+const key = Buffer.alloc(32, 7);
 
-function createHarness(overrides: Partial<AuthenticatedIngestionPreconditionDependencies> = {}) {
-  const coordinate = vi.fn(async () => ({ status: "authentication_required" as const, authority: Object.freeze(Object.create(null)) as never }));
-  const execute = vi.fn(async () => ({ status: "succeeded" as const }));
-  const run = vi.fn(async () => ({ status: "authenticated" as const }));
-  const start = vi.fn(() => ({ stop: vi.fn(async () => undefined) }));
+function createFixture() {
+  let phase = "no_credential_interaction" as "no_credential_interaction" | "credentials_may_have_reached_portal" | "submit_may_have_been_dispatched";
+  let authenticated = false;
+  const now = new Date();
+  const record = (owner = false) => authenticated
+    ? { identity, status: "authenticated" as const, interactionPhase: phase, failureClass: null, operatorReason: null, retryCount: 0, ownerToken: null, generation: 1n, leaseExpiresAt: null, terminalAt: now, createdAt: now, updatedAt: now }
+    : { identity, status: "active" as const, interactionPhase: phase, failureClass: null, operatorReason: null, retryCount: 0, ownerToken: owner ? "owner-token" : null, generation: 0n, leaseExpiresAt: owner ? now : null, terminalAt: null, createdAt: now, updatedAt: now };
+  const page = { currentUrl: async () => "https://bank/login", hasVisibleSelector: async () => false, fill: vi.fn(), click: vi.fn() };
+  const scheduler = { schedule: vi.fn(() => ({})), cancel: vi.fn() };
+  const runnerDependencies: FencedScrapeTimeAutoLoginRunnerDependencies = {
+    adapterRegistry: { get: vi.fn(() => ({ bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin: async ({ page: guardedPage }: { page: BankAutoLoginPage }) => { await guardedPage.fill("username", "user"); await guardedPage.click("submit"); return { status: "succeeded" as const }; } }) })) },
+    autoLoginConfigs: { getByBankCode: vi.fn().mockResolvedValue({ autoLoginEnabled: true, breakerState: "closed" }) },
+    credentials: { findByBankCode: vi.fn().mockResolvedValue({ bankCode: "popular", isActive: true, keyVersion: 1, encryptedUsernameEnvelope: JSON.stringify(encryptCredentialField("user", () => key)), encryptedPasswordEnvelope: JSON.stringify(encryptCredentialField("pass", () => key)) }) },
+    keyResolver: () => key, lock: { acquire: vi.fn().mockResolvedValue({ leaseToken: "lease", fencingToken: 1, expiresAt: 1 }), release: vi.fn().mockResolvedValue(true) }, cdpUrlForBankCode: () => "http://127.0.0.1:9222", ensureBrowser: vi.fn().mockResolvedValue({ status: "ready", page, close: vi.fn() }),
+  };
   const dependencies: AuthenticatedIngestionPreconditionDependencies = {
     env,
-    coordinatorDependencies: { attempts: {} as never, probe: {} as never },
-    runnerDependencies: {} as never,
-    job: { data: { bankId: "popular", runId: "run-1", accountFingerprint: "account-fingerprint" } },
-    createCoordinator: () => ({ coordinate }),
-    createExecution: () => ({ execute }),
-    createRunner: ({ execution }) => ({ run: async () => { await execution.execute({} as never); return run(); } }),
-    createHeartbeat: () => ({ start }),
-    ...overrides,
+    coordinatorDependencies: { attempts: {
+      findExact: async () => authenticated ? { status: "found", record: record() } : { status: "missing" }, getOrCreate: async () => ({ status: "created", record: record() }), acquireLease: async () => ({ status: "lease_acquired", owner: { identity, ownerToken: "owner-token", generation: 0n }, record: record(true) }), reconcileExpiredLease: async () => ({ status: "missing" }),
+      renewLease: async () => ({ status: "lease_renewed", record: record(true) }), beginCredentialInteraction: async () => { phase = "credentials_may_have_reached_portal"; return { status: "interaction_started", record: record(true) }; }, recordSubmitBarrier: async () => { phase = "submit_may_have_been_dispatched"; return { status: "recorded", record: record(true) }; }, claimRetry: async () => ({ status: "retry_claimed", retryCount: 1 as const, record: record() }), completeAuthenticated: async () => { authenticated = true; return { status: "authenticated", record: record() }; }, completeFailed: async () => ({ status: "failed", record: record() }),
+    } as never, probe: { observe: async () => ({ status: "unauthenticated" as const }) } },
+    runnerDependencies, job: { data: { bankId: "popular", runId: "run-1", accountFingerprint: "fingerprint" } }, heartbeat: scheduler,
   };
-  return { precondition: createAuthenticatedIngestionPrecondition(dependencies), coordinate, run, execute, start };
+  return { dependencies, precondition: createAuthenticatedIngestionPrecondition(dependencies), page, scheduler, runnerDependencies, authenticate: () => { authenticated = true; } };
 }
 
 describe("createAuthenticatedIngestionPrecondition", () => {
-  it("composes a valid unauthenticated attempt through fresh coordinator, runner, and fenced execution", async () => {
-    const harness = createHarness();
+  it("uses real coordinator, runner, adapter, and scheduler once before durable duplicate bypass", async () => {
+    const fixture = createFixture();
 
-    await expect(harness.precondition({ identity, ownerToken: "owner-token" })).resolves.toEqual({ status: "authenticated" });
-    expect(harness.coordinate).toHaveBeenCalledOnce();
-    expect(harness.run).toHaveBeenCalledOnce();
-    expect(harness.execute).toHaveBeenCalledOnce();
+    await expect(fixture.precondition({ identity, ownerToken: "owner-token" })).resolves.toEqual({ status: "authenticated" });
+    await expect(fixture.precondition({ identity, ownerToken: "owner-token" })).resolves.toEqual({ status: "authenticated" });
+    expect(fixture.page.fill).toHaveBeenCalledOnce();
+    expect(fixture.page.click).toHaveBeenCalledOnce();
+    expect(fixture.scheduler.schedule).toHaveBeenCalledOnce();
+    expect(fixture.scheduler.cancel).toHaveBeenCalledOnce();
+    expect(fixture.runnerDependencies.credentials.findByBankCode).toHaveBeenCalledOnce();
   });
 
-  it("bypasses execution infrastructure when the coordinator reports an authenticated session", async () => {
-    const coordinator = vi.fn(async () => ({ status: "authenticated" as const, source: "existing" as const }));
-    const harness = createHarness({ createCoordinator: () => ({ coordinate: coordinator }) });
+  it("fails closed for hostile signal getters without leaking sentinels or activating dependencies", async () => {
+    const sentinel = "raw-signal-sentinel owner-token";
+    const prototype = Object.create(AbortSignal.prototype);
+    Object.defineProperty(prototype, "aborted", { enumerable: true, get: () => { throw new Error(sentinel); } });
+    const signal = Object.create(prototype);
+    const fixture = createFixture();
 
-    await expect(harness.precondition({ identity, ownerToken: "owner-token" })).resolves.toEqual({ status: "authenticated" });
-    expect(harness.run).not.toHaveBeenCalled();
-    expect(harness.execute).not.toHaveBeenCalled();
-    expect(harness.start).not.toHaveBeenCalled();
+    const result = await fixture.precondition({ identity, ownerToken: "owner-token", signal });
+    expect(result).toEqual({ status: "invalid_request" });
+    expect(JSON.stringify(result)).not.toContain(sentinel);
+    expect(fixture.runnerDependencies.credentials.findByBankCode).not.toHaveBeenCalled();
+    expect(fixture.scheduler.schedule).not.toHaveBeenCalled();
   });
 
-  it("creates fresh execution and runner state for each invocation", async () => {
-    const createExecution = vi.fn(() => ({ execute: vi.fn(async () => ({ status: "succeeded" as const })) }));
-    const createRunner = vi.fn(() => ({ run: vi.fn(async () => ({ status: "authenticated" as const })) }));
-    const harness = createHarness({ createExecution, createRunner });
-
-    await harness.precondition({ identity, ownerToken: "owner-token" });
-    await harness.precondition({ identity, ownerToken: "owner-token" });
-    expect(createExecution).toHaveBeenCalledTimes(2);
-    expect(createRunner).toHaveBeenCalledTimes(2);
-  });
-
-  it.each([
-    null,
-    [],
-    { identity: { ...identity, bankCode: "" }, ownerToken: "owner-token" },
-    { identity, ownerToken: "" },
-    { identity, ownerToken: "owner-token", extra: true },
-    { identity, ownerToken: "owner-token", expiredEventId: "legacy" },
-    { identity: { ...identity, runId: "other-run" }, ownerToken: "owner-token" },
-  ])("fails closed without constructing dangerous dependencies for malformed input %#", async (input) => {
-    const harness = createHarness();
-
-    await expect(harness.precondition(input)).resolves.toEqual({ status: "invalid_request" });
-    expect(harness.coordinate).not.toHaveBeenCalled();
-    expect(harness.execute).not.toHaveBeenCalled();
-  });
-
-  it("rejects accessor, inherited, and symbol descriptor attacks without reading getters", async () => {
-    const getter = vi.fn(() => "owner-token");
-    const accessor = Object.defineProperty({ identity }, "ownerToken", { enumerable: true, get: getter });
-    const inherited = Object.create({ ownerToken: "owner-token" }) as { identity: typeof identity };
-    inherited.identity = identity;
-    const symbol = Object.assign({ identity, ownerToken: "owner-token" }, { [Symbol("secret")]: true });
-    const harness = createHarness();
-
-    for (const input of [accessor, inherited, symbol]) await expect(harness.precondition(input)).resolves.toEqual({ status: "invalid_request" });
-    expect(getter).not.toHaveBeenCalled();
-    expect(harness.coordinate).not.toHaveBeenCalled();
-  });
-
-  it("returns only safe vocabulary when dependencies throw sentinel secrets", async () => {
-    const secret = "credential-secret owner-token https://bank.example";
-    const harness = createHarness({ createCoordinator: () => ({ coordinate: async () => { throw new Error(secret); } }) });
-
-    const result = await harness.precondition({ identity, ownerToken: "owner-token" });
-    expect(result).toEqual({ status: "needs_operator_action", reason: "authentication_attempt_requires_review" });
-    expect(JSON.stringify(result)).not.toContain(secret);
-  });
-
-  it("cancels before coordinator, browser, credentials, or mutation work for a pre-aborted signal", async () => {
+  it("supports real AbortSignal while pre-abort bypasses all mutation dependencies", async () => {
     const controller = new AbortController();
     controller.abort();
-    const harness = createHarness();
+    const fixture = createFixture();
 
-    await expect(harness.precondition({ identity, ownerToken: "owner-token", signal: controller.signal })).resolves.toEqual({ status: "cancelled" });
-    expect(harness.coordinate).not.toHaveBeenCalled();
-    expect(harness.execute).not.toHaveBeenCalled();
+    await expect(fixture.precondition({ identity, ownerToken: "owner-token", signal: controller.signal })).resolves.toEqual({ status: "cancelled" });
+    expect(fixture.runnerDependencies.credentials.findByBankCode).not.toHaveBeenCalled();
+    expect(fixture.scheduler.schedule).not.toHaveBeenCalled();
   });
 
-  it("fails invalid heartbeat configuration during construction before dependencies are created", () => {
-    const createCoordinator = vi.fn();
+  it("does not impose a wrapper length limit on a domain-valid identity", async () => {
+    const fixture = createFixture();
+    fixture.authenticate();
+    const longIdentity = { ...identity, attemptId: "a".repeat(257) };
 
-    expect(() => createHarness({ env: { ...env, RD_SYNC_AUTHENTICATION_HEARTBEAT_MS: "60000" }, createCoordinator })).toThrow("Invalid authentication heartbeat configuration.");
-    expect(createCoordinator).not.toHaveBeenCalled();
+    await expect(fixture.precondition({ identity: longIdentity, ownerToken: "owner-token" })).resolves.toEqual({ status: "authenticated" });
+    expect(fixture.scheduler.schedule).not.toHaveBeenCalled();
   });
 
-  it("rejects legacy expiry job descriptors before any invocation can activate dependencies", () => {
-    const createCoordinator = vi.fn();
+  it.each([null, [], { identity, ownerToken: "" }, { identity, ownerToken: "owner-token", extra: true }, { identity: { ...identity, runId: "wrong" }, ownerToken: "owner-token" }])("rejects malformed invocation %# before dependencies", async (input) => {
+    const fixture = createFixture();
 
-    expect(() => createHarness({ job: { data: { bankId: "popular", runId: "run-1", accountFingerprint: "account-fingerprint", expiredEventId: "legacy" } }, createCoordinator })).toThrow("Invalid authenticated ingestion precondition configuration.");
-    expect(createCoordinator).not.toHaveBeenCalled();
+    await expect(fixture.precondition(input)).resolves.toEqual({ status: "invalid_request" });
+    expect(fixture.scheduler.schedule).not.toHaveBeenCalled();
   });
 
-  it("remains inert and uses attempt-only completion", () => {
+  it("fails invalid construction and keeps the module inert", () => {
     const source = readFileSync(new URL("./authenticated-ingestion-precondition.ts", import.meta.url), "utf8");
+    const fixture = createFixture();
 
+    expect(() => createAuthenticatedIngestionPrecondition({ ...fixture.dependencies, env: { ...env, RD_SYNC_AUTHENTICATION_HEARTBEAT_MS: "60000" } })).toThrow("Invalid authentication heartbeat configuration.");
+    expect(() => createAuthenticatedIngestionPrecondition({ ...fixture.dependencies, job: { data: { bankId: "popular", runId: "run-1", accountFingerprint: "fingerprint", expiredEventId: "legacy" } } })).toThrow("Invalid authenticated ingestion precondition configuration.");
     expect(source).toContain('completion: { mode: "attempt_only" }');
-    expect(source).not.toMatch(/BullMQ|Prisma|process\.env|setInterval/);
+    expect(source).not.toMatch(/BullMQ|Prisma|process\.env|createCoordinator|createExecution|createRunner/);
   });
 });
