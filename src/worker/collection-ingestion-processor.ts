@@ -4,6 +4,7 @@ import type { AdminAlertSink, IngestionResult, ResolveScraper, ScrapeRunReposito
 
 type JobData = Readonly<{ runId: string; bankId: string; accountFingerprint: string }>;
 type TerminalStatus = "failed" | "needs_admin_action";
+type CollectionOutcome = readonly BankMovement[] | Readonly<{ status: "needs_admin_action"; summary: string }> | null;
 
 export type CollectionIngestionProcessorDependencies = Readonly<{
   scrapeRuns: ScrapeRunRepository;
@@ -17,6 +18,10 @@ export type CollectionIngestionProcessorDependencies = Readonly<{
 const systemActor = "system:ingestion-worker";
 const failureSummary = "Ingestion collection failed";
 const sessionSummary = "Bank session requires admin action";
+
+export class CollectionIngestionPersistenceError extends Error {
+  constructor() { super("Collection ingestion persistence failed."); this.name = "CollectionIngestionPersistenceError"; }
+}
 
 function exact(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> | null {
   if (value === null || typeof value !== "object" || Array.isArray(value) || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) return null;
@@ -47,11 +52,12 @@ function safeRunId(value: unknown): string | null {
   } catch { return null; }
 }
 
-function collection(value: unknown): readonly BankMovement[] | TerminalStatus | null {
+function collection(value: unknown): CollectionOutcome {
   const result = exact(value, ["status", "movements"], ["safeErrorSummary", "cause"]);
-  if (!result || !Array.isArray(result.movements)) return null;
-  if (result.status === "collected") return result.movements as BankMovement[];
-  return result.status === "needs_admin_action" ? "needs_admin_action" : null;
+  if (!result || !Array.isArray(result.movements) || (result.safeErrorSummary !== undefined && typeof result.safeErrorSummary !== "string")) return null;
+  if (result.status === "collected" && result.cause === undefined) return result.movements as BankMovement[];
+  if (result.status !== "needs_admin_action" || (result.cause !== undefined && result.cause !== "session_expired")) return null;
+  return { status: "needs_admin_action", summary: result.cause === "session_expired" ? sessionSummary : result.safeErrorSummary ?? sessionSummary };
 }
 
 export function createCollectionIngestionProcessor(dependencies: CollectionIngestionProcessorDependencies): (job: unknown) => Promise<IngestionResult> {
@@ -63,7 +69,7 @@ export function createCollectionIngestionProcessor(dependencies: CollectionInges
     try {
       if (status === "needs_admin_action") await dependencies.scrapeRuns.markNeedsAdminAction(data.runId, summary, now());
       else await dependencies.scrapeRuns.markFailed(data.runId, summary, now());
-    } catch { return { status: "failed", inserted: 0, skipped: 0 }; }
+    } catch { throw new CollectionIngestionPersistenceError(); }
     try { await dependencies.adminAlerts?.notifyIngestionAttention({ runId: data.runId, bankId: data.bankId, status, safeErrorSummary: summary }); } catch { /* alerts are non-blocking */ }
     await audit(`scrape_run.${status}`, data, { safeErrorSummary: summary });
     return { status, inserted: 0, skipped: 0 };
@@ -78,17 +84,17 @@ export function createCollectionIngestionProcessor(dependencies: CollectionInges
       if (!runId) return { status: "failed", inserted: 0, skipped: 0 };
       return terminal("failed", { runId, bankId: "unknown", accountFingerprint: "unknown" }, failureSummary);
     }
-    try { await dependencies.scrapeRuns.markRunning(data.runId, now()); } catch { return { status: "failed", inserted: 0, skipped: 0 }; }
+    try { await dependencies.scrapeRuns.markRunning(data.runId, now()); } catch { throw new CollectionIngestionPersistenceError(); }
     await audit("scrape_run.started", data);
-    let outcome: readonly BankMovement[] | TerminalStatus | null;
+    let outcome: CollectionOutcome;
     try {
       outcome = collection(await dependencies.resolveScraper(data.bankId).collect());
       if (outcome === null) return terminal("failed", data, failureSummary);
-      if (!Array.isArray(outcome)) return terminal("needs_admin_action", data, sessionSummary);
+      if ("summary" in outcome) return terminal("needs_admin_action", data, outcome.summary);
       const counts = outcome.length === 0 ? { inserted: 0, skipped: 0 } : await dependencies.transactions.upsertMany(outcome.map((movement) => normalizeBankMovement(movement, { scrapeRunId: data.runId })));
-      try { await dependencies.scrapeRuns.markSucceeded(data.runId, { insertedCount: counts.inserted, skippedCount: counts.skipped }, now()); } catch { return { status: "failed", inserted: 0, skipped: 0 }; }
+      try { await dependencies.scrapeRuns.markSucceeded(data.runId, { insertedCount: counts.inserted, skippedCount: counts.skipped }, now()); } catch { return terminal("failed", data, failureSummary); }
       await audit("scrape_run.succeeded", data, { inserted: counts.inserted, skipped: counts.skipped });
       return { status: "succeeded", inserted: counts.inserted, skipped: counts.skipped };
-    } catch { return terminal("failed", data, failureSummary); }
+    } catch (error) { if (error instanceof CollectionIngestionPersistenceError) throw error; return terminal("failed", data, failureSummary); }
   };
 }
