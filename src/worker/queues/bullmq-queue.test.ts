@@ -26,6 +26,10 @@ const jobData: IngestionJobData = {
   runId: "run-bullmq-1",
   bankId: "popular",
   accountFingerprint: "acct-main",
+  authentication: {
+    version: 1,
+    attemptId: "auth-attempt-v1:0802674dadacdf86fce600258dabacdfd1e73a48953678879dd1fdacf2efa94f",
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -80,6 +84,7 @@ describe("createBullmqIngestionQueue", () => {
       data: jobData,
       options,
     });
+    expect(fakeQueue.calls[0]?.data).toBe(jobData);
   });
 
   it("passes the BullMQ options including jobId=runId, attempts=3, exponential backoff", async () => {
