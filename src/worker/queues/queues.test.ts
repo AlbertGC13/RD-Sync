@@ -412,6 +412,33 @@ describe("durable authenticated ingestion identity", () => {
     );
   });
 
+  it.each([
+    ["\uD800", "run-1"],
+    ["\uD800x", "run-1"],
+    ["\uDC00", "run-1"],
+    ["popular", "run-\uD800"],
+  ])("rejects malformed UTF-16 identity input without exposing it", (bankId, runId) => {
+    expect(() => deriveAuthenticatedIngestionAttemptId(bankId, runId)).toThrow(
+      "Invalid ingestion identity.",
+    );
+  });
+
+  it("rejects an isolated high surrogate instead of colliding with U+FFFD", () => {
+    expect(() => deriveAuthenticatedIngestionAttemptId("\uD800", "run-1")).toThrow(
+      "Invalid ingestion identity.",
+    );
+    expect(deriveAuthenticatedIngestionAttemptId("\uFFFD", "run-1")).toMatch(
+      /^auth-attempt-v1:[a-f0-9]{64}$/,
+    );
+  });
+
+  it("keeps valid emoji identities deterministic with the existing UTF-8 fixture", () => {
+    const expected = "auth-attempt-v1:8be9f5f3be4787dcbb5b79b9e0f6d9fbf45244167c52110c61a06d5d03396232";
+
+    expect(deriveAuthenticatedIngestionAttemptId("🏦", "run-😀")).toBe(expected);
+    expect(deriveAuthenticatedIngestionAttemptId("🏦", "run-😀")).toBe(expected);
+  });
+
   it("uses no runtime entropy, clock, owner token, or fingerprint in the derivation", async () => {
     const source = await readFile(new URL("./index.ts", import.meta.url), "utf8");
     const start = source.indexOf("export function deriveAuthenticatedIngestionAttemptId");
