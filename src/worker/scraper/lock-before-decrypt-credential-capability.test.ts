@@ -7,11 +7,12 @@ function deferred<T>(): Deferred<T> { let resolve!: (value: T) => void; return {
 function input(bankCode = "popular", signal?: AbortSignal) { return Object.freeze(signal ? { bankCode, signal } : { bankCode }); }
 function dependencies(events: string[], overrides: Partial<Parameters<typeof createLockBeforeDecryptCredentialCapability<{ secret: string }, string>>[0]> = {}) {
   const release = vi.fn(async () => { events.push("release"); return true; });
+  const signal = new AbortController().signal;
   return {
     release,
     capability: createLockBeforeDecryptCredentialCapability<{ secret: string }, string>({
       isSupportedBank: (bankCode) => bankCode === "popular" || bankCode === "banreservas",
-      lock: { acquire: async ({ bankCode }) => { events.push(`acquire:${bankCode}`); return { release }; } },
+      lock: { acquire: async ({ bankCode }) => { events.push(`acquire:${bankCode}`); return Object.freeze({ signal, release }); } },
       loadCredential: async (bankCode) => { events.push(`load:${bankCode}`); return { secret: "credential-secret" }; },
       executeProtected: async ({ bankCode, credential }) => { events.push(`execute:${bankCode}:${credential.secret}`); return "ok"; },
       ...overrides,
@@ -64,16 +65,16 @@ describe("createLockBeforeDecryptCredentialCapability", () => {
   });
 
   it("releases a lease arriving after cancellation without loading or executing", async () => {
-    const events: string[] = []; const waiting = deferred<{ release(): Promise<boolean> } | null>(); const controller = new AbortController();
+    const events: string[] = []; const waiting = deferred<{ signal: AbortSignal; release(): Promise<boolean> } | null>(); const controller = new AbortController(); const leaseSignal = new AbortController().signal;
     const { capability, release } = dependencies(events, { lock: { acquire: async () => { events.push("acquire"); return waiting.promise; } } });
-    const running = capability.run(input("popular", controller.signal)); controller.abort(); waiting.resolve({ release });
+    const running = capability.run(input("popular", controller.signal)); controller.abort(); waiting.resolve(Object.freeze({ signal: leaseSignal, release }));
     await expect(running).resolves.toEqual({ status: "cancelled" }); expect(events).toEqual(["acquire", "release"]);
   });
 
   it("cancels after acquire or load before protected execution", async () => {
     for (const phase of ["acquire", "load"] as const) {
       const events: string[] = []; const controller = new AbortController(); const { capability } = dependencies(events, {
-        lock: { acquire: async () => { events.push("acquire"); if (phase === "acquire") controller.abort(); return { release: async () => { events.push("release"); return true; } }; } },
+        lock: { acquire: async () => { events.push("acquire"); if (phase === "acquire") controller.abort(); return Object.freeze({ signal: new AbortController().signal, release: async () => { events.push("release"); return true; } }); } },
         loadCredential: async () => { events.push("load"); if (phase === "load") controller.abort(); return { secret: "credential-secret" }; },
       });
       await expect(capability.run(input("popular", controller.signal))).resolves.toEqual({ status: "cancelled" });
@@ -98,7 +99,7 @@ describe("createLockBeforeDecryptCredentialCapability", () => {
     for (const [releaseResult, executeProtected, expected] of [[false, undefined, { status: "completed", result: "ok" }], ["throw", async () => { throw new Error("secret"); }, { status: "execution_failed" }]] as const) {
       const events: string[] = []; const observeReleaseFailure = vi.fn(() => { throw new Error("observer-secret"); });
       const release = async () => { events.push("release"); if (releaseResult === "throw") throw new Error("token"); return false; };
-      const { capability } = dependencies(events, { lock: { acquire: async () => ({ release }) }, observeReleaseFailure, ...(executeProtected && { executeProtected }) });
+      const { capability } = dependencies(events, { lock: { acquire: async () => Object.freeze({ signal: new AbortController().signal, release }) }, observeReleaseFailure, ...(executeProtected && { executeProtected }) });
       await expect(capability.run(input())).resolves.toEqual(expected); expect(observeReleaseFailure).toHaveBeenCalledTimes(1);
     }
   });
@@ -113,10 +114,32 @@ describe("createLockBeforeDecryptCredentialCapability", () => {
 
   it("serializes same-bank work while allowing another bank and exposes no trigger identity", async () => {
     const held = new Set<string>(); const events: string[] = []; const capability = createLockBeforeDecryptCredentialCapability<{ secret: string }, string>({
-      isSupportedBank: () => true, lock: { acquire: async ({ bankCode }) => { events.push(`acquire:${bankCode}`); if (held.has(bankCode)) return null; held.add(bankCode); return { release: async () => { held.delete(bankCode); return true; } }; } },
+      isSupportedBank: () => true, lock: { acquire: async ({ bankCode }) => { events.push(`acquire:${bankCode}`); if (held.has(bankCode)) return null; held.add(bankCode); return Object.freeze({ signal: new AbortController().signal, release: async () => { held.delete(bankCode); return true; } }); } },
       loadCredential: async (bankCode) => { events.push(`load:${bankCode}`); return { secret: bankCode }; }, executeProtected: async ({ bankCode }) => { events.push(`execute:${bankCode}`); return bankCode; },
     });
     await expect(Promise.all([capability.run(input("popular")), capability.run(input("popular")), capability.run(input("banreservas"))])).resolves.toEqual([{ status: "completed", result: "popular" }, { status: "lock_busy" }, { status: "completed", result: "banreservas" }]);
     expect(events).toEqual(["acquire:popular", "acquire:popular", "acquire:banreservas", "load:popular", "load:banreservas", "execute:popular", "execute:banreservas"]);
+  });
+  it("fails closed for a malformed lease after best-effort release", async () => {
+    const events: string[] = []; const release = vi.fn(async () => true); const { capability } = dependencies(events, { lock: { acquire: async () => ({ signal: {} as AbortSignal, release }) } });
+    await expect(capability.run(input())).resolves.toEqual({ status: "lock_unavailable" }); expect([release.mock.calls.length, events]).toEqual([1, []]);
+  });
+  it("rejects lease symbols, hidden fields, and accessors while releasing once", async () => {
+    for (const lease of [Object.freeze({ signal: new AbortController().signal, release: async () => true, [Symbol("x")]: true }), Object.freeze(Object.defineProperty({ signal: new AbortController().signal, release: async () => true }, "extra", { value: true })), Object.freeze(Object.defineProperty({ signal: new AbortController().signal, release: async () => true }, "release", { get: () => { throw new Error("x"); } }))]) {
+      const events: string[] = []; const { capability } = dependencies(events, { lock: { acquire: async () => lease as never } }); await expect(capability.run(input())).resolves.toEqual({ status: "lock_unavailable" }); expect(events).toEqual([]);
+    }
+  });
+  it("uses native EventTarget methods and the validated release receiver", async () => {
+    const events: string[] = []; const controller = new AbortController(); Object.defineProperties(controller.signal, { addEventListener: { value: () => { throw new Error("forged"); } }, removeEventListener: { value: () => { throw new Error("forged"); } } });
+    const lease = Object.freeze({ signal: controller.signal, release(this: { signal: AbortSignal }) { events.push(this.signal === controller.signal ? "released" : "wrong"); return Promise.resolve(true); } }); const { capability } = dependencies(events, { lock: { acquire: async () => lease }, loadCredential: async () => ({ secret: "x" }), executeProtected: async () => "ok" });
+    await expect(capability.run(input())).resolves.toEqual({ status: "completed", result: "ok" }); expect(events).toEqual(["released"]);
+  });
+  it("composes lease loss with external cancellation before load and during execution", async () => {
+    for (const phase of ["load", "execute"] as const) {
+      const events: string[] = []; const loss = new AbortController(); const external = new AbortController(); let received: AbortSignal | undefined;
+      const { capability } = dependencies(events, { lock: { acquire: async () => Object.freeze({ signal: loss.signal, release: async () => { events.push("release"); return true; } }) }, loadCredential: async () => { events.push("load"); if (phase === "load") loss.abort(); return { secret: "credential-secret" }; }, executeProtected: async ({ signal }) => { received = signal; events.push("execute"); if (phase === "execute") loss.abort(); return "ok"; } });
+      await capability.run(input("popular", external.signal)); expect([phase === "load" ? events : received?.aborted, events.filter((event) => event === "release").length]).toEqual([phase === "load" ? ["load", "release"] : true, 1]);
+      external.abort(); expect(received?.aborted ?? true).toBe(true);
+    }
   });
 });

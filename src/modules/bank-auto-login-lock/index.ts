@@ -86,6 +86,11 @@ export const buildLockKey = (bankCode: string, trigger: string | AutoLoginTrigge
     : `${LOCK_KEY_PREFIX}:v2:${bankCode}:authentication_attempt:${trigger.id}`;
 };
 
+export function buildBankAuthenticationLockKey(bankCode: string): string {
+  validateBankCode(bankCode);
+  return `${LOCK_KEY_PREFIX}:v3:bank-authentication:{${bankCode}}`;
+}
+
 function validateTrigger(trigger: string | AutoLoginTriggerIdentity): string | AutoLoginTriggerIdentity {
   if (typeof trigger === "string") {
     validateEventId(trigger);
