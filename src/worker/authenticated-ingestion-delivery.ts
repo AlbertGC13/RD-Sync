@@ -1,14 +1,15 @@
 import type { AuthenticatedSessionPreconditionResult } from "../modules/bank-sessions/authenticated-session-precondition";
 
-type DeliveryJob = Readonly<{ data: unknown }>;
-type IngestionData = Readonly<{ runId: string; bankId: string; accountFingerprint: string }>;
+type DeliveryJob = Readonly<{ data: unknown; signal?: AbortSignal }>;
+export type IngestionData = Readonly<{ runId: string; bankId: string; accountFingerprint: string }>;
 type Identity = Readonly<{ bankCode: string; runId: string; attemptId: string }>;
 type OperatorReason = "temporary_authentication_problem" | "protected_authentication_step_detected" | "bank_login_configuration_requires_review" | "authentication_attempt_requires_review" | "identity_conflict" | "restoration_state_conflict";
 type TerminalReason = OperatorReason | "legacy_authenticated_ingestion_delivery" | "invalid_authenticated_ingestion_delivery" | "invalid_authenticated_ingestion_precondition" | "authentication_precondition_requires_review";
 
 export type AuthenticatedIngestionTerminalOutcome = Readonly<{ runId: string; status: "needs_admin_action" | "failed"; reason: TerminalReason }>;
+export type AuthenticatedIngestionAuthenticationInput = Readonly<{ identity: Identity; ownerToken: string; job: Readonly<{ data: IngestionData }>; signal?: AbortSignal }>;
 export type AuthenticatedIngestionDeliveryDependencies<TResult> = Readonly<{
-  authenticate: (input: unknown) => Promise<AuthenticatedSessionPreconditionResult>;
+  authenticate: (input: AuthenticatedIngestionAuthenticationInput) => Promise<AuthenticatedSessionPreconditionResult>;
   downstream: (job: Readonly<{ data: IngestionData }>) => Promise<TResult>;
   complete: (outcome: AuthenticatedIngestionTerminalOutcome) => Promise<TResult>;
   createOwnerToken: () => string;
@@ -42,6 +43,12 @@ function safeRunId(value: unknown): string | null {
   } catch { return null; }
 }
 
+function signal(value: unknown): AbortSignal | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || !AbortSignal.prototype.isPrototypeOf(value)) return null;
+  try { void (value as AbortSignal).aborted; return value as AbortSignal; } catch { return null; }
+}
+
 function parseData(value: unknown): Readonly<{ kind: "v1"; data: IngestionData; identity: Identity }> | Readonly<{ kind: "legacy"; data: IngestionData }> | null {
   const v1 = exact(value, ["runId", "bankId", "accountFingerprint", "authentication"]);
   if (v1) {
@@ -63,8 +70,8 @@ function preconditionDecision(value: unknown): "authenticated" | "retry_delivery
 export function createAuthenticatedIngestionDeliveryProcessor<TResult>(dependencies: AuthenticatedIngestionDeliveryDependencies<TResult>): (job: DeliveryJob) => Promise<TResult> {
   const complete = async (outcome: AuthenticatedIngestionTerminalOutcome): Promise<TResult> => { try { return await dependencies.complete(outcome); } catch { throw new AuthenticatedIngestionTerminalError(); } };
   return async (job: DeliveryJob): Promise<TResult> => {
-    let data: unknown;
-    try { data = exact(job, ["data"])?.data; } catch { data = undefined; }
+    let data: unknown; let jobSignal: AbortSignal | null | undefined;
+    try { const envelope = exact(job, ["data"]) ?? exact(job, ["data", "signal"]); data = envelope?.data; jobSignal = signal(envelope?.signal); } catch { data = undefined; jobSignal = null; }
     const parsed = (() => { try { return parseData(data); } catch { return null; } })();
     if (!parsed) {
       const runId = safeRunId(data);
@@ -72,10 +79,11 @@ export function createAuthenticatedIngestionDeliveryProcessor<TResult>(dependenc
       return complete({ runId, status: "failed", reason: "invalid_authenticated_ingestion_delivery" });
     }
     if (parsed.kind === "legacy") return complete({ runId: parsed.data.runId, status: "needs_admin_action", reason: "legacy_authenticated_ingestion_delivery" });
+    if (jobSignal === null) return complete({ runId: parsed.data.runId, status: "failed", reason: "invalid_authenticated_ingestion_delivery" });
     let decision: ReturnType<typeof preconditionDecision>;
     try {
       const ownerToken = dependencies.createOwnerToken();
-      decision = isNonblank(ownerToken) ? preconditionDecision(await dependencies.authenticate({ identity: parsed.identity, ownerToken })) : "authentication_precondition_requires_review";
+      decision = isNonblank(ownerToken) ? preconditionDecision(await dependencies.authenticate({ identity: parsed.identity, ownerToken, job: { data: parsed.data }, ...(jobSignal === undefined ? {} : { signal: jobSignal }) })) : "authentication_precondition_requires_review";
     } catch { decision = "authentication_precondition_requires_review"; }
     if (decision === "authenticated") return dependencies.downstream({ data: parsed.data });
     if (decision === "retry_delivery" || decision === "in_progress" || decision === "cancelled") throw new AuthenticatedIngestionRetryError(decision);
