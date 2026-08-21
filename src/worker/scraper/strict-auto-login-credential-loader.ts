@@ -1,6 +1,7 @@
 import { decryptCredentialField, type AesGcmEnvelope } from "../../modules/bank-credentials/crypto";
 
 const BANK_CODE_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+const PINNED_KEY_VERSION_MISMATCH = "Pinned credential key version mismatch";
 const credentialBrand: unique symbol = Symbol("strict-auto-login-credential");
 
 type StructuralReason = "invalid_request" | "not_configured" | "inactive" | "bank_mismatch" | "invalid_record" | "version_mismatch" | "malformed_envelope" | "blank_plaintext";
@@ -47,10 +48,10 @@ export function createStrictAutoLoginCredentialLoader(dependencies: StrictAutoLo
   let findAuthenticationMaterialByBankCode: StrictAutoLoginCredentialLoaderDependencies["findAuthenticationMaterialByBankCode"];
   let resolveKey: StrictAutoLoginCredentialLoaderDependencies["resolveKey"];
   let recordDecryptUse: StrictAutoLoginCredentialLoaderDependencies["recordDecryptUse"];
-  let decrypt: NonNullable<StrictAutoLoginCredentialLoaderDependencies["decrypt"]>;
+  let decrypt: StrictAutoLoginCredentialLoaderDependencies["decrypt"];
   try {
     ({ findAuthenticationMaterialByBankCode, resolveKey, recordDecryptUse } = dependencies);
-    decrypt = dependencies.decrypt ?? ((envelope: AesGcmEnvelope, key: Buffer) => decryptCredentialField(envelope, () => key));
+    decrypt = dependencies.decrypt;
     if (typeof findAuthenticationMaterialByBankCode !== "function" || typeof resolveKey !== "function" || typeof recordDecryptUse !== "function") throw new Error("invalid dependency");
   } catch {
     return Object.freeze({ async load(bankCode: unknown): Promise<StrictAutoLoginCredentialLoadResult> { return typeof bankCode === "string" && BANK_CODE_RE.test(bankCode) ? transient("repository_unavailable") : structural("invalid_request"); } });
@@ -73,13 +74,17 @@ export function createStrictAutoLoginCredentialLoader(dependencies: StrictAutoLo
       let key: unknown;
       try { key = resolveKey(keyVersion); } catch { return transient("key_unavailable"); }
       if (!Buffer.isBuffer(key) || key.length !== 32) return transient("key_unavailable");
+      const decryptField = decrypt ?? ((envelope: AesGcmEnvelope, pinnedKey: Buffer) => decryptCredentialField(envelope, (requestedVersion) => {
+        if (requestedVersion !== keyVersion) throw new Error(PINNED_KEY_VERSION_MISMATCH);
+        return pinnedKey;
+      }));
       let username: string;
-      try { username = decrypt(usernameEnvelope, key); } catch { return transient("decryption_failed"); }
+      try { username = decryptField(usernameEnvelope, key); } catch { return transient("decryption_failed"); }
       if (!nonblank(username)) return structural("blank_plaintext");
       let password: string;
-      try { password = decrypt(passwordEnvelope, key); } catch { return transient("decryption_failed"); }
+      try { password = decryptField(passwordEnvelope, key); } catch { return transient("decryption_failed"); }
       if (!nonblank(password)) return structural("blank_plaintext");
-      try { await recordDecryptUse({ bankCode, keyVersion }); } catch { return transient("audit_unavailable"); }
+      try { await recordDecryptUse(Object.freeze({ bankCode, keyVersion })); } catch { return transient("audit_unavailable"); }
       return Object.freeze({ status: "loaded" as const, credential: Object.freeze({ bankCode, username, password, [credentialBrand]: true as const }) });
     },
   });

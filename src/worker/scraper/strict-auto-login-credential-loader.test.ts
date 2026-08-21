@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { encryptCredentialField } from "../../modules/bank-credentials/crypto";
 import { createStrictAutoLoginCredentialLoader } from "./strict-auto-login-credential-loader";
 
 const envelope = (keyVersion = 1) => JSON.stringify({ keyVersion, iv: "iv", ciphertext: "cipher", tag: "tag" });
@@ -84,6 +85,45 @@ describe("createStrictAutoLoginCredentialLoader", () => {
     expect(passwordFailure.recordDecryptUse).not.toHaveBeenCalled();
     const auditFailure = fixture({ recordDecryptUse: vi.fn(async () => { throw new Error("secret"); }) });
     await expect(auditFailure.loader.load("popular")).resolves.toEqual({ status: "transient_unavailable", reason: "audit_unavailable" });
+  });
+
+  it("uses the default AES decrypt seam with one pinned key resolution and frozen audit metadata", async () => {
+    const keyVersion = 7;
+    const key = Buffer.alloc(32, 7);
+    const keyResolver = vi.fn((version: number) => { expect(version).toBe(keyVersion); return key; });
+    const usernameEnvelope = encryptCredentialField("default-user", keyResolver, keyVersion);
+    const passwordEnvelope = encryptCredentialField("default-password", keyResolver, keyVersion);
+    keyResolver.mockClear();
+    const audit = vi.fn(async (metadata: { bankCode: string; keyVersion: number }) => {
+      expect([Object.isFrozen(metadata), Reflect.ownKeys(metadata), metadata]).toEqual([true, ["bankCode", "keyVersion"], { bankCode: "popular", keyVersion }]);
+    });
+    const loader = createStrictAutoLoginCredentialLoader({
+      findAuthenticationMaterialByBankCode: async () => record({ keyVersion, encryptedUsernameEnvelope: JSON.stringify(usernameEnvelope), encryptedPasswordEnvelope: JSON.stringify(passwordEnvelope) }),
+      resolveKey: keyResolver,
+      recordDecryptUse: audit,
+    });
+
+    const result = await loader.load("popular");
+    expect(result.status).toBe("loaded");
+    if (result.status === "loaded") expect([result.credential.bankCode, result.credential.username, result.credential.password]).toEqual(["popular", "default-user", "default-password"]);
+    expect(keyResolver).toHaveBeenCalledOnce();
+    expect(keyResolver).toHaveBeenCalledWith(keyVersion);
+    expect(audit).toHaveBeenCalledOnce();
+  });
+
+  it("does not audit when the second decrypt throws", async () => {
+    const decrypt = vi.fn().mockReturnValueOnce("user").mockImplementationOnce(() => { throw new Error("secret"); });
+    const audit = vi.fn(async () => undefined);
+    const loader = createStrictAutoLoginCredentialLoader({
+      findAuthenticationMaterialByBankCode: async () => record(),
+      resolveKey: () => Buffer.alloc(32),
+      decrypt,
+      recordDecryptUse: audit,
+    });
+
+    await expect(loader.load("popular")).resolves.toEqual({ status: "transient_unavailable", reason: "decryption_failed" });
+    expect(decrypt).toHaveBeenCalledTimes(2);
+    expect(audit).not.toHaveBeenCalled();
   });
 
   it("loads only after the exact ordered, pinned, audited flow", async () => {
