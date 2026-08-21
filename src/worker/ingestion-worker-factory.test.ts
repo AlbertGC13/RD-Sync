@@ -21,7 +21,8 @@ class FakeWorker implements WorkerHandle {
   readonly queueName: string;
   readonly handler: JobHandler;
   readonly options: { connection: unknown; concurrency: number };
-  closed = false;
+  readonly closeCalls: boolean[] = [];
+  readonly pauseCalls: boolean[] = [];
 
   constructor(
     queueName: string,
@@ -33,8 +34,12 @@ class FakeWorker implements WorkerHandle {
     this.options = options;
   }
 
-  async close(): Promise<void> {
-    this.closed = true;
+  async pause(doNotWaitActive?: boolean): Promise<void> {
+    this.pauseCalls.push(doNotWaitActive === true);
+  }
+
+  async close(force?: boolean): Promise<void> {
+    this.closeCalls.push(force === true);
   }
 }
 
@@ -118,7 +123,7 @@ describe("createIngestionWorker", () => {
     expect(instances[0].options.concurrency).toBe(2);
   });
 
-  it("the worker handler calls processor with job.data and returns the result", async () => {
+  it("the worker handler passes a fresh abort signal and frozen attempt metadata", async () => {
     const { Ctor, instances } = makeFakeWorkerCtor();
     const processor = makeSuccessProcessor();
     createIngestionWorker({ connection: fakeConnection, processor, WorkerCtor: Ctor });
@@ -126,7 +131,10 @@ describe("createIngestionWorker", () => {
     const result = await instances[0].handler({ ...fakeJob, name: INGESTION_QUEUE_NAME });
 
     expect(processor).toHaveBeenCalledOnce();
-    expect(processor).toHaveBeenCalledWith({ data: fakeJob.data, deliveryAttempt: { attemptsMade: 0, maxAttempts: 1 } });
+    const delivery = processor.mock.calls[0]?.[0] as { data: unknown; signal: AbortSignal; deliveryAttempt: object };
+    expect(delivery.data).toBe(fakeJob.data);
+    expect(delivery.signal.aborted).toBe(false);
+    expect(Object.isFrozen(delivery.deliveryAttempt)).toBe(true);
     expect(result).toEqual(successResult);
   });
 
@@ -141,7 +149,7 @@ describe("createIngestionWorker", () => {
 
     await instances[0].handler({ ...fakeJob, attemptsMade, opts: { attempts } } as never);
 
-    expect(processor).toHaveBeenCalledWith({ data: fakeJob.data, deliveryAttempt });
+    expect(processor).toHaveBeenCalledWith(expect.objectContaining({ data: fakeJob.data, deliveryAttempt }));
     expect(Object.isFrozen((processor.mock.calls[0]?.[0] as { deliveryAttempt: object }).deliveryAttempt)).toBe(true);
   });
 
@@ -152,7 +160,7 @@ describe("createIngestionWorker", () => {
 
     await instances[0].handler({ ...fakeJob, attemptsMade: 0, opts: {} } as never);
 
-    expect(processor).toHaveBeenCalledWith({ data: fakeJob.data, deliveryAttempt: { attemptsMade: 0, maxAttempts: 1 } });
+    expect(processor).toHaveBeenCalledWith(expect.objectContaining({ data: fakeJob.data, deliveryAttempt: { attemptsMade: 0, maxAttempts: 1 } }));
   });
 
   it.each([
@@ -184,6 +192,20 @@ describe("createIngestionWorker", () => {
     expect(processor).not.toHaveBeenCalled();
   });
 
+  it("tracks a deferred retired delivery, while unknown routes fail before any active work", async () => {
+    const { Ctor, instances } = makeFakeWorkerCtor();
+    let release!: () => void;
+    const consumeRetiredExpiryPublicationJob = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+    const worker = createIngestionWorker({ connection: fakeConnection, processor: makeSuccessProcessor(), consumeRetiredExpiryPublicationJob, WorkerCtor: Ctor });
+    const retired = instances[0].handler({ ...fakeJob, name: expiryPublicationJobName });
+    let drained = false;
+    void worker.awaitActiveDrain().then(() => { drained = true; });
+    await expect(instances[0].handler({ ...fakeJob, name: "unknown" })).rejects.toThrow("Unsupported BullMQ job name");
+    expect(drained).toBe(false);
+    release();
+    await retired;
+  });
+
   it("fails closed for unknown names and for expiry jobs without a consumer", async () => {
     const { Ctor, instances } = makeFakeWorkerCtor();
     createIngestionWorker({ connection: fakeConnection, processor: makeSuccessProcessor(), WorkerCtor: Ctor });
@@ -198,6 +220,9 @@ describe("createIngestionWorker", () => {
     expect(source).toContain("createRetiredExpiryPublicationConsumer");
     expect(source).toContain("auditSink: defaultAuditSink");
     expect(source).not.toContain("createExpiryPublicationConsumer");
+    expect(source).toContain("createIngestionWorkerShutdown");
+    expect(source).toContain("stopExpiryScheduling: () => expiryRuntime.stopScheduling()");
+    expect(source).not.toContain("process.exit(0)");
   });
 
   it("the worker handler does NOT swallow an unexpected processor throw", async () => {
@@ -236,14 +261,55 @@ describe("createIngestionWorker", () => {
     expect(result).toEqual(failedResult);
   });
 
-  it("worker.close() is called on graceful shutdown", async () => {
+  it("tracks concurrent accepted jobs until they settle and aborts each exactly once", async () => {
     const { Ctor, instances } = makeFakeWorkerCtor();
-    const worker = createIngestionWorker({ connection: fakeConnection, processor: makeSuccessProcessor(), WorkerCtor: Ctor });
+    const releases: (() => void)[] = [];
+    const processor = vi.fn((job: { data: unknown; signal: AbortSignal; deliveryAttempt: object }) => {
+      void job;
+      return new Promise<IngestionResult>((resolve) => { releases.push(() => resolve(successResult)); });
+    });
+    const worker = createIngestionWorker({ connection: fakeConnection, processor, WorkerCtor: Ctor });
+    const first = instances[0].handler(fakeJob);
+    const second = instances[0].handler({ ...fakeJob, data: { runId: "run-worker-2", bankId: "popular", accountFingerprint: "acct-main" } });
+    await Promise.resolve();
 
-    expect(instances[0].closed).toBe(false);
+    worker.abortActive();
+    worker.abortActive();
+    const firstDelivery = processor.mock.calls[0]?.[0];
+    const secondDelivery = processor.mock.calls[1]?.[0];
+    expect(firstDelivery?.signal.aborted).toBe(true);
+    expect(secondDelivery?.signal.aborted).toBe(true);
+    expect(firstDelivery?.signal).not.toBe(secondDelivery?.signal);
 
-    await worker.close();
+    const drained = vi.fn();
+    void worker.awaitActiveDrain().then(drained);
+    for (const release of releases) release();
+    await Promise.all([first, second]);
+    await Promise.resolve();
+    expect(drained).toHaveBeenCalledOnce();
+  });
 
-    expect(instances[0].closed).toBe(true);
+  it("registers a job entering while intake pauses and only closes with the requested force", async () => {
+    const { Ctor, instances } = makeFakeWorkerCtor();
+    let release!: () => void;
+    const worker = createIngestionWorker({
+      connection: fakeConnection,
+      processor: vi.fn(() => new Promise<IngestionResult>((resolve) => { release = () => resolve(successResult); })),
+      WorkerCtor: Ctor,
+    });
+
+    const paused = worker.pauseIntake();
+    const delivery = instances[0].handler(fakeJob);
+    await paused;
+    worker.abortActive();
+    let drained = false;
+    void worker.awaitActiveDrain().then(() => { drained = true; });
+    expect(drained).toBe(false);
+    release();
+    await delivery;
+
+    await worker.gracefulClose();
+    expect(instances[0].pauseCalls).toEqual([true]);
+    expect(instances[0].closeCalls).toEqual([false]);
   });
 });

@@ -23,6 +23,7 @@ export interface ExpiryRuntime {
   readonly enabled: boolean;
   tick(): Promise<void>;
   start(): void;
+  stopScheduling(): void;
   shutdown(): Promise<void>;
 }
 
@@ -58,6 +59,7 @@ const disabledRuntime: ExpiryRuntime = {
   enabled: false,
   async tick() {},
   start() {},
+  stopScheduling() {},
   async shutdown() {},
 };
 
@@ -117,10 +119,13 @@ function createEnabledRuntime(deps: ExpiryRuntimeDependencies): ExpiryRuntime {
     start() {
       if (!timer) timer = schedule(() => { void runtime.tick().catch(() => undefined); }, INTERVAL_MS);
     },
+    stopScheduling() {
+      if (timer) clearSchedule(timer);
+      timer = undefined;
+    },
     shutdown() {
       if (!shutdown) shutdown = (async () => {
-        if (timer) clearSchedule(timer);
-        timer = undefined;
+        runtime.stopScheduling();
         try {
           await inFlight;
         } catch {

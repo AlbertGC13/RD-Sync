@@ -26,7 +26,16 @@ export interface WorkerJob {
 
 /** Minimal BullMQ Worker surface the factory returns. */
 export interface WorkerHandle {
-  close(): Promise<void>;
+  pause(doNotWaitActive?: boolean): Promise<void>;
+  close(force?: boolean): Promise<void>;
+}
+
+export interface IngestionWorkerControl {
+  pauseIntake(): Promise<void>;
+  abortActive(): void;
+  awaitActiveDrain(): Promise<void>;
+  gracefulClose(): Promise<void>;
+  forceClose(): Promise<void>;
 }
 
 /** The constructor signature for a BullMQ Worker (or a test double). */
@@ -44,7 +53,7 @@ export interface CreateIngestionWorkerOptions {
   /** ioredis connection options (host/port/password/maxRetriesPerRequest). */
   connection: { host: string; port: number; password?: string; maxRetriesPerRequest: null };
   /** Ingestion processor — called once per job. */
-  processor: (job: IngestionJob & Readonly<{ deliveryAttempt?: AuthenticatedIngestionDeliveryAttempt }>) => Promise<IngestionResult>;
+  processor: (job: IngestionJob & Readonly<{ signal: AbortSignal; deliveryAttempt: AuthenticatedIngestionDeliveryAttempt }>) => Promise<IngestionResult>;
   consumeRetiredExpiryPublicationJob?: (data: unknown) => Promise<unknown>;
   /** How many jobs to process in parallel.  Defaults to 2. */
   concurrency?: number;
@@ -68,10 +77,25 @@ export interface CreateIngestionWorkerOptions {
  * - Terminal outcomes (needs_admin_action / failed) are handled inside the
  *   processor and returned normally; they do not propagate as errors here.
  */
-export function createIngestionWorker(options: CreateIngestionWorkerOptions): WorkerHandle {
+export function createIngestionWorker(options: CreateIngestionWorkerOptions): IngestionWorkerControl {
   const concurrency = options.concurrency ?? 2;
-
   const WorkerCtor = options.WorkerCtor;
+  const activeControllers = new Set<AbortController>();
+  const drainWaiters = new Set<() => void>();
+
+  const runActive = async <T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+    const controller = new AbortController();
+    activeControllers.add(controller);
+    try {
+      return await run(controller.signal);
+    } finally {
+      activeControllers.delete(controller);
+      if (activeControllers.size === 0) {
+        for (const resolve of drainWaiters) resolve();
+        drainWaiters.clear();
+      }
+    }
+  };
 
   const worker = new WorkerCtor(
     INGESTION_QUEUE_NAME,
@@ -79,10 +103,10 @@ export function createIngestionWorker(options: CreateIngestionWorkerOptions): Wo
       if (job.name === INGESTION_QUEUE_NAME) {
         const deliveryAttempt = readDeliveryAttempt(job);
         if (deliveryAttempt === null) throw new Error("Invalid ingestion delivery attempt.");
-        return options.processor({ data: job.data as IngestionJob["data"], deliveryAttempt });
+        return runActive((signal) => options.processor({ data: job.data as IngestionJob["data"], signal, deliveryAttempt }));
       }
       if (job.name === expiryPublicationJobName && options.consumeRetiredExpiryPublicationJob) {
-        return options.consumeRetiredExpiryPublicationJob(job.data);
+        return runActive(() => options.consumeRetiredExpiryPublicationJob!(job.data));
       }
       throw new Error("Unsupported BullMQ job name");
     },
@@ -92,7 +116,19 @@ export function createIngestionWorker(options: CreateIngestionWorkerOptions): Wo
     },
   );
 
-  return worker;
+  return {
+    pauseIntake: () => worker.pause(true),
+    abortActive: () => {
+      for (const controller of activeControllers) {
+        if (!controller.signal.aborted) controller.abort();
+      }
+    },
+    awaitActiveDrain: () => activeControllers.size === 0
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => { drainWaiters.add(resolve); }),
+    gracefulClose: () => worker.close(false),
+    forceClose: () => worker.close(true),
+  };
 }
 
 function readDeliveryAttempt(job: WorkerJob): AuthenticatedIngestionDeliveryAttempt | null {
