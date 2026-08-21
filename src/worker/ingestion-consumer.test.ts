@@ -10,6 +10,7 @@ import {
 } from "./queues";
 import { createInMemoryIngestionConsumer } from "./ingestion-consumer";
 import { InMemoryScheduledIngestionQueue } from "../app/api/scrape-runs/defaults";
+import { AuthenticatedIngestionRetryError } from "./authenticated-ingestion-delivery";
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -227,5 +228,122 @@ describe("createInMemoryIngestionConsumer — drainPending", () => {
     const results = await consumer.drainPending();
 
     expect(results).toEqual([]);
+  });
+
+  it("retries a genuine authenticated delivery with frozen attempt metadata and stops at its terminal result", async () => {
+    const queue = new InMemoryScheduledIngestionQueue();
+    const data = { ...makeJob("run-retry").data, authentication: { version: 1 as const, attemptId: "attempt-retry" } };
+    const calls: Array<{ data: unknown; attemptsMade: number; maxAttempts: number; frozen: boolean }> = [];
+    const onJobError = vi.fn(async () => {});
+    const processor = vi.fn(async (job) => {
+      calls.push({
+        data: job.data,
+        attemptsMade: job.deliveryAttempt!.attemptsMade,
+        maxAttempts: job.deliveryAttempt!.maxAttempts,
+        frozen: Object.isFrozen(job.deliveryAttempt!),
+      });
+      if (calls.length < 3) throw new AuthenticatedIngestionRetryError("retry_delivery");
+      return { status: "needs_admin_action" as const, inserted: 0, skipped: 0 };
+    });
+    await queue.add("bank-transaction-ingestion", data, { jobId: "run-retry", attempts: 3 });
+    const results = await createInMemoryIngestionConsumer({ queue, processor, onJobError }).drainPending();
+    expect(results).toEqual([{ status: "needs_admin_action", inserted: 0, skipped: 0 }]);
+    expect(calls).toEqual([
+      { data, attemptsMade: 0, maxAttempts: 3, frozen: true },
+      { data, attemptsMade: 1, maxAttempts: 3, frozen: true },
+      { data, attemptsMade: 2, maxAttempts: 3, frozen: true },
+    ]);
+    expect(onJobError).not.toHaveBeenCalled();
+    expect(queue.jobs).toEqual([]);
+  });
+
+  it("contains unknown failures after their final attempt and continues draining", async () => {
+    const queue = new InMemoryScheduledIngestionQueue();
+    const onJobError = vi.fn(async () => {});
+    const processor = vi.fn(async (job) => {
+      if (job.data.runId === "run-fails") throw new Error("raw internal failure");
+      return { status: "succeeded" as const, inserted: 1, skipped: 0 };
+    });
+    await queue.add("bank-transaction-ingestion", makeJob("run-fails").data, { jobId: "run-fails", attempts: 3 });
+    await queue.add("bank-transaction-ingestion", makeJob("run-next").data, { jobId: "run-next", attempts: 1 });
+    const results = await createInMemoryIngestionConsumer({ queue, processor, onJobError }).drainPending();
+    expect(processor).toHaveBeenCalledTimes(4);
+    expect(onJobError).toHaveBeenCalledTimes(1);
+    expect(results).toEqual([
+      { error: expect.objectContaining({ message: "In-memory ingestion job failed." }) },
+      { status: "succeeded", inserted: 1, skipped: 0 },
+    ]);
+  });
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN])("fails closed before processing malformed stored attempts %p", async (attempts) => {
+    const queue = new InMemoryScheduledIngestionQueue();
+    const processor = vi.fn(async (job: { deliveryAttempt?: unknown }) => {
+      void job;
+      return { status: "succeeded" as const, inserted: 0, skipped: 0 };
+    });
+    const onJobError = vi.fn(async () => { throw new Error("recovery failure"); });
+    await queue.add("bank-transaction-ingestion", makeJob("run-malformed").data, { jobId: "run-malformed", attempts });
+    const results = await createInMemoryIngestionConsumer({ queue, processor, onJobError }).drainPending();
+    expect(processor).not.toHaveBeenCalled();
+    expect(onJobError).toHaveBeenCalledOnce();
+    expect(results).toEqual([{ error: expect.objectContaining({ message: "In-memory ingestion job failed." }) }]);
+  });
+
+  it("uses the documented one-attempt default when stored options are undefined", async () => {
+    const queue = new InMemoryScheduledIngestionQueue();
+    const processor = vi.fn(async (job: { deliveryAttempt?: unknown }) => {
+      void job;
+      return { status: "succeeded" as const, inserted: 0, skipped: 0 };
+    });
+    const onJobError = vi.fn(async () => {});
+    queue.jobs.push({ name: "bank-transaction-ingestion", data: makeJob("run-default-options").data, options: undefined } as never);
+    const results = await createInMemoryIngestionConsumer({ queue, processor, onJobError }).drainPending();
+    expect(processor).toHaveBeenCalledOnce();
+    expect(processor.mock.calls[0]?.[0].deliveryAttempt).toEqual({ attemptsMade: 0, maxAttempts: 1 });
+    expect(onJobError).not.toHaveBeenCalled();
+    expect(results).toEqual([{ status: "succeeded", inserted: 0, skipped: 0 }]);
+  });
+
+  it("fails closed without invoking getters for hostile stored options", async () => {
+    const getter = vi.fn(() => 1);
+    const hidden = Object.defineProperty({}, "attempts", { value: 1, enumerable: false });
+    const inherited = Object.create({ attempts: 1 });
+    const accessor = Object.defineProperty({}, "attempts", { get: getter, enumerable: true });
+    const symbol = { attempts: 1, [Symbol("extra")]: true };
+    const extra = { attempts: 1, extra: true };
+    const proxy = new Proxy({ attempts: 1 }, { getPrototypeOf: () => { throw new Error("raw proxy sentinel"); } });
+
+    for (const [index, options] of [hidden, inherited, accessor, symbol, extra, proxy].entries()) {
+      const queue = new InMemoryScheduledIngestionQueue();
+      const processor = vi.fn(async () => ({ status: "succeeded" as const, inserted: 0, skipped: 0 }));
+      const onJobError = vi.fn(async () => {});
+      queue.jobs.push({ name: "bank-transaction-ingestion", data: makeJob(`run-hostile-${index}`).data, options } as never);
+
+      await expect(createInMemoryIngestionConsumer({ queue, processor, onJobError }).drainPending()).resolves.toEqual([
+        { error: expect.objectContaining({ message: "In-memory ingestion job failed." }) },
+      ]);
+      expect(processor).not.toHaveBeenCalled();
+      expect(onJobError).toHaveBeenCalledOnce();
+    }
+
+    expect(getter).not.toHaveBeenCalled();
+  });
+
+  it("accepts a null-prototype options record with only an enumerable data attempts key", async () => {
+    const queue = new InMemoryScheduledIngestionQueue();
+    const processor = vi.fn(async (job) => {
+      if (job.deliveryAttempt!.attemptsMade === 0) throw new AuthenticatedIngestionRetryError("retry_delivery");
+      return { status: "succeeded" as const, inserted: 0, skipped: 0 };
+    });
+    const options = Object.assign(Object.create(null), { attempts: 2 });
+    const data = Object.freeze(makeJob("run-null-options").data);
+    Object.freeze(options);
+    queue.jobs.push({ name: "bank-transaction-ingestion", data, options } as never);
+
+    await expect(createInMemoryIngestionConsumer({ queue, processor }).drainPending()).resolves.toEqual([
+      { status: "succeeded", inserted: 0, skipped: 0 },
+    ]);
+    expect(processor).toHaveBeenCalledTimes(2);
+    expect(options).toEqual({ attempts: 2 });
   });
 });

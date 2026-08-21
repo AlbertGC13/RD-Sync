@@ -1,7 +1,10 @@
 import type { IngestionJob, IngestionResult } from "./queues";
 import type { InMemoryScheduledIngestionQueue } from "../app/api/scrape-runs/defaults";
+import type { AuthenticatedIngestionDeliveryAttempt } from "./authenticated-ingestion-delivery";
 
-export type InMemoryIngestionProcessor = (job: IngestionJob) => Promise<IngestionResult>;
+export type InMemoryIngestionProcessor = (job: IngestionJob & Readonly<{
+  deliveryAttempt?: AuthenticatedIngestionDeliveryAttempt;
+}>) => Promise<IngestionResult>;
 
 export type DrainResult = IngestionResult | { error: Error };
 
@@ -26,6 +29,33 @@ export interface CreateInMemoryIngestionConsumerOptions {
    * swallowed so recovery can never mask the original processor error.
    */
   onJobError?: (job: IngestionJob, error: Error) => Promise<void>;
+}
+
+const DRAIN_ERROR_MESSAGE = "In-memory ingestion job failed.";
+const QUEUE_OPTION_KEYS = ["attempts", "backoff", "jobId", "removeOnComplete", "removeOnFail"] as const;
+
+function readMaxAttempts(job: unknown): number | null {
+  try {
+    if (job === null || typeof job !== "object") return null;
+    const options = Object.getOwnPropertyDescriptor(job, "options");
+    if (!options || !options.enumerable || !("value" in options)) return null;
+    if (options.value === undefined) return 1;
+    if (options.value === null || typeof options.value !== "object" || Array.isArray(options.value)) return null;
+    const prototype = Object.getPrototypeOf(options.value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const keys = Reflect.ownKeys(options.value);
+    if (keys.some((key) => typeof key !== "string" || !QUEUE_OPTION_KEYS.includes(key as typeof QUEUE_OPTION_KEYS[number]))) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(options.value);
+    if (keys.some((key) => {
+      const descriptor = descriptors[key as string];
+      return !descriptor || !descriptor.enumerable || !("value" in descriptor);
+    })) return null;
+    const attempts = descriptors.attempts;
+    if (attempts === undefined) return 1;
+    return Number.isSafeInteger(attempts.value) && attempts.value > 0 ? attempts.value : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -53,26 +83,44 @@ export function createInMemoryIngestionConsumer(
       // prevent the remaining jobs from being processed.
       while (options.queue.jobs.length > 0) {
         const [pending] = options.queue.jobs.splice(0, 1);
+        const maxAttempts = readMaxAttempts(pending);
+        const fixedError = new Error(DRAIN_ERROR_MESSAGE);
 
-        try {
-          const result = await options.processor({ data: pending.data });
-          results.push(result);
-        } catch (error) {
-          const wrapped = error instanceof Error ? error : new Error(String(error));
-          // Recovery: the job has already been removed from the in-memory
-          // queue. If the processor threw before its own failure catch (for
-          // example `markRunning` rejecting), the scrape run would otherwise
-          // stay `queued` with no pending job. Give the caller a chance to
-          // mark it failed. Recovery failures are swallowed so they never
-          // mask the original processor error.
+        if (maxAttempts === null) {
           if (options.onJobError) {
             try {
-              await options.onJobError({ data: pending.data }, wrapped);
+              await options.onJobError({ data: pending.data }, fixedError);
             } catch {
-              // intentional: recovery must not mask the original error
+              // Recovery failures are bounded and must not escape the drain.
             }
           }
-          results.push({ error: wrapped });
+          results.push({ error: fixedError });
+          continue;
+        }
+
+        for (let attemptsMade = 0; attemptsMade < maxAttempts; attemptsMade += 1) {
+          try {
+            const result = await options.processor({
+              data: pending.data,
+              deliveryAttempt: Object.freeze({ attemptsMade, maxAttempts }),
+            });
+            results.push(result);
+            break;
+          } catch (error) {
+            if (attemptsMade + 1 < maxAttempts) {
+              // Both retryable delivery failures and unknown failures use the
+              // stored queue retry budget; only the final failure terminalizes.
+              continue;
+            }
+            if (options.onJobError) {
+              try {
+                await options.onJobError({ data: pending.data }, error instanceof Error ? error : fixedError);
+              } catch {
+                // Recovery failures are bounded and must not escape the drain.
+              }
+            }
+            results.push({ error: fixedError });
+          }
         }
       }
 
