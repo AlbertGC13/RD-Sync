@@ -24,4 +24,9 @@ describe("run-now route activation isolation", () => {
     const { POST } = await import("./route"); const [first, second] = await Promise.all([POST(request()), POST(request())]);
     expect([first.status, second.status]).toEqual([202, 202]); expect(modules).toBe(1); expect(calls).toBe(2);
   });
+  it("retries a failed runtime load without scheduling", async () => {
+    process.env.RD_SYNC_AUTHENTICATED_INGESTION = "enabled"; process.env.RD_SYNC_REDIS_URL = "redis://worker"; process.env.RD_SYNC_TRUST_PROXY_HEADERS = "enabled";
+    let loads = 0; vi.doMock("./route-runtime", () => { if (loads++ === 0) throw new Error("secret"); return { postDefaultScrapeRunNow: async () => Response.json({}, { status: 202 }) }; });
+    const { POST } = await import("./route"); expect((await POST(request())).status).toBe(503); expect((await POST(request())).status).toBe(202); expect(loads).toBe(2);
+  });
 });

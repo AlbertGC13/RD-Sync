@@ -10,12 +10,9 @@ type DisabledRuntime = Readonly<{
   createDefaultInMemoryIngestionConsumer: () => InMemoryIngestionConsumer | undefined;
 }>;
 
-type CapacityMonitorRuntime = Readonly<Record<never, never>>;
-
 export type IngestionConsumerSelectorDependencies = Readonly<{
   env?: Record<string, string | undefined>;
   loadDisabledRuntime?: () => Promise<DisabledRuntime>;
-  loadCapacityMonitor?: () => Promise<CapacityMonitorRuntime>;
 }>;
 
 function hasConfiguredRedisUrl(value: string | undefined): boolean {
@@ -27,20 +24,17 @@ export function createIngestionConsumerSelector(
 ): () => Promise<InMemoryIngestionConsumer | undefined> {
   const env = dependencies.env ?? process.env;
   const loadDisabledRuntime = dependencies.loadDisabledRuntime ?? (() => import("./consumer-defaults"));
-  const loadCapacityMonitor = dependencies.loadCapacityMonitor ?? (() => import("./capacity-monitor-defaults"));
+  let runtime: DisabledRuntime | undefined;
   let consumer: InMemoryIngestionConsumer | undefined;
-  let pending: Promise<InMemoryIngestionConsumer | undefined> | undefined;
-  let monitorLoaded = false;
-  let monitorPending: Promise<void> | undefined;
+  let pending: Promise<DisabledRuntime> | undefined;
+  let consumerPending: Promise<InMemoryIngestionConsumer> | undefined;
 
-  const ensureCapacityMonitor = async () => {
-    if (monitorLoaded) return;
-    monitorPending ??= loadCapacityMonitor().then(() => {
-      monitorLoaded = true;
-    }).finally(() => {
-      monitorPending = undefined;
-    });
-    return monitorPending;
+  const loadRuntime = () => {
+    if (runtime) return Promise.resolve(runtime);
+    pending ??= loadDisabledRuntime().then((loaded) => (runtime = loaded)).catch(() => {
+      throw new Error(IN_MEMORY_INGESTION_RUNTIME_UNAVAILABLE);
+    }).finally(() => { pending = undefined; });
+    return pending;
   };
 
   return async () => {
@@ -48,27 +42,20 @@ export function createIngestionConsumerSelector(
     const redisConfigured = hasConfiguredRedisUrl(env.RD_SYNC_REDIS_URL);
     if (activation.status === "enabled") {
       if (!redisConfigured) throw new Error(AUTHENTICATED_INGESTION_REDIS_REQUIRED);
-      await ensureCapacityMonitor();
+      await loadRuntime();
       return undefined;
     }
     if (redisConfigured) {
-      await ensureCapacityMonitor();
+      await loadRuntime();
       return undefined;
     }
-    await ensureCapacityMonitor();
     if (consumer !== undefined) return consumer;
-    pending ??= loadDisabledRuntime()
-      .then((runtime) => {
-        consumer = runtime.createDefaultInMemoryIngestionConsumer();
-        return consumer;
-      })
-      .catch(() => {
-        throw new Error(IN_MEMORY_INGESTION_RUNTIME_UNAVAILABLE);
-      })
-      .finally(() => {
-        pending = undefined;
-      });
-    return pending;
+    consumerPending ??= loadRuntime().then((loaded) => {
+      consumer = loaded.createDefaultInMemoryIngestionConsumer();
+      if (!consumer) throw new Error(IN_MEMORY_INGESTION_RUNTIME_UNAVAILABLE);
+      return consumer;
+    }).finally(() => { consumerPending = undefined; });
+    return consumerPending;
   };
 }
 

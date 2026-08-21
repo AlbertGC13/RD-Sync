@@ -10,12 +10,12 @@ describe("in-memory ingestion consumer selection", () => {
       .rejects.toThrow(AUTHENTICATED_INGESTION_REDIS_REQUIRED);
     expect(loads).toBe(0);
   });
-  it("leaves Redis modes to the separate worker without loading the in-memory runtime", async () => {
+  it("loads Redis modes after the decision but returns no in-memory consumer", async () => {
     let loads = 0;
     const loader = async () => { loads += 1; return { createDefaultInMemoryIngestionConsumer: () => ({ drainPending: async () => [] }) }; };
     await expect(selector({ RD_SYNC_AUTHENTICATED_INGESTION: "enabled", RD_SYNC_REDIS_URL: "redis://worker" }, loader)()).resolves.toBeUndefined();
     await expect(selector({ RD_SYNC_REDIS_URL: "redis://worker" }, loader)()).resolves.toBeUndefined();
-    expect(loads).toBe(0);
+    expect(loads).toBe(2);
   });
   it("loads and caches only the disabled terminal runtime", async () => {
     let loads = 0;
@@ -53,11 +53,8 @@ describe("in-memory ingestion consumer selection", () => {
     expect(loads).toBe(2);
   });
 
-  it("starts the monitor only after a valid selection", async () => {
-    let loads = 0; const monitor = async () => { loads += 1; return {}; };
-    await expect(createIngestionConsumerSelector({ env: { RD_SYNC_AUTHENTICATED_INGESTION: "enabled" }, loadCapacityMonitor: monitor })()).rejects.toThrow(AUTHENTICATED_INGESTION_REDIS_REQUIRED);
-    await createIngestionConsumerSelector({ env: { RD_SYNC_REDIS_URL: "redis://worker" }, loadCapacityMonitor: monitor })();
-    await createIngestionConsumerSelector({ env: {}, loadCapacityMonitor: monitor, loadDisabledRuntime: async () => ({ createDefaultInMemoryIngestionConsumer: () => ({ drainPending: async () => [] }) }) })();
-    expect(loads).toBe(2);
+  it("rejects a cached non-terminal runtime without exposing its error", async () => {
+    const select = createIngestionConsumerSelector({ env: {}, loadDisabledRuntime: async () => ({ createDefaultInMemoryIngestionConsumer: () => undefined }) });
+    await expect(select()).rejects.toThrow(IN_MEMORY_INGESTION_RUNTIME_UNAVAILABLE);
   });
 });
