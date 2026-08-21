@@ -55,6 +55,15 @@ describe("createIngestionWorkerShutdown", () => {
     const shutdown = createIngestionWorkerShutdown({ worker, timeoutMs: 10, hooks: { closeLock: () => { calls.push("lock"); }, closeExpiryOutbox: () => { calls.push("expiry"); }, closePrisma: () => { calls.push("prisma"); } } });
     await expect(shutdown()).resolves.toEqual({ status: "failed", exitCode: 1 }); expect(calls).toEqual(["pause", "abort", "close:false", "lock", "expiry", "prisma"]);
   });
+
+  it.each(["rejects", "hangs"])("stops expiry once before force when pause %s", async (mode) => {
+    vi.useFakeTimers(); const calls: string[] = []; const wait = deferred(); const worker = controls(calls);
+    worker.pauseIntake = vi.fn(async () => { calls.push("pause"); if (mode === "rejects") throw new Error("x"); await wait.promise; });
+    const shutdown = createIngestionWorkerShutdown({ worker, timeoutMs: 10, hooks: { stopExpiryScheduling: () => { calls.push("stop"); }, closeLock: () => { calls.push("lock"); }, closeExpiryOutbox: () => { calls.push("expiry"); }, closePrisma: () => { calls.push("prisma"); } } });
+    const result = shutdown(); if (mode === "hangs") await vi.advanceTimersByTimeAsync(10);
+    await expect(result).resolves.toMatchObject({ exitCode: 1 }); expect(calls).toEqual(expect.arrayContaining(["abort", "stop", "close:true", "lock", "expiry", "prisma"])); expect(calls.indexOf("stop")).toBeLessThan(calls.indexOf("close:true")); expect(calls.filter((x) => x === "stop")).toHaveLength(1);
+    wait.resolve(); vi.useRealTimers();
+  });
 });
 
 describe("installIngestionWorkerShutdown", () => {

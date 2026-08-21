@@ -42,9 +42,9 @@ async function runShutdown(options: IngestionWorkerShutdownOptions): Promise<Ing
   const paused = await within(options.worker.pauseIntake);
   options.worker.abortActive();
   if (paused !== "ok") failed ||= paused === "failed";
-  if (paused === "ok") {
-    const stopped = await within(options.hooks?.stopExpiryScheduling ?? (() => undefined));
-    failed ||= stopped === "failed";
+  const stopped = await within(options.hooks?.stopExpiryScheduling ?? (() => undefined));
+  failed ||= stopped === "failed";
+  if (paused === "ok" && stopped === "ok") {
     if (!timedOut) {
       const drained = await within(options.worker.awaitActiveDrain);
       failed ||= drained === "failed";
@@ -55,7 +55,7 @@ async function runShutdown(options: IngestionWorkerShutdownOptions): Promise<Ing
       }
     }
   }
-  if (!closeStarted && (timedOut || failed)) {
+  if (!closeStarted && (timedOut || failed || paused !== "ok" || stopped !== "ok")) {
     options.worker.abortActive();
     closeStarted = true;
     const forced = await within(options.worker.forceClose);
