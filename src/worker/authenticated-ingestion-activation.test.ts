@@ -16,9 +16,14 @@ function setup() {
 }
 
 describe("resolveAuthenticatedIngestionActivation", () => {
-  it.each(["enabled", undefined, "", " ", " enabled", "enabled ", "ENABLED", "Enabled", "true", "1", "disabled", "no"])
+  it.each([
+    "enabled", undefined, "", " ", " enabled", "enabled ", "ENABLED", "Enabled", "true", "1", "disabled", "no",
+    "enabled\0", "еnabled", "enablеd", "ｅｎａｂｌｅｄ",
+    `en${String.fromCharCode(0x200d)}abled`, `en${String.fromCharCode(0x200c)}abled`, `en${String.fromCharCode(0xfeff)}abled`,
+    "\tenabled", "enabled\t", "\nenabled", "enabled\n", new String("enabled") as unknown,
+  ])
     ("recognizes only the exact raw value %j", (raw) => {
-      const result = resolveAuthenticatedIngestionActivation(raw);
+      const result = resolveAuthenticatedIngestionActivation(raw as string | undefined);
       expect(result).toEqual(raw === "enabled" ? { status: "enabled" } : { status: "disabled" });
       expect(Object.isFrozen(result)).toBe(true);
     });
