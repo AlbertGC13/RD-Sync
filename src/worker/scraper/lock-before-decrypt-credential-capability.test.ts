@@ -124,6 +124,16 @@ describe("createLockBeforeDecryptCredentialCapability", () => {
     const events: string[] = []; const release = vi.fn(async () => true); const { capability } = dependencies(events, { lock: { acquire: async () => ({ signal: {} as AbortSignal, release }) } });
     await expect(capability.run(input())).resolves.toEqual({ status: "lock_unavailable" }); expect([release.mock.calls.length, events]).toEqual([1, []]);
   });
+  it("rejects lease symbols, hidden fields, and accessors while releasing once", async () => {
+    for (const lease of [Object.freeze({ signal: new AbortController().signal, release: async () => true, [Symbol("x")]: true }), Object.freeze(Object.defineProperty({ signal: new AbortController().signal, release: async () => true }, "extra", { value: true })), Object.freeze(Object.defineProperty({ signal: new AbortController().signal, release: async () => true }, "release", { get: () => { throw new Error("x"); } }))]) {
+      const events: string[] = []; const { capability } = dependencies(events, { lock: { acquire: async () => lease as never } }); await expect(capability.run(input())).resolves.toEqual({ status: "lock_unavailable" }); expect(events).toEqual([]);
+    }
+  });
+  it("uses native EventTarget methods and the validated release receiver", async () => {
+    const events: string[] = []; const controller = new AbortController(); Object.defineProperties(controller.signal, { addEventListener: { value: () => { throw new Error("forged"); } }, removeEventListener: { value: () => { throw new Error("forged"); } } });
+    const lease = Object.freeze({ signal: controller.signal, release(this: { signal: AbortSignal }) { events.push(this.signal === controller.signal ? "released" : "wrong"); return Promise.resolve(true); } }); const { capability } = dependencies(events, { lock: { acquire: async () => lease }, loadCredential: async () => ({ secret: "x" }), executeProtected: async () => "ok" });
+    await expect(capability.run(input())).resolves.toEqual({ status: "completed", result: "ok" }); expect(events).toEqual(["released"]);
+  });
   it("composes lease loss with external cancellation before load and during execution", async () => {
     for (const phase of ["load", "execute"] as const) {
       const events: string[] = []; const loss = new AbortController(); const external = new AbortController(); let received: AbortSignal | undefined;

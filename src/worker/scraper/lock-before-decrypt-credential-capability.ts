@@ -37,16 +37,22 @@ function parseLease(value: unknown): Lease | null {
   try {
     if (!value || typeof value !== "object" || !Object.isFrozen(value)) return null;
     const descriptors = Object.getOwnPropertyDescriptors(value); const signal = descriptors.signal; const release = descriptors.release;
-    if (Object.keys(descriptors).length !== 2 || !signal || !release || "get" in signal || "set" in signal || "get" in release || "set" in release || typeof release.value !== "function" || readNativeAbortState(signal.value) === null) return null;
-    return Object.freeze({ signal: signal.value as AbortSignal, release: release.value as () => Promise<boolean> });
+    if (Reflect.ownKeys(value).length !== 2 || Object.getOwnPropertySymbols(value).length || Object.keys(descriptors).length !== 2 || !signal?.enumerable || !release?.enumerable || !("value" in signal) || !("value" in release) || typeof release.value !== "function" || readNativeAbortState(signal.value) === null) return null;
+    return Object.freeze({ signal: signal.value as AbortSignal, release: () => Reflect.apply(release.value, value, []) as Promise<boolean> });
   } catch { return null; }
 }
 
+async function releaseBestEffort(value: unknown): Promise<void> {
+  try { const release = value && typeof value === "object" ? Object.getOwnPropertyDescriptor(value, "release")?.value : undefined; if (typeof release === "function") await Reflect.apply(release, value, []); } catch {}
+}
+
 function composeAbortSignals(external: AbortSignal | undefined, lease: AbortSignal) {
-  const controller = new AbortController(); const abort = () => controller.abort();
-  if (readNativeAbortState(external) || readNativeAbortState(lease)) abort();
-  external?.addEventListener("abort", abort, { once: true }); lease.addEventListener("abort", abort, { once: true });
-  return { signal: controller.signal, dispose: () => { external?.removeEventListener("abort", abort); lease.removeEventListener("abort", abort); } };
+  const controller = new AbortController(); const abort = () => controller.abort(); const signals = external ? [external, lease] : [lease]; let installed = 0;
+  try {
+    for (const signal of signals) { EventTarget.prototype.addEventListener.call(signal, "abort", abort, { once: true }); installed++; }
+    if (signals.some((signal) => readNativeAbortState(signal))) abort();
+    return { signal: controller.signal, dispose: () => { for (const signal of signals) try { EventTarget.prototype.removeEventListener.call(signal, "abort", abort); } catch {} } };
+  } catch { for (const signal of signals.slice(0, installed)) try { EventTarget.prototype.removeEventListener.call(signal, "abort", abort); } catch {} return null; }
 }
 
 export function createLockBeforeDecryptCredentialCapability<TCredential, TResult>(dependencies: Dependencies<TCredential, TResult>) {
@@ -60,8 +66,9 @@ export function createLockBeforeDecryptCredentialCapability<TCredential, TResult
       try { lease = await dependencies.lock.acquire(request); } catch { return outcome("lock_unavailable"); }
       if (!lease) return outcome("lock_busy");
       const parsedLease = parseLease(lease);
-      if (!parsedLease) { try { await lease.release(); } catch {} return outcome("lock_unavailable"); }
+      if (!parsedLease) { await releaseBestEffort(lease); return outcome("lock_unavailable"); }
       const composed = composeAbortSignals(request.signal, parsedLease.signal);
+      if (!composed) { await releaseBestEffort(parsedLease); return outcome("lock_unavailable"); }
       try {
         if (readNativeAbortState(composed.signal) === true) return outcome("cancelled");
         let credential: TCredential | null;
@@ -71,9 +78,9 @@ export function createLockBeforeDecryptCredentialCapability<TCredential, TResult
         try { return outcome("completed", await dependencies.executeProtected(Object.freeze({ bankCode: request.bankCode, credential, signal: composed.signal }))); } catch { return outcome("execution_failed"); }
       } finally {
         let releaseFailed = false;
-        try { releaseFailed = !(await lease.release()); } catch { releaseFailed = true; }
-        if (releaseFailed) try { dependencies.observeReleaseFailure?.(); } catch {}
         composed.dispose();
+        try { releaseFailed = !(await parsedLease.release()); } catch { releaseFailed = true; }
+        if (releaseFailed) try { dependencies.observeReleaseFailure?.(); } catch {}
       }
     },
   });

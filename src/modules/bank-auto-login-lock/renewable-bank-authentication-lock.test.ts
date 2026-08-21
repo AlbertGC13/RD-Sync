@@ -34,6 +34,18 @@ describe("createRenewableBankAuthenticationLock", () => {
       const { lock, timers } = setup({ acquireSlot }); const result = lock.acquire({ bankCode: "popular" }); if (rejected) await expect(result).rejects.toThrow(); else await expect(result).resolves.toBeNull(); expect(timers).toEqual([]);
     }
     expect(() => createRenewableBankAuthenticationLock({ store: {} as LockStore, ttlMs: 0 })).toThrow();
+    expect(() => createRenewableBankAuthenticationLock({ store: {} as LockStore, ttlMs: 1.5 })).toThrow();
     expect(() => createRenewableBankAuthenticationLock({ store: {} as LockStore, ttlMs: 10, renewIntervalMs: 10 })).toThrow();
+  });
+  it("releases an acquired owner when scheduler setup or unref fails without leaking diagnostics", async () => {
+    for (const scheduler of [{ setInterval: () => { throw new Error("redis://secret"); }, clearInterval: vi.fn() }, { setInterval: () => ({ unref: () => { throw new Error("token"); } }), clearInterval: vi.fn() }]) {
+      const release = vi.fn(async () => true); const lock = createRenewableBankAuthenticationLock({ store: { acquireSlot: async () => 1, renewIfOwner: async () => true, releaseIfOwner: release }, scheduler, generateLeaseToken: () => "secret" });
+      await expect(lock.acquire({ bankCode: "popular" })).rejects.toThrow("Unable to start renewable bank authentication lock"); expect(release).toHaveBeenCalledTimes(1);
+    }
+  });
+  it("remains abort-safe when clearing a timer fails", async () => {
+    const release = vi.fn(async () => true); const { timers } = setup({ renewIfOwner: async () => false, releaseIfOwner: release });
+    const lease = (await createRenewableBankAuthenticationLock({ store: { acquireSlot: async () => 1, renewIfOwner: async () => false, releaseIfOwner: release }, scheduler: { setInterval: (fn) => { timers.push(fn); return {}; }, clearInterval: () => { throw new Error("timer"); } } }).acquire({ bankCode: "popular" }))!;
+    timers[0](); await Promise.resolve(); await Promise.resolve(); await lease.release(); expect([lease.signal.aborted, release.mock.calls.length]).toEqual([true, 1]);
   });
 });
