@@ -4,7 +4,7 @@ type DeliveryJob = Readonly<{ data: unknown; signal?: AbortSignal }>;
 export type IngestionData = Readonly<{ runId: string; bankId: string; accountFingerprint: string }>;
 type Identity = Readonly<{ bankCode: string; runId: string; attemptId: string }>;
 type OperatorReason = "temporary_authentication_problem" | "protected_authentication_step_detected" | "bank_login_configuration_requires_review" | "authentication_attempt_requires_review" | "identity_conflict" | "restoration_state_conflict";
-type TerminalReason = OperatorReason | "legacy_authenticated_ingestion_delivery" | "invalid_authenticated_ingestion_delivery" | "invalid_authenticated_ingestion_precondition" | "authentication_precondition_requires_review";
+type TerminalReason = OperatorReason | "legacy_authenticated_ingestion_delivery" | "invalid_authenticated_ingestion_delivery" | "invalid_authenticated_ingestion_precondition" | "authentication_precondition_requires_review" | "authenticated_ingestion_disabled";
 
 export type AuthenticatedIngestionTerminalOutcome = Readonly<{ runId: string; bankId?: string; status: "needs_admin_action" | "failed"; reason: TerminalReason }>;
 export type AuthenticatedIngestionAuthenticationInput = Readonly<{ identity: Identity; ownerToken: string; job: Readonly<{ data: IngestionData }>; signal?: AbortSignal }>;
@@ -53,6 +53,11 @@ function aborted(value: AbortSignal): boolean | null {
   try { return readNativeAbortSignal?.call(value) ?? null; } catch { return null; }
 }
 
+export type AuthenticatedIngestionDeliveryClassification =
+  | Readonly<{ kind: "v1"; runId: string; bankId: string }>
+  | Readonly<{ kind: "legacy"; runId: string; bankId: string }>
+  | Readonly<{ kind: "invalid"; runId?: string }>;
+
 function parseData(value: unknown): Readonly<{ kind: "v1"; data: IngestionData; identity: Identity }> | Readonly<{ kind: "legacy"; data: IngestionData }> | null {
   const v1 = exact(value, ["runId", "bankId", "accountFingerprint", "authentication"]);
   if (v1) {
@@ -62,6 +67,19 @@ function parseData(value: unknown): Readonly<{ kind: "v1"; data: IngestionData; 
   const legacy = exact(value, ["runId", "bankId", "accountFingerprint"]) ?? exact(value, ["runId", "bankId", "accountFingerprint", "expiredEventId"]);
   if (legacy && isNonblank(legacy.runId) && isNonblank(legacy.bankId) && isNonblank(legacy.accountFingerprint) && (legacy.expiredEventId === undefined || isNonblank(legacy.expiredEventId))) return { kind: "legacy", data: { runId: legacy.runId, bankId: legacy.bankId, accountFingerprint: legacy.accountFingerprint } };
   return null;
+}
+
+export function classifyAuthenticatedIngestionDeliveryJob(job: DeliveryJob): AuthenticatedIngestionDeliveryClassification {
+  let data: unknown; let jobSignal: AbortSignal | null | undefined;
+  try { const envelope = exact(job, ["data"]) ?? exact(job, ["data", "signal"]); data = envelope?.data; jobSignal = signal(envelope?.signal); } catch { data = undefined; jobSignal = null; }
+  const parsed = (() => { try { return parseData(data); } catch { return null; } })();
+  if (!parsed || jobSignal === null) {
+    const runId = safeRunId(data);
+    return Object.freeze(runId ? { kind: "invalid" as const, runId } : { kind: "invalid" as const });
+  }
+  return Object.freeze(parsed.kind === "v1"
+    ? { kind: "v1" as const, runId: parsed.data.runId, bankId: parsed.data.bankId }
+    : { kind: "legacy" as const, runId: parsed.data.runId, bankId: parsed.data.bankId });
 }
 
 function preconditionDecision(value: unknown): "authenticated" | "retry_delivery" | "in_progress" | "cancelled" | OperatorReason | "invalid_authenticated_ingestion_precondition" | "authentication_precondition_requires_review" {
