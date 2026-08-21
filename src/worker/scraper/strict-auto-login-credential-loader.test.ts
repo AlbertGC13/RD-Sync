@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { encryptCredentialField } from "../../modules/bank-credentials/crypto";
-import { createStrictAutoLoginCredentialLoader } from "./strict-auto-login-credential-loader";
+import { createStrictAutoLoginCredentialLoader, isStrictAutoLoginCredential } from "./strict-auto-login-credential-loader";
 
 const envelope = (keyVersion = 1) => JSON.stringify({ keyVersion, iv: "iv", ciphertext: "cipher", tag: "tag" });
 const record = (overrides: Record<string, unknown> = {}) => ({ bankCode: "popular", isActive: true, keyVersion: 1, encryptedUsernameEnvelope: envelope(), encryptedPasswordEnvelope: envelope(), ...overrides });
@@ -142,5 +142,11 @@ describe("createStrictAutoLoginCredentialLoader", () => {
   it("fails closed when dependency access throws during construction", async () => {
     const loader = createStrictAutoLoginCredentialLoader(new Proxy({}, { get() { throw new Error("secret"); } }) as Parameters<typeof createStrictAutoLoginCredentialLoader>[0]);
     await expect(loader.load("popular")).resolves.toEqual({ status: "transient_unavailable", reason: "repository_unavailable" });
+  });
+  it("recognizes only credentials minted after the complete load flow", async () => {
+    const loaded = await fixture().loader.load("popular");
+    if (loaded.status !== "loaded") throw new Error("fixture");
+    const forged = Object.freeze({ bankCode: loaded.credential.bankCode, username: loaded.credential.username, password: loaded.credential.password, [Symbol("strict-auto-login-credential")]: true });
+    expect([isStrictAutoLoginCredential(loaded.credential), isStrictAutoLoginCredential(forged), isStrictAutoLoginCredential(new Proxy(forged, {})), isStrictAutoLoginCredential(null)]).toEqual([true, false, false, false]);
   });
 });
