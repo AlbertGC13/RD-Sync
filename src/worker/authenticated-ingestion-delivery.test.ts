@@ -43,6 +43,19 @@ describe("createAuthenticatedIngestionDeliveryProcessor", () => {
     expect(authenticate).toHaveBeenCalledWith(expect.objectContaining({ signal: controller.signal }));
   });
 
+  it.each([
+    Object.defineProperty({ attemptsMade: 0, maxAttempts: 1 }, "hidden", { value: true }),
+    Object.assign({ attemptsMade: 0, maxAttempts: 1 }, { [Symbol("unexpected")]: true }),
+    Object.defineProperty({ maxAttempts: 1 }, "attemptsMade", { enumerable: true, get: () => { throw new Error("raw-attempt-sentinel"); } }),
+    { attemptsMade: 1, maxAttempts: 1 },
+  ])("fails closed for forged ephemeral delivery attempts without invoking their accessors", async (deliveryAttempt) => {
+    const { processor, authenticate, downstream, complete } = setup();
+    await processor({ data: payload(), deliveryAttempt } as never);
+    expect(authenticate).not.toHaveBeenCalled(); expect(downstream).not.toHaveBeenCalled();
+    expect(complete).toHaveBeenCalledWith({ runId: "run-1", bankId: "popular", status: "failed", reason: "invalid_authenticated_ingestion_delivery" });
+    expect(JSON.stringify(complete.mock.calls)).not.toContain("raw-attempt-sentinel");
+  });
+
   it("fails closed for a hostile signal accessor without exposing it to authentication", async () => {
     const prototype = Object.create(AbortSignal.prototype); Object.defineProperty(prototype, "aborted", { get: () => { throw new Error("raw-signal-sentinel"); } });
     const { processor, authenticate, complete } = setup();

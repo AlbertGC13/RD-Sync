@@ -62,7 +62,10 @@ function makeFakeWorkerCtor(): { Ctor: WorkerConstructor; instances: FakeWorker[
 const successResult: IngestionResult = { status: "succeeded", inserted: 2, skipped: 1 };
 
 function makeSuccessProcessor() {
-  return vi.fn(async (): Promise<IngestionResult> => successResult);
+  return vi.fn(async (job: unknown): Promise<IngestionResult> => {
+    void job;
+    return successResult;
+  });
 }
 
 const fakeConnection = {
@@ -74,6 +77,8 @@ const fakeConnection = {
 const fakeJob: WorkerJob = {
   name: INGESTION_QUEUE_NAME,
   data: { runId: "run-worker-1", bankId: "popular", accountFingerprint: "acct-main" },
+  attemptsMade: 0,
+  opts: {},
 };
 
 // ---------------------------------------------------------------------------
@@ -121,8 +126,49 @@ describe("createIngestionWorker", () => {
     const result = await instances[0].handler({ ...fakeJob, name: INGESTION_QUEUE_NAME });
 
     expect(processor).toHaveBeenCalledOnce();
-    expect(processor).toHaveBeenCalledWith({ data: fakeJob.data });
+    expect(processor).toHaveBeenCalledWith({ data: fakeJob.data, deliveryAttempt: { attemptsMade: 0, maxAttempts: 1 } });
     expect(result).toEqual(successResult);
+  });
+
+  it.each([
+    [0, 3, { attemptsMade: 0, maxAttempts: 3 }],
+    [1, 3, { attemptsMade: 1, maxAttempts: 3 }],
+    [2, 3, { attemptsMade: 2, maxAttempts: 3 }],
+  ])("adapts trusted BullMQ attempt %i/%i into frozen ephemeral delivery metadata", async (attemptsMade, attempts, deliveryAttempt) => {
+    const { Ctor, instances } = makeFakeWorkerCtor();
+    const processor = makeSuccessProcessor();
+    createIngestionWorker({ connection: fakeConnection, processor, WorkerCtor: Ctor });
+
+    await instances[0].handler({ ...fakeJob, attemptsMade, opts: { attempts } } as never);
+
+    expect(processor).toHaveBeenCalledWith({ data: fakeJob.data, deliveryAttempt });
+    expect(Object.isFrozen((processor.mock.calls[0]?.[0] as { deliveryAttempt: object }).deliveryAttempt)).toBe(true);
+  });
+
+  it("defaults missing BullMQ attempts to one total delivery", async () => {
+    const { Ctor, instances } = makeFakeWorkerCtor();
+    const processor = makeSuccessProcessor();
+    createIngestionWorker({ connection: fakeConnection, processor, WorkerCtor: Ctor });
+
+    await instances[0].handler({ ...fakeJob, attemptsMade: 0, opts: {} } as never);
+
+    expect(processor).toHaveBeenCalledWith({ data: fakeJob.data, deliveryAttempt: { attemptsMade: 0, maxAttempts: 1 } });
+  });
+
+  it.each([
+    { attemptsMade: -1, opts: { attempts: 1 } },
+    { attemptsMade: 0, opts: { attempts: 0 } },
+    { attemptsMade: 1, opts: { attempts: 1 } },
+    { attemptsMade: Number.NaN, opts: { attempts: 1 } },
+    { attemptsMade: 0, opts: Object.defineProperty({}, "attempts", { enumerable: true, get: () => { throw new Error("raw-attempt-sentinel"); } }) },
+  ])("fails closed for malformed attempt metadata before invoking the processor", async (metadata) => {
+    const { Ctor, instances } = makeFakeWorkerCtor();
+    const processor = makeSuccessProcessor();
+    createIngestionWorker({ connection: fakeConnection, processor, WorkerCtor: Ctor });
+
+    await expect(instances[0].handler({ ...fakeJob, ...metadata } as never)).rejects.toThrow("Invalid ingestion delivery attempt.");
+
+    expect(processor).not.toHaveBeenCalled();
   });
 
   it("routes only the exact expiry publication job name to the retired handler without invoking the processor", async () => {
