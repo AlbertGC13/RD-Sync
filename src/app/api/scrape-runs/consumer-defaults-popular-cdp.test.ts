@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   resolveDefaultScraper,
   buildPopularCdpScraperOptionsFromEnv,
-} from "./consumer-defaults";
+} from "./scraper-defaults";
 import { createPopularCdpScraper } from "../../../worker/scraper/navigation/popular-cdp";
 
 const CDP_URL = "http://127.0.0.1:9222";

@@ -3,12 +3,10 @@ import {
   classifyAuthenticatedIngestionDeliveryJob,
   type AuthenticatedIngestionTerminalOutcome,
 } from "./authenticated-ingestion-delivery";
-
-export type AuthenticatedIngestionActivation = Readonly<{ status: "enabled" | "disabled" }>;
-
-export function resolveAuthenticatedIngestionActivation(raw: string | undefined): AuthenticatedIngestionActivation {
-  return Object.freeze(raw === "enabled" ? { status: "enabled" } : { status: "disabled" });
-}
+export {
+  resolveAuthenticatedIngestionActivation,
+  type AuthenticatedIngestionActivation,
+} from "./authenticated-ingestion-activation-config";
 
 export type DisabledAuthenticatedIngestionProcessorDependencies<TResult> = Readonly<{
   complete: (outcome: AuthenticatedIngestionTerminalOutcome) => Promise<TResult>;
