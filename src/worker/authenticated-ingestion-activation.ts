@@ -16,19 +16,9 @@ export type DisabledAuthenticatedIngestionProcessorDependencies<TResult> = Reado
 
 export function createDisabledAuthenticatedIngestionProcessor<TResult>(
   dependencies: DisabledAuthenticatedIngestionProcessorDependencies<TResult>,
-): (job: Readonly<{ data: unknown; signal?: AbortSignal; deliveryAttempt?: unknown }>) => Promise<TResult> {
+): (job: Readonly<{ data: unknown; signal?: AbortSignal }>) => Promise<TResult> {
   return async (job) => {
-    let envelope: Readonly<{ data: unknown; signal?: AbortSignal }> = { data: undefined };
-    try {
-      const data = Object.getOwnPropertyDescriptor(job, "data");
-      const signal = Object.getOwnPropertyDescriptor(job, "signal");
-      if (data?.enumerable && "value" in data && (signal === undefined || signal.enumerable && "value" in signal)) {
-        envelope = signal === undefined ? { data: data.value } : { data: data.value, signal: signal.value as AbortSignal };
-      }
-    } catch {
-      // Hostile envelopes are intentionally classified as invalid below.
-    }
-    const delivery = classifyAuthenticatedIngestionDeliveryJob(envelope);
+    const delivery = classifyAuthenticatedIngestionDeliveryJob(job);
     if (delivery.kind === "invalid") {
       if (delivery.runId === undefined) throw new AuthenticatedIngestionInvalidJobError();
       return dependencies.complete({ runId: delivery.runId, status: "failed", reason: "invalid_authenticated_ingestion_delivery" });

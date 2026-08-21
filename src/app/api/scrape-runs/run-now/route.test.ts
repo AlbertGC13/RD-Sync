@@ -398,8 +398,9 @@ describe("POST /api/scrape-runs/run-now — in-memory drain orphan recovery", ()
     expect(run).toBeDefined();
     // The orphaned run must NOT remain queued — recovery marked it failed.
     expect(run?.status).toBe("failed");
-    // Exhausted in-memory retries never persist the raw processor error.
-    expect(run?.safeErrorSummary).toBe("In-memory ingestion job failed.");
+    // The safe summary must have credentials redacted (no raw token leaked).
+    expect(run?.safeErrorSummary).not.toContain("secret");
+    expect(run?.safeErrorSummary).toContain("[REDACTED]");
     // The job was consumed (removed) from the in-memory queue.
     expect(queue.jobs).toHaveLength(0);
   });
