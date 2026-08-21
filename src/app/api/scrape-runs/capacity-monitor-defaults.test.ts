@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // ---------------------------------------------------------------------------
 // resolveDefaultBrowserCapacityMonitor — env-gated wiring
 //
-// capacity-monitor-defaults.ts caches a module-load-time singleton on
+// consumer-defaults.ts also caches a module-load-time singleton on
 // globalThis, but that anchor persists across vi.resetModules() within the
 // same worker (resetModules only clears the module registry, not
 // globalThis) — so this test exercises the resolver function directly,
@@ -22,7 +22,7 @@ describe("resolveDefaultBrowserCapacityMonitor — env branches", () => {
     delete process.env.RD_SYNC_BROWSER_CAPACITY_MONITOR;
     process.env.RD_SYNC_REDIS_URL = "redis://localhost:6379";
 
-    const { resolveDefaultBrowserCapacityMonitor } = await import("./capacity-monitor-defaults");
+    const { resolveDefaultBrowserCapacityMonitor } = await import("./consumer-defaults");
 
     expect(resolveDefaultBrowserCapacityMonitor()).toBeNull();
   });
@@ -31,7 +31,7 @@ describe("resolveDefaultBrowserCapacityMonitor — env branches", () => {
     process.env.RD_SYNC_BROWSER_CAPACITY_MONITOR = "enabled";
     process.env.RD_SYNC_REDIS_URL = "redis://localhost:6379";
 
-    const { resolveDefaultBrowserCapacityMonitor } = await import("./capacity-monitor-defaults");
+    const { resolveDefaultBrowserCapacityMonitor } = await import("./consumer-defaults");
     const monitor = resolveDefaultBrowserCapacityMonitor();
 
     expect(monitor).not.toBeNull();

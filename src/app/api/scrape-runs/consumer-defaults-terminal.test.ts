@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 
 describe("default in-memory ingestion consumer", () => {
@@ -12,7 +11,14 @@ describe("default in-memory ingestion consumer", () => {
     await queue.add("ingestion", { runId: "terminal-only-run", bankId: "popular", accountFingerprint: "fingerprint" }, {});
     await defaultIngestionConsumer?.drainPending();
     expect((await defaultScrapeRunRepository.findById("terminal-only-run"))?.status).toBe("needs_admin_action");
-    const source = await readFile(new URL("./consumer-defaults.ts", import.meta.url), "utf8");
-    expect(source).not.toMatch(/createIngestionProcessor|defaultTransactionRepository|bankAdapterRegistry|collection-ingestion|browser-runtime/);
+  });
+
+  it("does not evaluate scraper defaults while loading the terminal consumer", async () => {
+    let evaluations = 0;
+    vi.resetModules();
+    vi.doMock("./scraper-defaults", () => { evaluations += 1; return {}; });
+    await import("./consumer-defaults");
+    expect(evaluations).toBe(0);
+    vi.doUnmock("./scraper-defaults");
   });
 });
