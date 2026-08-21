@@ -29,11 +29,29 @@ describe("createLockBeforeDecryptCredentialCapability", () => {
     expect(events).toEqual([]);
   });
 
+  it("fails closed for forged native prototypes, reflection traps, hidden fields, and undefined signals", async () => {
+    const events: string[] = []; const { capability } = dependencies(events); const controller = new AbortController();
+    const hiddenBankCode = Object.freeze(Object.defineProperty({}, "bankCode", { value: "popular" }));
+    const hiddenSignal = Object.freeze(Object.defineProperty({ bankCode: "popular" }, "signal", { value: controller.signal }));
+    const throwing = new Proxy({}, { getPrototypeOf: () => { throw new Error("trap"); } }); const revoked = Proxy.revocable(Object.freeze({ bankCode: "popular" }), {}); revoked.revoke();
+    for (const value of [Object.freeze({ bankCode: "popular", signal: Object.create(AbortSignal.prototype) }), throwing, revoked.proxy, hiddenBankCode, hiddenSignal, Object.freeze({ bankCode: "popular", signal: undefined })]) {
+      await expect(capability.run(value)).resolves.toEqual({ status: "invalid_input" });
+    }
+    expect(events).toEqual([]);
+  });
+
   it("rejects unsupported or pre-aborted banks before lock acquisition", async () => {
     const events: string[] = []; const { capability } = dependencies(events); const controller = new AbortController(); controller.abort();
     await expect(capability.run(input("other"))).resolves.toEqual({ status: "unsupported_bank" });
     await expect(capability.run(input("popular", controller.signal))).resolves.toEqual({ status: "cancelled" });
     expect(events).toEqual([]);
+  });
+
+  it("accepts genuine native signals and safely observes their cancellation", async () => {
+    const events: string[] = []; const { capability } = dependencies(events); const active = new AbortController(); const cancelled = new AbortController(); cancelled.abort();
+    await expect(capability.run(input("popular", active.signal))).resolves.toEqual({ status: "completed", result: "ok" });
+    await expect(capability.run(input("popular", cancelled.signal))).resolves.toEqual({ status: "cancelled" });
+    expect(events).toEqual(["acquire:popular", "load:popular", "execute:popular:credential-secret", "release"]);
   });
 
   it("maps busy or unavailable locks safely without secret work", async () => {
