@@ -1,17 +1,13 @@
 import type { IngestionWorkerControl } from "./ingestion-worker-factory";
 
-export type IngestionWorkerShutdownResult = Readonly<{ exitCode: 0 | 1; forced: boolean; failed: boolean }>;
+export type IngestionWorkerShutdownResult = Readonly<{ status: "graceful" | "forced" | "timed_out" | "failed"; exitCode: 0 | 1 }>;
 type CloseHook = () => Promise<void> | void;
+type StepResult = "ok" | "failed" | "timed_out";
 
 export interface IngestionWorkerShutdownOptions {
   worker: IngestionWorkerControl;
   timeoutMs: number;
-  hooks?: Readonly<{
-    stopExpiryScheduling?: CloseHook;
-    closeLock?: CloseHook;
-    closeExpiryOutbox?: CloseHook;
-    closePrisma?: CloseHook;
-  }>;
+  hooks?: Readonly<{ stopExpiryScheduling?: CloseHook; closeLock?: CloseHook; closeExpiryOutbox?: CloseHook; closePrisma?: CloseHook }>;
 }
 
 export function createIngestionWorkerShutdown(options: IngestionWorkerShutdownOptions): () => Promise<IngestionWorkerShutdownResult> {
@@ -21,24 +17,60 @@ export function createIngestionWorkerShutdown(options: IngestionWorkerShutdownOp
 }
 
 async function runShutdown(options: IngestionWorkerShutdownOptions): Promise<IngestionWorkerShutdownResult> {
-  let forced = false;
-  let failed = false;
-  try { await options.worker.pauseIntake(); } catch { forced = true; failed = true; }
-  options.worker.abortActive();
-  try { await options.hooks?.stopExpiryScheduling?.(); } catch { failed = true; }
+  let timedOut = false; let failed = false; let closeStarted = false;
+  let expire!: () => void;
+  const deadline = new Promise<void>((resolve) => { expire = () => { timedOut = true; resolve(); }; });
+  const timer = setTimeout(expire, options.timeoutMs);
+  const invoke = (step: CloseHook): Promise<void> => {
+    const pending = Promise.resolve().then(step);
+    void pending.catch(() => undefined);
+    return pending;
+  };
+  const within = async (step: CloseHook): Promise<StepResult> => {
+    const pending = invoke(step);
+    if (timedOut) return "timed_out";
+    return Promise.race([pending.then(() => "ok" as const, () => "failed" as const), deadline.then(() => "timed_out" as const)]);
+  };
+  const cleanup = async (hooks: readonly (CloseHook | undefined)[]) => {
+    for (const hook of hooks) {
+      if (!hook) continue;
+      const result = await within(hook);
+      if (result === "failed") failed = true;
+    }
+  };
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const drained = Promise.resolve().then(() => options.worker.awaitActiveDrain()).then(() => true, () => { failed = true; return false; });
-  const settled = await Promise.race([
-    drained,
-    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), options.timeoutMs); }),
-  ]);
-  if (timer !== undefined) clearTimeout(timer);
-  if (!settled) forced = true;
-  if (forced) options.worker.abortActive();
-  try { await (forced ? options.worker.forceClose() : options.worker.gracefulClose()); } catch { failed = true; forced = true; }
-  for (const hook of [options.hooks?.closeLock, options.hooks?.closeExpiryOutbox, options.hooks?.closePrisma]) {
-    try { await hook?.(); } catch { failed = true; }
+  const paused = await within(options.worker.pauseIntake);
+  options.worker.abortActive();
+  if (paused !== "ok") failed ||= paused === "failed";
+  if (paused === "ok") {
+    const stopped = await within(options.hooks?.stopExpiryScheduling ?? (() => undefined));
+    failed ||= stopped === "failed";
+    if (!timedOut) {
+      const drained = await within(options.worker.awaitActiveDrain);
+      failed ||= drained === "failed";
+      if (!timedOut) {
+        closeStarted = true;
+        const closed = await within(options.worker.gracefulClose);
+        failed ||= closed === "failed";
+      }
+    }
   }
-  return { exitCode: forced || failed ? 1 : 0, forced, failed };
+  if (!closeStarted && (timedOut || failed)) {
+    options.worker.abortActive();
+    closeStarted = true;
+    const forced = await within(options.worker.forceClose);
+    failed ||= forced === "failed";
+  }
+  await cleanup([options.hooks?.closeLock, options.hooks?.closeExpiryOutbox, options.hooks?.closePrisma]);
+  clearTimeout(timer);
+  if (timedOut) return { status: "timed_out", exitCode: 1 };
+  if (failed) return { status: closeStarted ? "failed" : "forced", exitCode: 1 };
+  return { status: "graceful", exitCode: 0 };
+}
+
+export function installIngestionWorkerShutdown(options: Readonly<{ shutdown: () => Promise<IngestionWorkerShutdownResult>; terminate: (code: number) => void; signals: { on(signal: "SIGTERM" | "SIGINT", handler: () => void): unknown } }>): void {
+  let handled: Promise<void> | undefined;
+  const handle = () => handled ??= options.shutdown().then((result) => { if (result.exitCode !== 0) options.terminate(result.exitCode); });
+  options.signals.on("SIGTERM", () => { void handle(); });
+  options.signals.on("SIGINT", () => { void handle(); });
 }

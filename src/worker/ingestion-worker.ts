@@ -30,7 +30,7 @@ import { Worker } from "bullmq";
 
 import { buildRedisConnectionOptions } from "./queues/bullmq-queue";
 import { createIngestionWorker, type WorkerConstructor } from "./ingestion-worker-factory";
-import { createIngestionWorkerShutdown } from "./ingestion-worker-shutdown";
+import { createIngestionWorkerShutdown, installIngestionWorkerShutdown } from "./ingestion-worker-shutdown";
 import { createRetiredExpiryPublicationConsumer } from "./expiry-publication-consumer";
 import { createDefaultExpiryRuntime } from "./expiry-runtime";
 import { resolveDefaultAlertSink } from "./alerts/email-alert-sink";
@@ -193,12 +193,8 @@ const shutdown = createIngestionWorkerShutdown({
   },
 });
 
-async function handleShutdown(signal: string): Promise<void> {
-  console.log(`[ingestion-worker] ${signal} received — shutting down gracefully (${SHUTDOWN_GRACE_MS}ms timeout)...`);
-  const result = await shutdown();
-  process.exitCode = result.exitCode;
-  console.log("[ingestion-worker] Stopped.");
-}
-
-process.on("SIGTERM", () => void handleShutdown("SIGTERM"));
-process.on("SIGINT", () => void handleShutdown("SIGINT"));
+installIngestionWorkerShutdown({
+  shutdown,
+  terminate: (code) => process.exit(code),
+  signals: process,
+});

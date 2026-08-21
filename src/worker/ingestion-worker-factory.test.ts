@@ -123,7 +123,7 @@ describe("createIngestionWorker", () => {
     expect(instances[0].options.concurrency).toBe(2);
   });
 
-  it("the worker handler passes a fresh abort signal and frozen attempt metadata", async () => {
+  it("passes a fresh signal as authenticated-delivery transport, not a legacy cancellation claim", async () => {
     const { Ctor, instances } = makeFakeWorkerCtor();
     const processor = makeSuccessProcessor();
     createIngestionWorker({ connection: fakeConnection, processor, WorkerCtor: Ctor });

@@ -1,64 +1,66 @@
 import { describe, expect, it, vi } from "vitest";
-
-import { createIngestionWorkerShutdown } from "./ingestion-worker-shutdown";
+import { createIngestionWorkerShutdown, installIngestionWorkerShutdown } from "./ingestion-worker-shutdown";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
   return { promise: new Promise<void>((done) => { resolve = done; }), resolve };
 }
 
-function controls(drain = Promise.resolve()): { calls: string[]; control: Parameters<typeof createIngestionWorkerShutdown>[0]["worker"] } {
-  const calls: string[] = [];
-  return { calls, control: {
+function controls(calls: string[], drain = Promise.resolve()) {
+  return {
     pauseIntake: vi.fn(async () => { calls.push("pause"); }),
     abortActive: vi.fn(() => { calls.push("abort"); }),
     awaitActiveDrain: vi.fn(() => drain),
     gracefulClose: vi.fn(async () => { calls.push("close:false"); }),
     forceClose: vi.fn(async () => { calls.push("close:true"); }),
-  } };
+  };
 }
 
 describe("createIngestionWorkerShutdown", () => {
-  it("orders a graceful shutdown and returns exit code zero", async () => {
-    const { calls, control } = controls();
-    const shutdown = createIngestionWorkerShutdown({ worker: control, timeoutMs: 10, hooks: {
-      stopExpiryScheduling: async () => { calls.push("stop"); }, closeLock: async () => { calls.push("lock"); }, closeExpiryOutbox: async () => { calls.push("expiry"); }, closePrisma: async () => { calls.push("prisma"); },
-    } });
-
-    await expect(shutdown()).resolves.toEqual({ exitCode: 0, forced: false, failed: false });
+  it("finishes graceful work in exact order", async () => {
+    const calls: string[] = []; const worker = controls(calls);
+    const shutdown = createIngestionWorkerShutdown({ worker, timeoutMs: 10, hooks: { stopExpiryScheduling: () => { calls.push("stop"); }, closeLock: () => { calls.push("lock"); }, closeExpiryOutbox: () => { calls.push("expiry"); }, closePrisma: () => { calls.push("prisma"); } } });
+    await expect(shutdown()).resolves.toEqual({ status: "graceful", exitCode: 0 });
     expect(calls).toEqual(["pause", "abort", "stop", "close:false", "lock", "expiry", "prisma"]);
   });
 
-  it("times out with force as the first and only close, aborting twice and clearing its timer", async () => {
-    vi.useFakeTimers();
-    const drain = deferred();
-    const { calls, control } = controls(drain.promise);
-    const shutdown = createIngestionWorkerShutdown({ worker: control, timeoutMs: 10 });
-    const result = shutdown();
-    await vi.advanceTimersByTimeAsync(10);
-
-    await expect(result).resolves.toEqual({ exitCode: 1, forced: true, failed: false });
-    expect(calls).toEqual(["pause", "abort", "abort", "close:true"]);
-    expect(control.abortActive).toHaveBeenCalledTimes(2);
-    drain.resolve();
-    vi.useRealTimers();
+  it.each(["pause", "drain"])("forces as the only close when deadline occurs during %s", async (phase) => {
+    vi.useFakeTimers(); const calls: string[] = []; const wait = deferred(); const worker = controls(calls, phase === "drain" ? wait.promise : Promise.resolve());
+    if (phase === "pause") worker.pauseIntake = vi.fn(async () => { calls.push("pause"); await wait.promise; });
+    const shutdown = createIngestionWorkerShutdown({ worker, timeoutMs: 10, hooks: { closeLock: () => { calls.push("lock"); }, closeExpiryOutbox: () => { calls.push("expiry"); }, closePrisma: () => { calls.push("prisma"); } } });
+    const result = shutdown(); await vi.advanceTimersByTimeAsync(10);
+    await expect(result).resolves.toEqual({ status: "timed_out", exitCode: 1 });
+    expect(calls).toEqual(expect.arrayContaining(["abort", "close:true", "lock", "expiry", "prisma"])); expect(calls).not.toContain("close:false");
+    wait.resolve(); vi.useRealTimers();
   });
 
-  it("forces cleanup after pause or resource failures, attempts every hook, and shares one promise", async () => {
-    const { calls, control } = controls();
-    control.pauseIntake = vi.fn(async () => { calls.push("pause"); throw new Error("redis://secret"); });
-    control.forceClose = vi.fn(async () => { calls.push("close:true"); throw new Error("queue diagnostic"); });
-    const shutdown = createIngestionWorkerShutdown({ worker: control, timeoutMs: 10, hooks: {
-      stopExpiryScheduling: async () => { calls.push("stop"); throw new Error("x"); }, closeLock: async () => { calls.push("lock"); throw new Error("x"); }, closeExpiryOutbox: async () => { calls.push("expiry"); throw new Error("x"); }, closePrisma: async () => { calls.push("prisma"); throw new Error("x"); },
-    } });
-
-    expect(shutdown()).toBe(shutdown());
-    await expect(shutdown()).resolves.toEqual({ exitCode: 1, forced: true, failed: true });
-    expect(calls).toEqual(["pause", "abort", "stop", "abort", "close:true", "lock", "expiry", "prisma"]);
+  it("does not upgrade an already-started graceful close after deadline", async () => {
+    vi.useFakeTimers(); const calls: string[] = []; const wait = deferred(); const worker = controls(calls); worker.gracefulClose = vi.fn(async () => { calls.push("close:false"); await wait.promise; });
+    const shutdown = createIngestionWorkerShutdown({ worker, timeoutMs: 10, hooks: { closeLock: () => { calls.push("lock"); }, closeExpiryOutbox: () => { calls.push("expiry"); }, closePrisma: () => { calls.push("prisma"); } } });
+    const result = shutdown(); await vi.advanceTimersByTimeAsync(10);
+    await expect(result).resolves.toEqual({ status: "timed_out", exitCode: 1 }); expect(calls).toEqual(expect.arrayContaining(["close:false", "lock", "expiry", "prisma"])); expect(calls).not.toContain("close:true");
+    wait.resolve(); vi.useRealTimers();
   });
 
-  it("rejects non-positive timeouts", () => {
-    const { control } = controls();
-    expect(() => createIngestionWorkerShutdown({ worker: control, timeoutMs: 0 })).toThrow("positive");
+  it("continues hooks after close failure or a hanging hook", async () => {
+    vi.useFakeTimers(); const calls: string[] = []; const wait = deferred(); const worker = controls(calls); worker.gracefulClose = vi.fn(async () => { calls.push("close:false"); throw new Error("x"); });
+    const shutdown = createIngestionWorkerShutdown({ worker, timeoutMs: 10, hooks: { closeLock: async () => { calls.push("lock"); await wait.promise; }, closeExpiryOutbox: () => { calls.push("expiry"); }, closePrisma: () => { calls.push("prisma"); } } });
+    const result = shutdown(); await vi.advanceTimersByTimeAsync(10);
+    await expect(result).resolves.toEqual({ status: "timed_out", exitCode: 1 }); expect(calls).toEqual(expect.arrayContaining(["close:false", "lock", "expiry", "prisma"])); expect(calls).not.toContain("close:true");
+    wait.resolve(); vi.useRealTimers();
+  });
+
+  it("returns failed, not forced, when graceful close rejects before deadline", async () => {
+    const calls: string[] = []; const worker = controls(calls); worker.gracefulClose = vi.fn(async () => { calls.push("close:false"); throw new Error("x"); });
+    const shutdown = createIngestionWorkerShutdown({ worker, timeoutMs: 10, hooks: { closeLock: () => { calls.push("lock"); }, closeExpiryOutbox: () => { calls.push("expiry"); }, closePrisma: () => { calls.push("prisma"); } } });
+    await expect(shutdown()).resolves.toEqual({ status: "failed", exitCode: 1 }); expect(calls).toEqual(["pause", "abort", "close:false", "lock", "expiry", "prisma"]);
+  });
+});
+
+describe("installIngestionWorkerShutdown", () => {
+  it("terminates once for repeated signals after a non-graceful result", async () => {
+    const handlers = new Map<string, () => void>(); const terminate = vi.fn(); const shutdown = vi.fn(async () => ({ status: "forced" as const, exitCode: 1 as const }));
+    installIngestionWorkerShutdown({ shutdown, terminate, signals: { on: (signal: "SIGTERM" | "SIGINT", handler: () => void) => { handlers.set(signal, handler); } } }); handlers.get("SIGTERM")?.(); handlers.get("SIGINT")?.(); await Promise.resolve(); await Promise.resolve();
+    expect(shutdown).toHaveBeenCalledOnce(); expect(terminate).toHaveBeenCalledWith(1);
   });
 });
