@@ -1,7 +1,10 @@
 import type { IngestionJob, IngestionResult } from "./queues";
 import type { InMemoryScheduledIngestionQueue } from "../app/api/scrape-runs/defaults";
+import type { AuthenticatedIngestionDeliveryAttempt } from "./authenticated-ingestion-delivery";
 
-export type InMemoryIngestionProcessor = (job: IngestionJob) => Promise<IngestionResult>;
+export type InMemoryIngestionProcessor = (job: IngestionJob & Readonly<{
+  deliveryAttempt?: AuthenticatedIngestionDeliveryAttempt;
+}>) => Promise<IngestionResult>;
 
 export type DrainResult = IngestionResult | { error: Error };
 
@@ -26,6 +29,21 @@ export interface CreateInMemoryIngestionConsumerOptions {
    * swallowed so recovery can never mask the original processor error.
    */
   onJobError?: (job: IngestionJob, error: Error) => Promise<void>;
+}
+
+const DRAIN_ERROR_MESSAGE = "In-memory ingestion job failed.";
+
+function readMaxAttempts(job: unknown): number | null {
+  try {
+    if (job === null || typeof job !== "object") return null;
+    const options = Object.getOwnPropertyDescriptor(job, "options");
+    if (!options || !options.enumerable || !("value" in options) || options.value === null || typeof options.value !== "object" || Array.isArray(options.value)) return null;
+    const attempts = Object.getOwnPropertyDescriptor(options.value, "attempts");
+    const maxAttempts = attempts === undefined ? 1 : attempts.enumerable && "value" in attempts ? attempts.value : null;
+    return Number.isSafeInteger(maxAttempts) && maxAttempts > 0 ? maxAttempts : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -53,26 +71,44 @@ export function createInMemoryIngestionConsumer(
       // prevent the remaining jobs from being processed.
       while (options.queue.jobs.length > 0) {
         const [pending] = options.queue.jobs.splice(0, 1);
+        const maxAttempts = readMaxAttempts(pending);
+        const fixedError = new Error(DRAIN_ERROR_MESSAGE);
 
-        try {
-          const result = await options.processor({ data: pending.data });
-          results.push(result);
-        } catch (error) {
-          const wrapped = error instanceof Error ? error : new Error(String(error));
-          // Recovery: the job has already been removed from the in-memory
-          // queue. If the processor threw before its own failure catch (for
-          // example `markRunning` rejecting), the scrape run would otherwise
-          // stay `queued` with no pending job. Give the caller a chance to
-          // mark it failed. Recovery failures are swallowed so they never
-          // mask the original processor error.
+        if (maxAttempts === null) {
           if (options.onJobError) {
             try {
-              await options.onJobError({ data: pending.data }, wrapped);
+              await options.onJobError({ data: pending.data }, fixedError);
             } catch {
-              // intentional: recovery must not mask the original error
+              // Recovery failures are bounded and must not escape the drain.
             }
           }
-          results.push({ error: wrapped });
+          results.push({ error: fixedError });
+          continue;
+        }
+
+        for (let attemptsMade = 0; attemptsMade < maxAttempts; attemptsMade += 1) {
+          try {
+            const result = await options.processor({
+              data: pending.data,
+              deliveryAttempt: Object.freeze({ attemptsMade, maxAttempts }),
+            });
+            results.push(result);
+            break;
+          } catch {
+            if (attemptsMade + 1 < maxAttempts) {
+              // Both retryable delivery failures and unknown failures use the
+              // stored queue retry budget; only the final failure terminalizes.
+              continue;
+            }
+            if (options.onJobError) {
+              try {
+                await options.onJobError({ data: pending.data }, fixedError);
+              } catch {
+                // Recovery failures are bounded and must not escape the drain.
+              }
+            }
+            results.push({ error: fixedError });
+          }
         }
       }
 
