@@ -96,26 +96,7 @@ export function createAuthenticatedIngestionPrecondition(
         run: async (authority) => {
           const execution = createScrapeTimeAutoLoginAuthenticationExecution({ runnerDependencies: dependencies.runnerDependencies, job: { data: job.data }, identity: invocation.identity });
           const heartbeat = createFixedDelayAuthenticationHeartbeatScheduler<unknown>({ delayMs: config.heartbeatMs, ...dependencies.heartbeat });
-          const controller = new AbortController();
-          const abort = () => controller.abort();
-          if (invocation.signal !== undefined) {
-            EventTarget.prototype.addEventListener.call(invocation.signal, "abort", abort, { once: true });
-            if (aborted(invocation.signal) !== false) abort();
-          }
-          try {
-            return await createAuthenticatedSessionMutationRunner({
-              execution: {
-                async execute({ fence, signal }) {
-                  EventTarget.prototype.addEventListener.call(signal, "abort", abort, { once: true });
-                  try { return aborted(controller.signal) === false ? execution.execute({ fence, signal: controller.signal }) : { status: "cancelled" }; }
-                  finally { EventTarget.prototype.removeEventListener.call(signal, "abort", abort); }
-                },
-              },
-              heartbeat,
-            }).run(authority);
-          } finally {
-            if (invocation.signal !== undefined) EventTarget.prototype.removeEventListener.call(invocation.signal, "abort", abort);
-          }
+          return createAuthenticatedSessionMutationRunner({ execution, heartbeat, ...(invocation.signal === undefined ? {} : { cancellationSignal: invocation.signal }) }).run(authority);
         },
       };
       const coordinatorInput: CoordinateAuthenticatedSessionStateInput = { identity: invocation.identity, ownerToken: invocation.ownerToken, leaseDurationMs: config.leaseMs, ...(invocation.signal === undefined ? {} : { signal: invocation.signal }) };

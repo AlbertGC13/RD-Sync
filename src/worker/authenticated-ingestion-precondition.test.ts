@@ -127,6 +127,7 @@ describe("createAuthenticatedIngestionPrecondition", () => {
     expect(() => createAuthenticatedIngestionPrecondition({ ...fixture.dependencies, env: { ...env, RD_SYNC_AUTHENTICATION_HEARTBEAT_MS: "60000" } })).toThrow("Invalid authentication heartbeat configuration.");
     expect(() => createAuthenticatedIngestionPrecondition({ ...fixture.dependencies, job: { data: { bankId: "popular", runId: "run-1", accountFingerprint: "fingerprint", expiredEventId: "legacy" } } })).toThrow("Invalid authenticated ingestion precondition configuration.");
     expect(source).toContain('completion: { mode: "attempt_only" }');
+    expect(source).toContain("cancellationSignal: invocation.signal"); expect(source).not.toContain("new AbortController");
     expect(source).not.toMatch(/BullMQ|Prisma|process\.env|createCoordinator|createExecution|createRunner/);
   });
 });
