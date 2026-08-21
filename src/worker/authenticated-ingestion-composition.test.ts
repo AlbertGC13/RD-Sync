@@ -64,11 +64,12 @@ describe("createAuthenticatedIngestionProcessor", () => {
     await expect(complete({ runId: "run-1", bankId: "popular", status, reason })).resolves.toEqual({ status, inserted: 0, skipped: 0 });
     expect(scrapeRuns[status === "failed" ? "markFailed" : "markNeedsAdminAction"]).toHaveBeenCalledExactlyOnceWith("run-1", summary, new Date("2026-08-21T00:00:00.000Z"));
     expect(auditSink.record).toHaveBeenCalledOnce();
-    expect(auditSink.record).toHaveBeenCalledWith(expect.objectContaining({ id: `authenticated-terminal:run-1:${status}:${reason}`, actorId: "system:ingestion-worker", actorRole: null, action, target: "scrape_run", targetId: "run-1", metadata: { stage: "precollection_authentication", reason, status, bankId: "popular" } }));
+    expect(auditSink.record).toHaveBeenCalledWith(expect.objectContaining({ id: expect.stringMatching(/^authenticated-terminal:v1:/), actorId: "system:ingestion-worker", actorRole: null, action, target: "scrape_run", targetId: "run-1", metadata: { stage: "precollection_authentication", reason, status, bankId: "popular" } }));
+    expect((auditSink.record.mock.calls[0]?.[0] as { id: string }).id).not.toMatch(/run-1|popular|invalid_authenticated_ingestion_delivery/);
     expect(adminAlerts.notifyIngestionAttention).toHaveBeenCalledExactlyOnceWith({ runId: "run-1", bankId: "popular", status, safeErrorSummary: summary });
   });
 
-  it("uses a fixed unknown alert bank and omits bank metadata when no descriptor-validated bank is available", async () => {
+  it("omits bank metadata and skips alerts when no descriptor-validated bank is available", async () => {
     const scrapeRuns = { markFailed: vi.fn(async () => {}), markNeedsAdminAction: vi.fn(async () => {}) };
     const auditSink = { record: vi.fn(async () => {}) };
     const adminAlerts = { notifyIngestionAttention: vi.fn(async () => {}) };
@@ -76,7 +77,8 @@ describe("createAuthenticatedIngestionProcessor", () => {
 
     await complete({ runId: "run-1", status: "failed", reason: "invalid_authenticated_ingestion_delivery" });
     expect(auditSink.record).toHaveBeenCalledWith(expect.objectContaining({ metadata: { stage: "precollection_authentication", reason: "invalid_authenticated_ingestion_delivery", status: "failed" } }));
-    expect(adminAlerts.notifyIngestionAttention).toHaveBeenCalledWith({ runId: "run-1", bankId: "unknown", status: "failed", safeErrorSummary: "Authenticated ingestion delivery failed" });
+    expect(adminAlerts.notifyIngestionAttention).not.toHaveBeenCalled();
+    expect(JSON.stringify({ audit: auditSink.record.mock.calls, alerts: adminAlerts.notifyIngestionAttention.mock.calls })).not.toContain("unknown");
   });
 
   it("keeps telemetry non-blocking and independent after exactly-once persistence", async () => {
@@ -100,7 +102,7 @@ describe("createAuthenticatedIngestionProcessor", () => {
     expect(auditSink.record).toHaveBeenCalledOnce(); expect(adminAlerts.notifyIngestionAttention).toHaveBeenCalledOnce();
   });
 
-  it("does not emit telemetry when terminal persistence fails and uses stable audit identity for redelivery", async () => {
+  it("does not emit telemetry when terminal persistence fails and redelivery repeats persistence and alert delivery", async () => {
     let persistenceFails = true;
     const scrapeRuns = { markFailed: vi.fn(async () => { if (persistenceFails) throw new Error("raw-persistence-sentinel"); }), markNeedsAdminAction: vi.fn(async () => {}) };
     const auditSink = { record: vi.fn<(event: { id: string }) => Promise<void>>(async () => {}) };
@@ -111,8 +113,21 @@ describe("createAuthenticatedIngestionProcessor", () => {
     await expect(complete(outcome)).rejects.toEqual(new AuthenticatedIngestionTerminalError());
     expect(auditSink.record).not.toHaveBeenCalled(); expect(adminAlerts.notifyIngestionAttention).not.toHaveBeenCalled();
     persistenceFails = false; await complete(outcome); await complete(outcome);
-    expect(auditSink.record.mock.calls.map(([event]) => (event as { id: string }).id)).toEqual(["authenticated-terminal:run-1:failed:invalid_authenticated_ingestion_delivery", "authenticated-terminal:run-1:failed:invalid_authenticated_ingestion_delivery"]);
+    expect(scrapeRuns.markFailed).toHaveBeenCalledTimes(3);
+    expect(auditSink.record.mock.calls.map(([event]) => (event as { id: string }).id)).toEqual([expect.stringMatching(/^authenticated-terminal:v1:/), expect.stringMatching(/^authenticated-terminal:v1:/)]);
+    expect((auditSink.record.mock.calls[0]?.[0] as { id: string }).id).toBe((auditSink.record.mock.calls[1]?.[0] as { id: string }).id);
     expect(adminAlerts.notifyIngestionAttention).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses collision-resistant opaque audit IDs for every terminal identity tuple", async () => {
+    const auditSink = { record: vi.fn<(event: { id: string }) => Promise<void>>(async () => {}) };
+    const complete = createAuthenticatedTerminalCompleter({ scrapeRuns: { markFailed: vi.fn(async () => {}), markNeedsAdminAction: vi.fn(async () => {}) }, auditSink });
+    const base = { runId: "run\ud800", bankId: "bank\ud800", status: "failed" as const, reason: "invalid_authenticated_ingestion_delivery" as const };
+
+    await complete(base); await complete(base); await complete({ ...base, bankId: "bank\ufffd" }); await complete({ ...base, runId: "run\ufffd" }); await complete({ ...base, status: "needs_admin_action", reason: "authentication_precondition_requires_review" });
+    const ids = auditSink.record.mock.calls.map(([event]) => (event as { id: string }).id);
+    expect(ids[0]).toBe(ids[1]); expect(new Set(ids.slice(0, 1).concat(ids.slice(2))).size).toBe(4);
+    expect(ids.join(" ")).not.toMatch(/bank|run|\ud800|\ufffd/);
   });
 
   it("composes the actual authenticated path once and reuses durable authentication on duplicate delivery", async () => {

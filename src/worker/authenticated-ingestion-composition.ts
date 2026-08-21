@@ -32,6 +32,17 @@ const terminalSummaries = {
   needs_admin_action: "Authenticated ingestion requires admin action",
 } as const;
 
+function auditIdentityPart(value: string | null): string {
+  if (value === null) return "n";
+  let codeUnits = "";
+  for (let index = 0; index < value.length; index += 1) codeUnits += value.charCodeAt(index).toString(16).padStart(4, "0");
+  return `s${value.length.toString(16)}-${codeUnits}`;
+}
+
+function terminalAuditId(runId: string, bankId: string | null, status: "failed" | "needs_admin_action", reason: string): string {
+  return `authenticated-terminal:v1:${[bankId, runId, status, reason].map(auditIdentityPart).join(":")}`;
+}
+
 export function createAuthenticatedTerminalCompleter(
   dependencies: TerminalDependencies,
 ): (outcome: AuthenticatedIngestionTerminalOutcome) => Promise<IngestionResult> {
@@ -47,7 +58,7 @@ export function createAuthenticatedTerminalCompleter(
     const safeBankId = typeof bankId === "string" && /\S/.test(bankId) ? bankId : undefined;
     try {
       await dependencies.auditSink?.record(createAuditEvent({
-        id: `authenticated-terminal:${runId}:${status}:${reason}`,
+        id: terminalAuditId(runId, safeBankId ?? null, status, reason),
         actorId: "system:ingestion-worker",
         actorRole: null,
         action: `scrape_run.${status}`,
@@ -58,10 +69,12 @@ export function createAuthenticatedTerminalCompleter(
     } catch {
       // Audit delivery cannot change the already-persisted terminal result.
     }
-    try {
-      await dependencies.adminAlerts?.notifyIngestionAttention({ runId, bankId: safeBankId ?? "unknown", status, safeErrorSummary: summary });
-    } catch {
-      // Alert delivery cannot change the already-persisted terminal result.
+    if (safeBankId !== undefined) {
+      try {
+        await dependencies.adminAlerts?.notifyIngestionAttention({ runId, bankId: safeBankId, status, safeErrorSummary: summary });
+      } catch {
+        // Alert delivery cannot change the already-persisted terminal result.
+      }
     }
     return { status, inserted: 0, skipped: 0 };
   };
