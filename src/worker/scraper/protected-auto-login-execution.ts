@@ -2,7 +2,7 @@ import { assertCdpLoopback } from "./browser-runtime";
 import type { BankAutoLoginAdminActionReason, BankAutoLoginOutcome, BankAutoLoginPage, BankAutoLoginStrategy } from "./auto-login";
 import { executeDurablyFencedAutoLogin } from "./durable-auto-login-mutation";
 import { isCredentialMutationFence, type CredentialMutationFence } from "./authenticated-session-mutation-runner";
-import type { StrictAutoLoginCredential } from "./strict-auto-login-credential-loader";
+import { isStrictAutoLoginCredential, type StrictAutoLoginCredential } from "./strict-auto-login-credential-loader";
 
 type Result = Readonly<{ status: "completed"; outcome: BankAutoLoginOutcome }> | Readonly<{ status: "blocked" | "throttled" | "browser_unavailable" | "structural_configuration" }>;
 type ReadyBrowser = Readonly<{ status: "ready"; page: BankAutoLoginPage; close(): Promise<void> }>;
@@ -26,26 +26,18 @@ const nonblank = (value: unknown): value is string => typeof value === "string" 
 const signalState = (signal: unknown): boolean | null => { try { return signal !== null && typeof signal === "object" && abortState ? abortState.call(signal) : null; } catch { return null; } };
 
 function validInput(input: Input): boolean {
-  const job = exact(input.job, ["bankCode", "runId", "accountFingerprint"]); const identity = exact(input.identity, ["bankCode", "runId", "attemptId"]); const credential = strictCredential(input.credential);
+  const job = exact(input.job, ["bankCode", "runId", "accountFingerprint"]); const identity = exact(input.identity, ["bankCode", "runId", "attemptId"]); const credential = input.credential;
   if (!job || !identity || !credential || ![job.bankCode, job.runId, job.accountFingerprint, identity.bankCode, identity.runId, identity.attemptId, credential.bankCode, credential.username, credential.password].every(nonblank)) return false;
-  if (!Object.isFrozen(input.job) || !Object.isFrozen(input.identity) || !Object.isFrozen(input.credential) || job.bankCode !== identity.bankCode || job.runId !== identity.runId || credential.bankCode !== job.bankCode) return false;
-  if (!isCredentialMutationFence(input.fence) || signalState(input.signal) !== false || typeof input.cdpUrl !== "string" || typeof input.ensureBrowser !== "function") return false;
-  const adapter = exact(input.adapter, ["bankCode", "createAutoLoginStrategy"]);
-  try { assertCdpLoopback(input.cdpUrl); } catch { return false; }
-  return !!adapter && Object.isFrozen(input.adapter) && adapter.bankCode === job.bankCode && typeof adapter.createAutoLoginStrategy === "function";
+  if (!Object.isFrozen(input.job) || !Object.isFrozen(input.identity) || !isStrictAutoLoginCredential(credential) || job.bankCode !== identity.bankCode || job.runId !== identity.runId || credential.bankCode !== job.bankCode) return false;
+  return isCredentialMutationFence(input.fence) && signalState(input.signal) === false;
 }
 
-function strictCredential(value: unknown): Record<string, unknown> | null {
-  const parsed = exact(value, ["bankCode", "username", "password"]);
-  if (parsed) return null;
-  try {
-    if (value === null || typeof value !== "object" || !Object.isFrozen(value)) return null;
-    const keys = Reflect.ownKeys(value); const descriptors = Object.getOwnPropertyDescriptors(value);
-    if (keys.length !== 4 || keys.filter((key) => typeof key === "string").length !== 3 || keys.filter((key) => typeof key === "symbol").length !== 1) return null;
-    const fields = ["bankCode", "username", "password"] as const;
-    if (fields.some((key) => !descriptors[key] || !descriptors[key].enumerable || !("value" in descriptors[key]))) return null;
-    return { bankCode: descriptors.bankCode.value, username: descriptors.username.value, password: descriptors.password.value };
-  } catch { return null; }
+function configuration(input: Input): boolean {
+  if (typeof input.cdpUrl !== "string" || typeof input.ensureBrowser !== "function") return false;
+  const job = exact(input.job, ["bankCode", "runId", "accountFingerprint"]);
+  const adapter = exact(input.adapter, ["bankCode", "createAutoLoginStrategy"]);
+  try { assertCdpLoopback(input.cdpUrl); } catch { return false; }
+  return !!job && !!adapter && Object.isFrozen(input.adapter) && adapter.bankCode === job.bankCode && typeof adapter.createAutoLoginStrategy === "function";
 }
 
 function safeOutcome(value: unknown): BankAutoLoginOutcome | null {
@@ -62,22 +54,30 @@ function ready(value: unknown): ReadyBrowser | null {
   try { return ["currentUrl", "hasVisibleSelector", "fill", "click"].every((key) => typeof (parsed.page as Record<string, unknown>)[key] === "function") && typeof (parsed.page as Record<string, unknown>).protectedStateDetectionWindowMs === "number" ? value as ReadyBrowser : null; } catch { return null; }
 }
 
+function durable(value: unknown): Readonly<{ status: "blocked" }> | Readonly<{ status: "completed"; outcome: unknown }> | null {
+  const blockedResult = exact(value, ["status"]); if (blockedResult?.status === "blocked") return { status: "blocked" };
+  const completed = exact(value, ["status", "outcome"]); return completed?.status === "completed" ? { status: "completed", outcome: completed.outcome } : null;
+}
+
 export function createProtectedAutoLoginExecution(input: unknown): Readonly<{ execute(): Promise<Result> }> {
   return Object.freeze({ async execute(): Promise<Result> {
     let opened: ReadyBrowser | null = null;
     try {
-      const candidate = input as Input;
-      if (!validInput(candidate)) return blocked();
-      let result: unknown;
-      try { result = await (candidate.ensureBrowser as (bankCode: string, cdpUrl: string) => Promise<unknown>)((candidate.job as { bankCode: string }).bankCode, candidate.cdpUrl); } catch { return fixed("browser_unavailable"); }
-      if (exact(result, ["status"])?.status === "throttled") return fixed("throttled");
-      opened = ready(result); if (!opened) return fixed("browser_unavailable");
+      const candidate = exact(input, ["job", "identity", "credential", "fence", "signal", "cdpUrl", "adapter", "ensureBrowser"]);
+      if (!candidate || !Object.isFrozen(input)) return blocked();
+      const parsed = candidate as Input;
+      if (!validInput(parsed)) return blocked();
+      if (!configuration(parsed)) return fixed("structural_configuration");
+      let browserResult: unknown;
+      try { browserResult = await (parsed.ensureBrowser as (bankCode: string, cdpUrl: string) => Promise<unknown>)((parsed.job as { bankCode: string }).bankCode, parsed.cdpUrl); } catch { return fixed("browser_unavailable"); }
+      if (exact(browserResult, ["status"])?.status === "throttled") return fixed("throttled");
+      opened = ready(browserResult); if (!opened) return fixed("browser_unavailable");
       let strategy: BankAutoLoginStrategy;
-      try { strategy = (candidate.adapter as { createAutoLoginStrategy(): BankAutoLoginStrategy }).createAutoLoginStrategy(); } catch { return fixed("structural_configuration"); }
-      if (!exact(strategy, ["bankCode", "autoLogin"]) || strategy.bankCode !== (candidate.job as { bankCode: string }).bankCode || typeof strategy.autoLogin !== "function") return fixed("structural_configuration");
-      const durable = await executeDurablyFencedAutoLogin({ strategy, credential: candidate.credential, page: opened.page, fence: candidate.fence, signal: candidate.signal });
-      if (durable.status !== "completed") return blocked();
-      const outcome = safeOutcome(durable.outcome);
+      try { strategy = (parsed.adapter as { createAutoLoginStrategy(): BankAutoLoginStrategy }).createAutoLoginStrategy(); } catch { return fixed("structural_configuration"); }
+      if (!exact(strategy, ["bankCode", "autoLogin"]) || strategy.bankCode !== (parsed.job as { bankCode: string }).bankCode || typeof strategy.autoLogin !== "function") return fixed("structural_configuration");
+      const durableResult = durable(await executeDurablyFencedAutoLogin({ strategy, credential: parsed.credential, page: opened.page, fence: parsed.fence, signal: parsed.signal }));
+      if (!durableResult || durableResult.status !== "completed") return blocked();
+      const outcome = safeOutcome(durableResult.outcome);
       return outcome ? Object.freeze({ status: "completed", outcome }) : blocked();
     } catch { return blocked(); }
     finally { if (opened) try { await opened.close(); } catch { /* Browser cleanup never changes the safe execution result. */ } }

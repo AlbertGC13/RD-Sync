@@ -3,11 +3,15 @@ import { decryptCredentialField, type AesGcmEnvelope } from "../../modules/bank-
 const BANK_CODE_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 const PINNED_KEY_VERSION_MISMATCH = "Pinned credential key version mismatch";
 const credentialBrand: unique symbol = Symbol("strict-auto-login-credential");
+const strictCredentials = new WeakSet<object>();
 
 type StructuralReason = "invalid_request" | "not_configured" | "inactive" | "bank_mismatch" | "invalid_record" | "version_mismatch" | "malformed_envelope" | "blank_plaintext";
 type TransientReason = "repository_unavailable" | "key_unavailable" | "decryption_failed" | "audit_unavailable";
 
 export type StrictAutoLoginCredential = Readonly<{ bankCode: string; username: string; password: string; readonly [credentialBrand]: true }>;
+export const isStrictAutoLoginCredential = (value: unknown): value is StrictAutoLoginCredential => {
+  try { return typeof value === "object" && value !== null && strictCredentials.has(value); } catch { return false; }
+};
 export type StrictAutoLoginCredentialLoadResult = Readonly<{ status: "loaded"; credential: StrictAutoLoginCredential }> | Readonly<{ status: "structural_unavailable"; reason: StructuralReason }> | Readonly<{ status: "transient_unavailable"; reason: TransientReason }>;
 export interface StrictAutoLoginCredentialLoader {
   load(bankCode: unknown): Promise<StrictAutoLoginCredentialLoadResult>;
@@ -85,7 +89,9 @@ export function createStrictAutoLoginCredentialLoader(dependencies: StrictAutoLo
       try { password = decryptField(passwordEnvelope, key); } catch { return transient("decryption_failed"); }
       if (!nonblank(password)) return structural("blank_plaintext");
       try { await recordDecryptUse(Object.freeze({ bankCode, keyVersion })); } catch { return transient("audit_unavailable"); }
-      return Object.freeze({ status: "loaded" as const, credential: Object.freeze({ bankCode, username, password, [credentialBrand]: true as const }) });
+      const credential = Object.freeze({ bankCode, username, password, [credentialBrand]: true as const });
+      strictCredentials.add(credential);
+      return Object.freeze({ status: "loaded" as const, credential });
     },
   });
 }

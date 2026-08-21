@@ -21,6 +21,7 @@ function dependencies(events: string[], overrides: Record<string, unknown> = {})
   const adapter = Object.freeze({ bankCode: "popular", createAutoLoginStrategy: vi.fn(() => ({ bankCode: "popular", autoLogin: async ({ page: wrapped }: { page: ReturnType<typeof page> }) => { await wrapped.fill("user", "user"); await wrapped.fill("password", "password"); await wrapped.click("submit"); return { status: "succeeded" as const }; } })) });
   return { ...Object.freeze({ job, identity, credential: undefined as unknown as StrictAutoLoginCredential, fence: undefined as unknown as CredentialMutationFence, signal: new AbortController().signal, cdpUrl: "http://127.0.0.1:9222", adapter, ensureBrowser }), ...overrides };
 }
+const input = (base: ReturnType<typeof dependencies>, credential: StrictAutoLoginCredential, fence: CredentialMutationFence, signal: AbortSignal, overrides: Record<string, unknown> = {}) => Object.freeze({ ...base, credential, fence, signal, ...overrides });
 function repository(): SessionAuthenticationAttemptRepository {
   const now = new Date(); const record = (phase = "no_credential_interaction", owner = true) => ({ identity, status: "active" as const, interactionPhase: phase as "no_credential_interaction" | "credentials_may_have_reached_portal" | "submit_may_have_been_dispatched", failureClass: null, operatorReason: null, retryCount: 0, ownerToken: owner ? "owner" : null, generation: 0n, leaseExpiresAt: owner ? now : null, terminalAt: null, createdAt: now, updatedAt: now }); let phase = "no_credential_interaction";
   return { findExact: async () => ({ status: "missing" }), getOrCreate: async () => ({ status: "created", record: record("no_credential_interaction", false) }), acquireLease: async () => ({ status: "lease_acquired", owner: { identity, ownerToken: "owner", generation: 0n }, record: record() }), reconcileExpiredLease: async () => ({ status: "missing" }), renewLease: async () => ({ status: "lease_renewed", record: record(phase) }), beginCredentialInteraction: async () => { phase = "credentials_may_have_reached_portal"; return { status: "interaction_started", record: record(phase) }; }, recordSubmitBarrier: async () => { phase = "submit_may_have_been_dispatched"; return { status: "recorded", record: record(phase) }; }, claimRetry: async () => ({ status: "retry_claimed", retryCount: 1, record: { ...record(phase, false), generation: 1n, retryCount: 1 } }), completeAuthenticated: async () => ({ status: "authenticated", record: { ...record(phase, false), status: "authenticated" as const, generation: 1n, terminalAt: now } }), completeFailed: async () => ({ status: "failed", record: { ...record(phase, false), status: "failed" as const, generation: 1n, terminalAt: now, failureClass: "unclassified_failure", operatorReason: "authentication_attempt_requires_review" } }) } as unknown as SessionAuthenticationAttemptRepository;
@@ -35,45 +36,68 @@ describe("createProtectedAutoLoginExecution", () => {
   it("fails closed before opening for malformed, mismatched, forged, consumed, proxy, pre-aborted, adapter, and CDP inputs", async () => {
     const events: string[] = []; const base = dependencies(events); const goodCredential = await credential();
     for (const change of [{ job: { ...job, runId: "other" } }, { identity: { ...identity, bankCode: "other" } }, { credential: Object.freeze({ ...goodCredential, bankCode: "other" }) }, { fence: {} }, { signal: new Proxy(new AbortController().signal, {}) }, { signal: (() => { const c = new AbortController(); c.abort(); return c.signal; })() }, { adapter: { bankCode: "other", createAutoLoginStrategy() {} } }, { cdpUrl: "https://bank.example" }]) {
-      await expect(createProtectedAutoLoginExecution({ ...base, credential: goodCredential, ...change }).execute()).resolves.toEqual({ status: "blocked" });
+      await expect(createProtectedAutoLoginExecution(input(base, goodCredential, base.fence, base.signal, change)).execute()).resolves.toEqual({ status: "blocked" });
     }
     expect(base.ensureBrowser).not.toHaveBeenCalled();
   });
   it("contains browser failures and validates exact throttled and ready resources", async () => {
     for (const response of ["throw", { status: "throttled", extra: true }, { status: "ready", page: page([]), close: async () => undefined, extra: true }]) {
       const events: string[] = []; const base = dependencies(events, { ensureBrowser: async () => { if (response === "throw") throw new Error("password=secret"); return response; } });
-      await withFence(async (fence, signal) => createProtectedAutoLoginExecution({ ...base, credential: await credential(), fence, signal }).execute());
+      await withFence(async (fence, signal) => createProtectedAutoLoginExecution(input(base, await credential(), fence, signal)).execute());
       expect(events).toEqual([]);
     }
   });
   it("returns only the bounded throttled result for an exact browser throttle", async () => {
     const base = dependencies([], { ensureBrowser: async () => ({ status: "throttled" }) }); let output: unknown;
-    await withFence(async (fence, signal) => { output = await createProtectedAutoLoginExecution({ ...base, credential: await credential(), fence, signal }).execute(); return output; });
+    await withFence(async (fence, signal) => { output = await createProtectedAutoLoginExecution(input(base, await credential(), fence, signal)).execute(); return output; });
     expect(output).toEqual({ status: "throttled" });
   });
   it("executes once through the real durable fence with the exact signal and closes its ready browser once", async () => {
     const events: string[] = []; const base = dependencies(events);
-    const result = await withFence(async (fence, signal) => createProtectedAutoLoginExecution({ ...base, credential: await credential(), fence, signal }).execute());
+    const result = await withFence(async (fence, signal) => createProtectedAutoLoginExecution(input(base, await credential(), fence, signal)).execute());
     expect([result, base.adapter.createAutoLoginStrategy.mock.calls.length, events]).toEqual([{ status: "authenticated" }, 1, ["fill:user", "fill:password", "click:submit", "close"]]);
   });
   it("blocks malformed or secret-bearing durable outcomes and strategy or close failures without leaking values", async () => {
     const events: string[] = []; const base = dependencies(events, { adapter: Object.freeze({ bankCode: "popular", createAutoLoginStrategy: () => { throw new Error("token=secret"); } }) });
-    let output: unknown; await withFence(async (fence, signal) => { output = await createProtectedAutoLoginExecution({ ...base, credential: await credential(), fence, signal }).execute(); return output; });
+    let output: unknown; await withFence(async (fence, signal) => { output = await createProtectedAutoLoginExecution(input(base, await credential(), fence, signal)).execute(); return output; });
     expect([output, JSON.stringify(output), events]).toEqual([{ status: "structural_configuration" }, "{\"status\":\"structural_configuration\"}", ["close"]]);
   });
   it("swallows a throwing close without changing its validated result", async () => {
     const events: string[] = []; const base = dependencies(events); const opened = await base.ensureBrowser(); opened.close = async () => { throw new Error("token=secret"); };
-    let output: unknown; await withFence(async (fence, signal) => { output = await createProtectedAutoLoginExecution({ ...base, credential: await credential(), fence, signal }).execute(); return output; });
+    let output: unknown; await withFence(async (fence, signal) => { output = await createProtectedAutoLoginExecution(input(base, await credential(), fence, signal)).execute(); return output; });
     expect([output, JSON.stringify(output)]).toEqual([{ status: "completed", outcome: { status: "succeeded" } }, "{\"status\":\"completed\",\"outcome\":{\"status\":\"succeeded\"}}"]);
   });
   it.each(["before", "between", "submit"])("uses the real durable wrapper to stop raw mutations when external loss arrives %s", async (at) => {
     const events: string[] = []; const cancellation = new AbortController(); const base = dependencies(events, { adapter: Object.freeze({ bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin: async ({ page: wrapped }: { page: ReturnType<typeof page> }) => { if (at === "before") cancellation.abort(); try { await wrapped.fill("user", "user"); if (at === "between") cancellation.abort(); await wrapped.fill("password", "password"); if (at === "submit") cancellation.abort(); await wrapped.click("submit"); } catch {} return { status: "succeeded" as const }; } }) }) });
-    await withFence(async (fence, signal) => createProtectedAutoLoginExecution({ ...base, credential: await credential(), fence, signal }).execute(), cancellation.signal);
+    await withFence(async (fence, signal) => createProtectedAutoLoginExecution(input(base, await credential(), fence, signal)).execute(), cancellation.signal);
     expect(events.filter((event) => event.startsWith("fill") || event.startsWith("click"))).toEqual(at === "before" ? [] : at === "between" ? ["fill:user"] : ["fill:user", "fill:password"]);
   });
   it("has no legacy activation, lock, decrypt, repository, audit, or breaker dependency", async () => {
     const source = await readFile(new URL("./protected-auto-login-execution.ts", import.meta.url), "utf8");
     expect(source).not.toMatch(/bank-auto-login-lock|credential.*(?:repository|crypto)|decrypt|legacy.*(?:runner|trigger)|audit|breaker/i);
     expect(source).not.toMatch(/executeScrapeTimeAutoLoginAuthenticationAttempt|createScrapeTimeAutoLoginAuthenticationExecution/);
+  });
+  it("rejects forged credential provenance and malformed frozen outer inputs before opening", async () => {
+    const events: string[] = []; const base = dependencies(events); const genuine = await credential(); const forged = Object.freeze({ bankCode: "popular", username: genuine.username, password: genuine.password, [Symbol("brand")]: true }) as StrictAutoLoginCredential;
+    for (const value of [input(base, forged, {} as CredentialMutationFence, new AbortController().signal), { ...input(base, genuine, {} as CredentialMutationFence, new AbortController().signal) }, Object.freeze({ ...input(base, genuine, {} as CredentialMutationFence, new AbortController().signal), extra: true }), Object.freeze(Object.defineProperty({ ...input(base, genuine, {} as CredentialMutationFence, new AbortController().signal) }, "job", { enumerable: true, get() { throw new Error("secret"); } })), new Proxy(input(base, genuine, {} as CredentialMutationFence, new AbortController().signal), {})]) await expect(createProtectedAutoLoginExecution(value).execute()).resolves.toEqual({ status: "blocked" });
+    expect(base.ensureBrowser).not.toHaveBeenCalled();
+    let output: unknown; await withFence(async (fence, signal) => { output = await createProtectedAutoLoginExecution(input(base, forged, fence, signal)).execute(); return output; });
+    expect([output, base.ensureBrowser.mock.calls.length]).toEqual([{ status: "blocked" }, 0]);
+  });
+  it("classifies valid-authority configuration defects before opening, except strategy construction after ready", async () => {
+    const events: string[] = []; const base = dependencies(events); let output: unknown;
+    await withFence(async (fence, signal) => { output = await createProtectedAutoLoginExecution(input(base, await credential(), fence, signal, { cdpUrl: "https://bank.example" })).execute(); return output; });
+    expect([output, base.ensureBrowser.mock.calls.length]).toEqual([{ status: "structural_configuration" }, 0]);
+    const ready = dependencies(events, { adapter: Object.freeze({ bankCode: "popular", createAutoLoginStrategy() { throw new Error("secret"); } }) });
+    await withFence(async (fence, signal) => createProtectedAutoLoginExecution(input(ready, await credential(), fence, signal)).execute());
+    expect(events).toContain("close");
+    const mismatched = dependencies([], { adapter: Object.freeze({ bankCode: "other", createAutoLoginStrategy() {} }) });
+    await withFence(async (fence, signal) => { output = await createProtectedAutoLoginExecution(input(mismatched, await credential(), fence, signal)).execute(); return output; });
+    expect([output, mismatched.ensureBrowser.mock.calls.length]).toEqual([{ status: "structural_configuration" }, 0]);
+  });
+  it("blocks an extra secret-bearing strategy outcome after closing the ready browser", async () => {
+    const events: string[] = []; const base = dependencies(events, { adapter: Object.freeze({ bankCode: "popular", createAutoLoginStrategy: () => ({ bankCode: "popular", autoLogin: async () => ({ status: "succeeded", password: "secret" }) }) }) }); let output: unknown;
+    await withFence(async (fence, signal) => { output = await createProtectedAutoLoginExecution(input(base, await credential(), fence, signal)).execute(); return output; });
+    expect([output, JSON.stringify(output), events]).toEqual([{ status: "blocked" }, "{\"status\":\"blocked\"}", ["close"]]);
   });
 });
