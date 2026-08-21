@@ -24,6 +24,7 @@ export class AuthenticatedIngestionTerminalError extends Error { constructor() {
 
 const isNonblank = (value: unknown): value is string => typeof value === "string" && /\S/.test(value);
 const operatorReasons: readonly OperatorReason[] = ["temporary_authentication_problem", "protected_authentication_step_detected", "bank_login_configuration_requires_review", "authentication_attempt_requires_review", "identity_conflict", "restoration_state_conflict"];
+const readNativeAbortSignal = Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get;
 
 function exact(value: unknown, keys: readonly string[]): Record<string, unknown> | null {
   if (value === null || typeof value !== "object" || Array.isArray(value) || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) return null;
@@ -45,8 +46,11 @@ function safeRunId(value: unknown): string | null {
 
 function signal(value: unknown): AbortSignal | null | undefined {
   if (value === undefined) return undefined;
-  if (value === null || typeof value !== "object" || !AbortSignal.prototype.isPrototypeOf(value)) return null;
-  try { void (value as AbortSignal).aborted; return value as AbortSignal; } catch { return null; }
+  try { return value !== null && typeof value === "object" && readNativeAbortSignal?.call(value) !== undefined ? value as AbortSignal : null; } catch { return null; }
+}
+
+function aborted(value: AbortSignal): boolean | null {
+  try { return readNativeAbortSignal?.call(value) ?? null; } catch { return null; }
 }
 
 function parseData(value: unknown): Readonly<{ kind: "v1"; data: IngestionData; identity: Identity }> | Readonly<{ kind: "legacy"; data: IngestionData }> | null {
@@ -85,7 +89,10 @@ export function createAuthenticatedIngestionDeliveryProcessor<TResult>(dependenc
       const ownerToken = dependencies.createOwnerToken();
       decision = isNonblank(ownerToken) ? preconditionDecision(await dependencies.authenticate({ identity: parsed.identity, ownerToken, job: { data: parsed.data }, ...(jobSignal === undefined ? {} : { signal: jobSignal }) })) : "authentication_precondition_requires_review";
     } catch { decision = "authentication_precondition_requires_review"; }
-    if (decision === "authenticated") return dependencies.downstream({ data: parsed.data });
+    if (decision === "authenticated") {
+      if (jobSignal !== undefined && aborted(jobSignal) !== false) throw new AuthenticatedIngestionRetryError("cancelled");
+      return dependencies.downstream({ data: parsed.data });
+    }
     if (decision === "retry_delivery" || decision === "in_progress" || decision === "cancelled") throw new AuthenticatedIngestionRetryError(decision);
     return complete({ runId: parsed.data.runId, status: decision === "invalid_authenticated_ingestion_precondition" ? "failed" : "needs_admin_action", reason: decision });
   };

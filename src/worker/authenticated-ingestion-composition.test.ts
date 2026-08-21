@@ -76,6 +76,13 @@ describe("createAuthenticatedIngestionProcessor", () => {
     expect(f.runnerDependencies.credentials.findByBankCode).not.toHaveBeenCalled(); expect(f.collect).not.toHaveBeenCalled();
   });
 
+  it("does not let an aborted delivery signal affect the next fresh delivery", async () => {
+    const f = fixture(); const controller = new AbortController(); controller.abort();
+    await expect(f.processor({ ...payload(), signal: controller.signal })).rejects.toEqual(new AuthenticatedIngestionRetryError("cancelled"));
+    await expect(f.processor(payload())).resolves.toEqual({ status: "succeeded", inserted: 0, skipped: 0 });
+    expect(f.page.fill).toHaveBeenCalledOnce(); expect(f.collect).toHaveBeenCalledOnce();
+  });
+
   it("does not authenticate or collect when cancellation arrives during a session check", async () => {
     let resolve!: (result: unknown) => void;
     const pending = new Promise<unknown>((done) => { resolve = done; });

@@ -50,6 +50,27 @@ describe("createAuthenticatedIngestionDeliveryProcessor", () => {
     expect(authenticate).not.toHaveBeenCalled(); expect(complete).toHaveBeenCalledWith(expect.objectContaining({ status: "failed" })); expect(JSON.stringify(complete.mock.calls)).not.toContain("raw-signal-sentinel");
   });
 
+  it("rejects a non-throwing AbortSignal prototype spoof without invoking authentication", async () => {
+    const spoof = Object.create(AbortSignal.prototype); Object.defineProperty(spoof, "aborted", { value: false });
+    const { processor, authenticate, downstream, complete } = setup();
+    await processor({ data: payload(), signal: spoof } as never);
+    expect(authenticate).not.toHaveBeenCalled(); expect(downstream).not.toHaveBeenCalled(); expect(complete).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a proxied native signal without triggering its traps", async () => {
+    const controller = new AbortController(); const signal = new Proxy(controller.signal, { get() { throw new Error("raw-proxy-sentinel"); } });
+    const { processor, authenticate, downstream, complete } = setup();
+    await processor({ data: payload(), signal } as never);
+    expect(authenticate).not.toHaveBeenCalled(); expect(downstream).not.toHaveBeenCalled(); expect(JSON.stringify(complete.mock.calls)).not.toContain("raw-proxy-sentinel");
+  });
+
+  it("rechecks cancellation after authenticated precondition before collection", async () => {
+    const controller = new AbortController(); const downstream = vi.fn(async () => result); const complete = vi.fn(async () => result);
+    const processor = createAuthenticatedIngestionDeliveryProcessor({ authenticate: async () => { controller.abort(); return { status: "authenticated" }; }, downstream, complete, createOwnerToken: () => "owner" });
+    await expect(processor({ data: payload(), signal: controller.signal })).rejects.toEqual(new AuthenticatedIngestionRetryError("cancelled"));
+    expect(downstream).not.toHaveBeenCalled(); expect(complete).not.toHaveBeenCalled();
+  });
+
   it.each([{ runId: "run-1", bankId: "popular", accountFingerprint: "fingerprint-1" }, { runId: "run-1", bankId: "popular", accountFingerprint: "fingerprint-1", expiredEventId: "expired-1" }])("completes legacy payloads safely", async (data) => {
     const { processor, authenticate, downstream, complete } = setup();
     await expect(processor({ data })).resolves.toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
