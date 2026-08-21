@@ -6,7 +6,7 @@ type Identity = Readonly<{ bankCode: string; runId: string; attemptId: string }>
 type OperatorReason = "temporary_authentication_problem" | "protected_authentication_step_detected" | "bank_login_configuration_requires_review" | "authentication_attempt_requires_review" | "identity_conflict" | "restoration_state_conflict";
 type TerminalReason = OperatorReason | "legacy_authenticated_ingestion_delivery" | "invalid_authenticated_ingestion_delivery" | "invalid_authenticated_ingestion_precondition" | "authentication_precondition_requires_review";
 
-export type AuthenticatedIngestionTerminalOutcome = Readonly<{ runId: string; status: "needs_admin_action" | "failed"; reason: TerminalReason }>;
+export type AuthenticatedIngestionTerminalOutcome = Readonly<{ runId: string; bankId?: string; status: "needs_admin_action" | "failed"; reason: TerminalReason }>;
 export type AuthenticatedIngestionAuthenticationInput = Readonly<{ identity: Identity; ownerToken: string; job: Readonly<{ data: IngestionData }>; signal?: AbortSignal }>;
 export type AuthenticatedIngestionDeliveryDependencies<TResult> = Readonly<{
   authenticate: (input: AuthenticatedIngestionAuthenticationInput) => Promise<AuthenticatedSessionPreconditionResult>;
@@ -82,8 +82,8 @@ export function createAuthenticatedIngestionDeliveryProcessor<TResult>(dependenc
       if (!runId) throw new AuthenticatedIngestionInvalidJobError();
       return complete({ runId, status: "failed", reason: "invalid_authenticated_ingestion_delivery" });
     }
-    if (parsed.kind === "legacy") return complete({ runId: parsed.data.runId, status: "needs_admin_action", reason: "legacy_authenticated_ingestion_delivery" });
-    if (jobSignal === null) return complete({ runId: parsed.data.runId, status: "failed", reason: "invalid_authenticated_ingestion_delivery" });
+    if (parsed.kind === "legacy") return complete({ runId: parsed.data.runId, bankId: parsed.data.bankId, status: "needs_admin_action", reason: "legacy_authenticated_ingestion_delivery" });
+    if (jobSignal === null) return complete({ runId: parsed.data.runId, bankId: parsed.data.bankId, status: "failed", reason: "invalid_authenticated_ingestion_delivery" });
     let decision: ReturnType<typeof preconditionDecision>;
     try {
       const ownerToken = dependencies.createOwnerToken();
@@ -94,6 +94,6 @@ export function createAuthenticatedIngestionDeliveryProcessor<TResult>(dependenc
       return dependencies.downstream({ data: parsed.data });
     }
     if (decision === "retry_delivery" || decision === "in_progress" || decision === "cancelled") throw new AuthenticatedIngestionRetryError(decision);
-    return complete({ runId: parsed.data.runId, status: decision === "invalid_authenticated_ingestion_precondition" ? "failed" : "needs_admin_action", reason: decision });
+    return complete({ runId: parsed.data.runId, bankId: parsed.data.bankId, status: decision === "invalid_authenticated_ingestion_precondition" ? "failed" : "needs_admin_action", reason: decision });
   };
 }
