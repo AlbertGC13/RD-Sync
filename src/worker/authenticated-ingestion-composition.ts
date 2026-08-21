@@ -1,6 +1,6 @@
 import type { AuthenticatedSessionCoordinatorDependencies } from "../modules/bank-sessions/ensure-authenticated-session";
 import { createAuditEvent } from "../modules/audit";
-import { createAuthenticatedIngestionDeliveryProcessor, AuthenticatedIngestionTerminalError, type AuthenticatedIngestionTerminalOutcome } from "./authenticated-ingestion-delivery";
+import { createAuthenticatedIngestionDeliveryProcessor, AuthenticatedIngestionTerminalError, isAuthenticatedIngestionRetryError, readAuthenticatedIngestionDeliveryContext, type AuthenticatedIngestionDeliveryJob, type AuthenticatedIngestionTerminalOutcome } from "./authenticated-ingestion-delivery";
 import { createAuthenticatedIngestionPrecondition } from "./authenticated-ingestion-precondition";
 import { createCollectionIngestionProcessor, type CollectionIngestionProcessorDependencies } from "./collection-ingestion-processor";
 import type { IngestionResult } from "./queues";
@@ -48,13 +48,13 @@ export function createAuthenticatedTerminalCompleter(
 ): (outcome: AuthenticatedIngestionTerminalOutcome) => Promise<IngestionResult> {
   const now = dependencies.now ?? (() => new Date());
   return async ({ runId, bankId, status, reason }) => {
+    const summary = reason === "authenticated_ingestion_retry_exhausted" ? "Authenticated ingestion delivery retries exhausted" : terminalSummaries[status];
     try {
       if (status === "failed") await dependencies.scrapeRuns.markFailed(runId, terminalSummaries.failed, now());
-      else await dependencies.scrapeRuns.markNeedsAdminAction(runId, terminalSummaries.needs_admin_action, now());
+      else await dependencies.scrapeRuns.markNeedsAdminAction(runId, summary, now());
     } catch {
       throw new AuthenticatedIngestionTerminalError();
     }
-    const summary = terminalSummaries[status];
     const safeBankId = typeof bankId === "string" && /\S/.test(bankId) ? bankId : undefined;
     try {
       await dependencies.auditSink?.record(createAuditEvent({
@@ -82,12 +82,12 @@ export function createAuthenticatedTerminalCompleter(
 
 export function createAuthenticatedIngestionProcessor(
   dependencies: AuthenticatedIngestionProcessorDependencies,
-): (job: Readonly<{ data: unknown; signal?: AbortSignal }>) => Promise<IngestionResult> {
+): (job: AuthenticatedIngestionDeliveryJob) => Promise<IngestionResult> {
   resolveAuthenticationHeartbeatConfig(dependencies.env);
   const probe = createAuthenticatedSessionProbe({ popularSessionChecker: dependencies.popularSessionChecker });
   const downstream = createCollectionIngestionProcessor(dependencies);
   const complete = createAuthenticatedTerminalCompleter(dependencies);
-  return createAuthenticatedIngestionDeliveryProcessor({
+  const delivery = createAuthenticatedIngestionDeliveryProcessor({
     authenticate: async ({ identity, ownerToken, job, signal }) => createAuthenticatedIngestionPrecondition({
       env: dependencies.env,
       coordinatorDependencies: { attempts: dependencies.attempts, probe },
@@ -99,4 +99,14 @@ export function createAuthenticatedIngestionProcessor(
     complete,
     createOwnerToken: dependencies.createOwnerToken,
   });
+  return async (job) => {
+    try {
+      return await delivery(job);
+    } catch (error) {
+      if (!isAuthenticatedIngestionRetryError(error)) throw error;
+      const context = readAuthenticatedIngestionDeliveryContext(job);
+      if (context === null || context.deliveryAttempt.attemptsMade + 1 < context.deliveryAttempt.maxAttempts) throw error;
+      return complete({ runId: context.data.runId, bankId: context.data.bankId, status: "needs_admin_action", reason: "authenticated_ingestion_retry_exhausted" });
+    }
+  };
 }

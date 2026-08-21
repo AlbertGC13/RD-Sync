@@ -7,6 +7,7 @@ import {
   AuthenticatedIngestionRetryError,
   AuthenticatedIngestionTerminalError,
   createAuthenticatedIngestionDeliveryProcessor,
+  isAuthenticatedIngestionRetryError,
 } from "./authenticated-ingestion-delivery";
 
 const payload = () => ({ runId: "run-1", bankId: "popular", accountFingerprint: "fingerprint-1", authentication: { version: 1, attemptId: "attempt-1" } });
@@ -20,6 +21,20 @@ const setup = (precondition: unknown = { status: "authenticated" }, terminalResu
 };
 
 describe("createAuthenticatedIngestionDeliveryProcessor", () => {
+  it("recognizes only retry errors constructed by the authentic constructor", () => {
+    class RetrySubclass extends AuthenticatedIngestionRetryError {}
+    const genuine = new AuthenticatedIngestionRetryError("retry_delivery");
+    const prototypeSpoof = Object.create(AuthenticatedIngestionRetryError.prototype);
+    const duckSpoof = { name: "AuthenticatedIngestionRetryError", message: "Authenticated ingestion delivery must be retried.", reason: "retry_delivery" };
+
+    expect(isAuthenticatedIngestionRetryError(genuine)).toBe(true);
+    expect(isAuthenticatedIngestionRetryError(new RetrySubclass("in_progress"))).toBe(true);
+    expect(isAuthenticatedIngestionRetryError(new AuthenticatedIngestionRetryError("cancelled"))).toBe(true);
+    expect(isAuthenticatedIngestionRetryError(prototypeSpoof)).toBe(false);
+    expect(isAuthenticatedIngestionRetryError(duckSpoof)).toBe(false);
+    expect(isAuthenticatedIngestionRetryError(new Proxy(genuine, {}))).toBe(false);
+    expect(JSON.stringify(genuine)).not.toContain("WeakSet");
+  });
   it("passes the queued durable identity to authentication, strips its wrapper, and delegates once", async () => {
     const { processor, authenticate, downstream, complete } = setup();
     await expect(processor({ data: payload() })).resolves.toEqual(result);
@@ -41,6 +56,19 @@ describe("createAuthenticatedIngestionDeliveryProcessor", () => {
     const controller = new AbortController(); const { processor, authenticate } = setup();
     await processor({ data: payload(), signal: controller.signal } as never);
     expect(authenticate).toHaveBeenCalledWith(expect.objectContaining({ signal: controller.signal }));
+  });
+
+  it.each([
+    Object.defineProperty({ attemptsMade: 0, maxAttempts: 1 }, "hidden", { value: true }),
+    Object.assign({ attemptsMade: 0, maxAttempts: 1 }, { [Symbol("unexpected")]: true }),
+    Object.defineProperty({ maxAttempts: 1 }, "attemptsMade", { enumerable: true, get: () => { throw new Error("raw-attempt-sentinel"); } }),
+    { attemptsMade: 1, maxAttempts: 1 },
+  ])("fails closed for forged ephemeral delivery attempts without invoking their accessors", async (deliveryAttempt) => {
+    const { processor, authenticate, downstream, complete } = setup();
+    await processor({ data: payload(), deliveryAttempt } as never);
+    expect(authenticate).not.toHaveBeenCalled(); expect(downstream).not.toHaveBeenCalled();
+    expect(complete).toHaveBeenCalledWith({ runId: "run-1", bankId: "popular", status: "failed", reason: "invalid_authenticated_ingestion_delivery" });
+    expect(JSON.stringify(complete.mock.calls)).not.toContain("raw-attempt-sentinel");
   });
 
   it("fails closed for a hostile signal accessor without exposing it to authentication", async () => {

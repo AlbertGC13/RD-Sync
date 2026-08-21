@@ -1,10 +1,12 @@
 import type { AuthenticatedSessionPreconditionResult } from "../modules/bank-sessions/authenticated-session-precondition";
 
-type DeliveryJob = Readonly<{ data: unknown; signal?: AbortSignal }>;
 export type IngestionData = Readonly<{ runId: string; bankId: string; accountFingerprint: string }>;
+export type AuthenticatedIngestionDeliveryAttempt = Readonly<{ attemptsMade: number; maxAttempts: number }>;
+export type AuthenticatedIngestionDeliveryJob = Readonly<{ data: unknown; signal?: AbortSignal; deliveryAttempt?: AuthenticatedIngestionDeliveryAttempt }>;
+type DeliveryJob = AuthenticatedIngestionDeliveryJob;
 type Identity = Readonly<{ bankCode: string; runId: string; attemptId: string }>;
 type OperatorReason = "temporary_authentication_problem" | "protected_authentication_step_detected" | "bank_login_configuration_requires_review" | "authentication_attempt_requires_review" | "identity_conflict" | "restoration_state_conflict";
-type TerminalReason = OperatorReason | "legacy_authenticated_ingestion_delivery" | "invalid_authenticated_ingestion_delivery" | "invalid_authenticated_ingestion_precondition" | "authentication_precondition_requires_review" | "authenticated_ingestion_disabled";
+type TerminalReason = OperatorReason | "legacy_authenticated_ingestion_delivery" | "invalid_authenticated_ingestion_delivery" | "invalid_authenticated_ingestion_precondition" | "authentication_precondition_requires_review" | "authenticated_ingestion_disabled" | "authenticated_ingestion_retry_exhausted";
 
 export type AuthenticatedIngestionTerminalOutcome = Readonly<{ runId: string; bankId?: string; status: "needs_admin_action" | "failed"; reason: TerminalReason }>;
 export type AuthenticatedIngestionAuthenticationInput = Readonly<{ identity: Identity; ownerToken: string; job: Readonly<{ data: IngestionData }>; signal?: AbortSignal }>;
@@ -15,9 +17,14 @@ export type AuthenticatedIngestionDeliveryDependencies<TResult> = Readonly<{
   createOwnerToken: () => string;
 }>;
 
+const authenticatedIngestionRetryErrors = new WeakSet<object>();
+
 export class AuthenticatedIngestionRetryError extends Error {
   readonly reason: "retry_delivery" | "in_progress" | "cancelled";
-  constructor(reason: "retry_delivery" | "in_progress" | "cancelled") { super("Authenticated ingestion delivery must be retried."); this.name = "AuthenticatedIngestionRetryError"; this.reason = reason; }
+  constructor(reason: "retry_delivery" | "in_progress" | "cancelled") { super("Authenticated ingestion delivery must be retried."); this.name = "AuthenticatedIngestionRetryError"; this.reason = reason; authenticatedIngestionRetryErrors.add(this); }
+}
+export function isAuthenticatedIngestionRetryError(value: unknown): value is AuthenticatedIngestionRetryError {
+  return typeof value === "object" && value !== null && authenticatedIngestionRetryErrors.has(value);
 }
 export class AuthenticatedIngestionInvalidJobError extends Error { constructor() { super("Invalid authenticated ingestion delivery job."); this.name = "AuthenticatedIngestionInvalidJobError"; } }
 export class AuthenticatedIngestionTerminalError extends Error { constructor() { super("Authenticated ingestion terminal completion failed."); this.name = "AuthenticatedIngestionTerminalError"; } }
@@ -51,6 +58,28 @@ function signal(value: unknown): AbortSignal | null | undefined {
 
 function aborted(value: AbortSignal): boolean | null {
   try { return readNativeAbortSignal?.call(value) ?? null; } catch { return null; }
+}
+
+function deliveryAttempt(value: unknown): AuthenticatedIngestionDeliveryAttempt | null {
+  const parsed = exact(value, ["attemptsMade", "maxAttempts"]);
+  const attemptsMade = parsed?.attemptsMade;
+  const maxAttempts = parsed?.maxAttempts;
+  if (typeof attemptsMade !== "number" || typeof maxAttempts !== "number" || !Number.isSafeInteger(attemptsMade) || !Number.isSafeInteger(maxAttempts) || attemptsMade < 0 || maxAttempts <= 0 || attemptsMade >= maxAttempts) return null;
+  return Object.freeze({ attemptsMade, maxAttempts });
+}
+
+export type AuthenticatedIngestionDeliveryContext = Readonly<{ data: IngestionData; deliveryAttempt: AuthenticatedIngestionDeliveryAttempt }>;
+
+export function readAuthenticatedIngestionDeliveryContext(job: DeliveryJob): AuthenticatedIngestionDeliveryContext | null {
+  let envelope: Record<string, unknown> | null;
+  try {
+    envelope = exact(job, ["data"]) ?? exact(job, ["data", "signal"]) ?? exact(job, ["data", "deliveryAttempt"]) ?? exact(job, ["data", "signal", "deliveryAttempt"]);
+  } catch { return null; }
+  if (!envelope || signal(envelope.signal) === null) return null;
+  const parsed = (() => { try { return parseData(envelope.data); } catch { return null; } })();
+  if (!parsed || parsed.kind !== "v1") return null;
+  const attempt = "deliveryAttempt" in envelope ? deliveryAttempt(envelope.deliveryAttempt) : Object.freeze({ attemptsMade: 0, maxAttempts: 1 });
+  return attempt === null ? null : Object.freeze({ data: parsed.data, deliveryAttempt: attempt });
 }
 
 export type AuthenticatedIngestionDeliveryClassification =
@@ -93,7 +122,11 @@ export function createAuthenticatedIngestionDeliveryProcessor<TResult>(dependenc
   const complete = async (outcome: AuthenticatedIngestionTerminalOutcome): Promise<TResult> => { try { return await dependencies.complete(outcome); } catch { throw new AuthenticatedIngestionTerminalError(); } };
   return async (job: DeliveryJob): Promise<TResult> => {
     let data: unknown; let jobSignal: AbortSignal | null | undefined;
-    try { const envelope = exact(job, ["data"]) ?? exact(job, ["data", "signal"]); data = envelope?.data; jobSignal = signal(envelope?.signal); } catch { data = undefined; jobSignal = null; }
+    try {
+      const envelope = exact(job, ["data"]) ?? exact(job, ["data", "signal"]) ?? exact(job, ["data", "deliveryAttempt"]) ?? exact(job, ["data", "signal", "deliveryAttempt"]);
+      data = envelope?.data; jobSignal = signal(envelope?.signal);
+      if (envelope && "deliveryAttempt" in envelope && deliveryAttempt(envelope.deliveryAttempt) === null) jobSignal = null;
+    } catch { data = undefined; jobSignal = null; }
     const parsed = (() => { try { return parseData(data); } catch { return null; } })();
     if (!parsed) {
       const runId = safeRunId(data);

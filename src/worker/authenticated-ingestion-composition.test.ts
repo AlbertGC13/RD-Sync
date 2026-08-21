@@ -160,13 +160,32 @@ describe("createAuthenticatedIngestionProcessor", () => {
 
   it("propagates cancellation as typed retry before mutation or collection", async () => {
     const f = fixture(); const controller = new AbortController(); controller.abort();
-    await expect(f.processor({ ...payload(), signal: controller.signal })).rejects.toEqual(new AuthenticatedIngestionRetryError("cancelled"));
+    await expect(f.processor({ ...payload(), signal: controller.signal, deliveryAttempt: { attemptsMade: 0, maxAttempts: 2 } })).rejects.toEqual(new AuthenticatedIngestionRetryError("cancelled"));
     expect(f.runnerDependencies.credentials.findByBankCode).not.toHaveBeenCalled(); expect(f.collect).not.toHaveBeenCalled(); expect(f.scrapeRuns.markFailed).not.toHaveBeenCalled(); expect(f.scrapeRuns.markNeedsAdminAction).not.toHaveBeenCalled(); expect(f.auditSink.record).not.toHaveBeenCalled(); expect(f.adminAlerts.notifyIngestionAttention).not.toHaveBeenCalled();
+  });
+
+  it("rethrows the retry delivery error before the final attempt", async () => {
+    const f = fixture({ attempts: { findExact: async () => ({ status: "unexpected" }) } as never });
+    await expect(f.processor({ ...payload(), deliveryAttempt: { attemptsMade: 0, maxAttempts: 2 } })).rejects.toEqual(new AuthenticatedIngestionRetryError("retry_delivery"));
+    expect(f.scrapeRuns.markFailed).not.toHaveBeenCalled(); expect(f.scrapeRuns.markNeedsAdminAction).not.toHaveBeenCalled(); expect(f.collect).not.toHaveBeenCalled();
+  });
+
+  it("terminalizes an exhausted retry once with finite telemetry", async () => {
+    const f = fixture({ attempts: { findExact: async () => ({ status: "unexpected" }) } as never });
+    await expect(f.processor({ ...payload(), deliveryAttempt: { attemptsMade: 1, maxAttempts: 2 } })).resolves.toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
+    expect(f.scrapeRuns.markNeedsAdminAction).toHaveBeenCalledOnce(); expect(f.collect).not.toHaveBeenCalled();
+    expect(f.auditSink.record).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ reason: "authenticated_ingestion_retry_exhausted" }) }));
+  });
+
+  it("maps exhausted retry terminal persistence failure to the fixed terminal error", async () => {
+    const f = fixture({ attempts: { findExact: async () => ({ status: "unexpected" }) } as never, scrapeRuns: { markRunning: vi.fn(), markSucceeded: vi.fn(), markNeedsAdminAction: vi.fn(async () => { throw new Error("raw terminal sentinel"); }), markThrottled: vi.fn(), markFailed: vi.fn() } });
+    await expect(f.processor({ ...payload(), deliveryAttempt: { attemptsMade: 1, maxAttempts: 2 } })).rejects.toEqual(new AuthenticatedIngestionTerminalError());
+    expect(f.collect).not.toHaveBeenCalled();
   });
 
   it("does not let an aborted delivery signal affect the next fresh delivery", async () => {
     const f = fixture(); const controller = new AbortController(); controller.abort();
-    await expect(f.processor({ ...payload(), signal: controller.signal })).rejects.toEqual(new AuthenticatedIngestionRetryError("cancelled"));
+    await expect(f.processor({ ...payload(), signal: controller.signal, deliveryAttempt: { attemptsMade: 0, maxAttempts: 2 } })).rejects.toEqual(new AuthenticatedIngestionRetryError("cancelled"));
     await expect(f.processor(payload())).resolves.toEqual({ status: "succeeded", inserted: 0, skipped: 0 });
     expect(f.page.fill).toHaveBeenCalledOnce(); expect(f.collect).toHaveBeenCalledOnce();
   });
@@ -175,7 +194,7 @@ describe("createAuthenticatedIngestionProcessor", () => {
     let resolve!: (result: unknown) => void;
     const pending = new Promise<unknown>((done) => { resolve = done; });
     const f = fixture({ popularSessionChecker: { check: async () => pending } }); const controller = new AbortController();
-    const result = f.processor({ ...payload(), signal: controller.signal }); controller.abort(); resolve({ status: "active", checkedAt: "2026-08-21T00:00:00.000Z", safeSummary: "safe" });
+    const result = f.processor({ ...payload(), signal: controller.signal, deliveryAttempt: { attemptsMade: 0, maxAttempts: 2 } }); controller.abort(); resolve({ status: "active", checkedAt: "2026-08-21T00:00:00.000Z", safeSummary: "safe" });
     await expect(result).rejects.toBeInstanceOf(AuthenticatedIngestionRetryError);
     expect(f.runnerDependencies.credentials.findByBankCode).not.toHaveBeenCalled(); expect(f.collect).not.toHaveBeenCalled();
   });
@@ -196,6 +215,6 @@ describe("createAuthenticatedIngestionProcessor", () => {
   it("remains factory-compatible and free of production activation dependencies", async () => {
     const source = await readFile(new URL("./authenticated-ingestion-composition.ts", import.meta.url), "utf8");
     const f = fixture(); const factoryCompatible: (job: { data: unknown }) => Promise<{ status: string; inserted: number; skipped: number }> = f.processor;
-    expect(factoryCompatible).toBeTypeOf("function"); expect(source).not.toMatch(/bullmq|prisma|process\.env|from ["'][^"']*ingestion-worker|recoverExpiredSession|from ["'][^"']*queues\/index/i);
+    expect(factoryCompatible).toBeTypeOf("function"); expect(source).toContain("isAuthenticatedIngestionRetryError(error)"); expect(source).not.toContain("instanceof AuthenticatedIngestionRetryError"); expect(source).not.toMatch(/bullmq|prisma|process\.env|from ["'][^"']*ingestion-worker|recoverExpiredSession|from ["'][^"']*queues\/index/i);
   });
 });
