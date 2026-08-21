@@ -6,6 +6,8 @@ import { createAuthenticatedTerminalCompleter } from "../../../worker/authentica
 import { defaultAuditSink } from "../audit/defaults";
 import { defaultIngestionQueue, defaultScrapeRunRepository, InMemoryScheduledIngestionQueue } from "./defaults";
 
+export { resolveDefaultScraper, buildPopularCdpScraperOptionsFromEnv } from "./scraper-defaults";
+
 const globalRegistry = globalThis as typeof globalThis & {
   __rdSyncIngestionConsumer?: InMemoryIngestionConsumer | undefined;
   __rdSyncIngestionConsumerInitialized?: boolean;

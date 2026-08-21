@@ -1,5 +1,7 @@
 import { resolvePrincipal } from "../../../../modules/auth";
-import { resolveDefaultIngestionConsumer } from "../consumer-selection";
+import { defaultAuditSink } from "../../audit/defaults";
+import { defaultIngestionQueue, defaultScrapeRunRepository } from "../defaults";
+import { defaultIngestionConsumer } from "../consumer-defaults";
 import {
   ActiveRunExistsError,
   scheduleIngestionRunNow,
@@ -13,15 +15,7 @@ export interface RunNowHandlerDependencies extends RunNowDependencies {
   consumer?: InMemoryIngestionConsumer;
 }
 
-async function resolveDefaultDependencies(): Promise<RunNowHandlerDependencies> {
-  const consumer = await resolveDefaultIngestionConsumer();
-  const [{ defaultAuditSink }, { defaultIngestionQueue, defaultScrapeRunRepository }, { startDefaultBrowserCapacityMonitor }] = await Promise.all([
-    import("../../audit/defaults"),
-    import("../defaults"),
-    import("../capacity-monitor-defaults"),
-  ]);
-  startDefaultBrowserCapacityMonitor();
-  return {
+const defaultDependencies: RunNowHandlerDependencies = {
   // Delegate to the shared repository instance explicitly. We cannot spread
   // the repo (class methods live on the prototype, not as own properties),
   // so we bind each method and add the active-run lock on top.
@@ -41,9 +35,8 @@ async function resolveDefaultDependencies(): Promise<RunNowHandlerDependencies> 
   },
   queue: defaultIngestionQueue,
   auditSink: defaultAuditSink,
-    consumer,
-  };
-}
+  consumer: defaultIngestionConsumer,
+};
 
 // ---------------------------------------------------------------------------
 // Error categorisation
@@ -145,16 +138,7 @@ export function createPostScrapeRunNowHandler(dependencies: RunNowHandlerDepende
   };
 }
 
-export async function POST(request: Request): Promise<Response> {
-  const principal = resolvePrincipal(request);
-  if (!principal) return Response.json({ error: SAFE_AUTH_MESSAGE }, { status: 401 });
-  try {
-    const dependencies = await resolveDefaultDependencies();
-    return createPostScrapeRunNowHandler(dependencies)(request);
-  } catch {
-    return Response.json({ error: SAFE_INFRA_MESSAGE }, { status: 503 });
-  }
-}
+export const POST = createPostScrapeRunNowHandler(defaultDependencies);
 
 export { SAFE_CONFLICT_MESSAGE };
 

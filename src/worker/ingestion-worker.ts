@@ -46,7 +46,7 @@ import { popularBankCode } from "../modules/bank-adapters/popular";
 import { popularPortalConfig } from "../modules/bank-adapters/popular-portal";
 import { createAcquireBrowserSlotFromEnv, createEnsureBrowserForBank, resolveBankBrowserEnv } from "./scraper/browser-runtime";
 import { createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, parseAutoLoginSelectorTimeoutMs, type BankAutoLoginStrategy } from "./scraper/auto-login";
-import { resolveDefaultScraper } from "../app/api/scrape-runs/scraper-defaults";
+import { resolveDefaultScraper } from "../app/api/scrape-runs/consumer-defaults";
 import { defaultScrapeRunRepository } from "../app/api/scrape-runs/defaults";
 import { defaultTransactionRepository } from "../app/api/transactions/defaults";
 import { defaultAuditSink } from "../app/api/audit/defaults";
