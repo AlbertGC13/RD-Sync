@@ -10,7 +10,7 @@
  * - Sorting: filterScrapeRuns sorts by updatedAt desc; we replicate that.
  */
 
-import type { Prisma } from "../../generated/prisma/client";
+import type { Prisma, PrismaClient } from "../../generated/prisma/client";
 import type {
   ScrapeRunRecord,
   ScrapeRunFilters,
@@ -65,8 +65,10 @@ function mapRow(row: ScrapeRunRow): ScrapeRunRecord {
 }
 
 export class PrismaScrapeRunRepository {
+  constructor(private readonly client?: PrismaClient) {}
+
   private get prisma() {
-    return getPrismaClient();
+    return this.client ?? getPrismaClient();
   }
 
   async createQueued(input: CreateQueuedScrapeRunInput): Promise<ScrapeRunRecord> {

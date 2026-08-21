@@ -1,9 +1,27 @@
 const AES_KEY_LENGTH_BYTES = 32;
 
-export function resolveCredentialKey(version: number = 1): Buffer {
+function assertSupportedVersion(version: number): void {
   if (version !== 1) {
     throw new Error(`Unsupported key version: ${version}. Only version 1 is currently supported.`);
   }
+}
+
+export function createCredentialKeyResolver(encodedKey: string): (version?: number) => Buffer {
+  const key = decodeKey(encodedKey);
+  if (key.length !== AES_KEY_LENGTH_BYTES) {
+    throw new Error(
+      `RD_SYNC_BANK_CREDENTIAL_KEY decoded to ${key.length} bytes, expected ${AES_KEY_LENGTH_BYTES}.`,
+    );
+  }
+
+  return (version: number = 1): Buffer => {
+    assertSupportedVersion(version);
+    return Buffer.from(key);
+  };
+}
+
+export function resolveCredentialKey(version: number = 1): Buffer {
+  assertSupportedVersion(version);
 
   const raw = process.env.RD_SYNC_BANK_CREDENTIAL_KEY;
   if (!raw || raw.trim() === "") {
@@ -13,14 +31,7 @@ export function resolveCredentialKey(version: number = 1): Buffer {
     );
   }
 
-  const key = decodeKey(raw.trim());
-  if (key.length !== AES_KEY_LENGTH_BYTES) {
-    throw new Error(
-      `RD_SYNC_BANK_CREDENTIAL_KEY decoded to ${key.length} bytes, expected ${AES_KEY_LENGTH_BYTES}.`,
-    );
-  }
-
-  return key;
+  return createCredentialKeyResolver(raw.trim())(version);
 }
 
 function decodeKey(value: string): Buffer {

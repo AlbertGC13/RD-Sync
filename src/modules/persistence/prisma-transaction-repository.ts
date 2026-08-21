@@ -14,7 +14,7 @@
  *   which exactly matches normalizeAmount output ("5424.00").
  */
 
-import type { Prisma } from "../../generated/prisma/client";
+import type { Prisma, PrismaClient } from "../../generated/prisma/client";
 import type {
   TransactionRecord,
   TransactionFilters,
@@ -91,8 +91,10 @@ const transactionSelect = {
 } as const;
 
 export class PrismaTransactionRepository {
+  constructor(private readonly client?: PrismaClient) {}
+
   private get prisma() {
-    return getPrismaClient();
+    return this.client ?? getPrismaClient();
   }
 
   async upsertMany(records: readonly TransactionRecord[]): Promise<UpsertResult> {

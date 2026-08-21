@@ -30,6 +30,14 @@ const globalRegistry = globalThis as typeof globalThis & {
   __rdSyncPrismaClient?: PrismaClient;
 };
 
+export function createPrismaClient(databaseUrl: string): PrismaClient {
+  if (typeof databaseUrl !== "string" || databaseUrl.trim() === "") {
+    throw new Error("A PostgreSQL connection string is required.");
+  }
+
+  return new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl }) });
+}
+
 /**
  * Return the globalThis-anchored PrismaClient singleton.
  * Throws a clear error if DATABASE_URL is not set.
@@ -43,8 +51,7 @@ export function getPrismaClient(): PrismaClient {
       );
     }
 
-    const adapter = new PrismaPg({ connectionString });
-    globalRegistry.__rdSyncPrismaClient = new PrismaClient({ adapter });
+    globalRegistry.__rdSyncPrismaClient = createPrismaClient(connectionString);
   }
 
   return globalRegistry.__rdSyncPrismaClient;

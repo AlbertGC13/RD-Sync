@@ -6,13 +6,15 @@
  * does not re-redact.
  */
 
-import type { Prisma } from "../../generated/prisma/client";
+import type { Prisma, PrismaClient } from "../../generated/prisma/client";
 import type { AuditSink, AuditEvent, AuditListOptions } from "../audit/index";
 import { getPrismaClient } from "./prisma-client";
 
 export class PrismaAuditSink implements AuditSink {
+  constructor(private readonly client?: PrismaClient) {}
+
   private get prisma() {
-    return getPrismaClient();
+    return this.client ?? getPrismaClient();
   }
 
   async record(event: AuditEvent): Promise<void> {
