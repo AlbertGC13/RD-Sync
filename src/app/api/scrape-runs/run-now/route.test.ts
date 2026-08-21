@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { InMemoryScrapeRunRepository } from "../../../../modules/scrape-runs";
-import { createPostScrapeRunNowHandler, SAFE_CONFLICT_MESSAGE } from "./route";
+import { createPostScrapeRunNowHandler, SAFE_CONFLICT_MESSAGE } from "./route-runtime";
 import type { IngestionJobData, QueueLike } from "../../../../worker/queues";
 import { createInMemoryIngestionConsumer } from "../../../../worker/ingestion-consumer";
 import { createIngestionProcessor } from "../../../../worker/queues";

@@ -10,9 +10,12 @@ type DisabledRuntime = Readonly<{
   createDefaultInMemoryIngestionConsumer: () => InMemoryIngestionConsumer | undefined;
 }>;
 
+type CapacityMonitorRuntime = Readonly<Record<never, never>>;
+
 export type IngestionConsumerSelectorDependencies = Readonly<{
   env?: Record<string, string | undefined>;
   loadDisabledRuntime?: () => Promise<DisabledRuntime>;
+  loadCapacityMonitor?: () => Promise<CapacityMonitorRuntime>;
 }>;
 
 function hasConfiguredRedisUrl(value: string | undefined): boolean {
@@ -24,17 +27,35 @@ export function createIngestionConsumerSelector(
 ): () => Promise<InMemoryIngestionConsumer | undefined> {
   const env = dependencies.env ?? process.env;
   const loadDisabledRuntime = dependencies.loadDisabledRuntime ?? (() => import("./consumer-defaults"));
+  const loadCapacityMonitor = dependencies.loadCapacityMonitor ?? (() => import("./capacity-monitor-defaults"));
   let consumer: InMemoryIngestionConsumer | undefined;
   let pending: Promise<InMemoryIngestionConsumer | undefined> | undefined;
+  let monitorLoaded = false;
+  let monitorPending: Promise<void> | undefined;
+
+  const ensureCapacityMonitor = async () => {
+    if (monitorLoaded) return;
+    monitorPending ??= loadCapacityMonitor().then(() => {
+      monitorLoaded = true;
+    }).finally(() => {
+      monitorPending = undefined;
+    });
+    return monitorPending;
+  };
 
   return async () => {
     const activation = resolveAuthenticatedIngestionActivation(env.RD_SYNC_AUTHENTICATED_INGESTION);
     const redisConfigured = hasConfiguredRedisUrl(env.RD_SYNC_REDIS_URL);
     if (activation.status === "enabled") {
       if (!redisConfigured) throw new Error(AUTHENTICATED_INGESTION_REDIS_REQUIRED);
+      await ensureCapacityMonitor();
       return undefined;
     }
-    if (redisConfigured) return undefined;
+    if (redisConfigured) {
+      await ensureCapacityMonitor();
+      return undefined;
+    }
+    await ensureCapacityMonitor();
     if (consumer !== undefined) return consumer;
     pending ??= loadDisabledRuntime()
       .then((runtime) => {

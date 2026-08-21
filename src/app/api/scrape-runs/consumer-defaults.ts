@@ -3,11 +3,6 @@ import { createInMemoryIngestionConsumer, type InMemoryIngestionConsumer } from 
 import { resolveDefaultAlertSink } from "../../../worker/alerts/email-alert-sink";
 import { createDisabledAuthenticatedIngestionProcessor } from "../../../worker/authenticated-ingestion-activation";
 import { createAuthenticatedTerminalCompleter } from "../../../worker/authenticated-ingestion-terminal-completer";
-import { getBrowserCapacitySnapshotFromEnv } from "../../../worker/scraper/browser-runtime";
-import {
-  createBrowserCapacityMonitor,
-  type BrowserCapacityMonitor,
-} from "../../../modules/observability/browser-capacity-monitor";
 import { defaultAuditSink } from "../audit/defaults";
 import { defaultIngestionQueue, defaultScrapeRunRepository, InMemoryScheduledIngestionQueue } from "./defaults";
 
@@ -69,60 +64,3 @@ function getOrCreateDefaultIngestionConsumer(): InMemoryIngestionConsumer | unde
 
 export const defaultIngestionConsumer: InMemoryIngestionConsumer | undefined =
   getOrCreateDefaultIngestionConsumer();
-
-// ---------------------------------------------------------------------------
-// defaultBrowserCapacityMonitor
-//
-// Env-gated wiring for the host-wide browser capacity monitor, mirroring
-// resolveDefaultSessionMonitor in src/app/api/bank-sessions/defaults.ts.
-//
-// Relevant env vars:
-//   RD_SYNC_BROWSER_CAPACITY_MONITOR              — "enabled" activates the monitor
-//   RD_SYNC_BROWSER_CAPACITY_CHECK_INTERVAL_MS    — poll interval ms (default 60000, min 30000)
-// ---------------------------------------------------------------------------
-
-const CAPACITY_MIN_INTERVAL_MS = 30_000;
-const CAPACITY_DEFAULT_INTERVAL_MS = 60_000;
-
-function resolveCapacityIntervalMs(): number {
-  const raw = process.env.RD_SYNC_BROWSER_CAPACITY_CHECK_INTERVAL_MS;
-  if (!raw) return CAPACITY_DEFAULT_INTERVAL_MS;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return CAPACITY_DEFAULT_INTERVAL_MS;
-  return Math.max(parsed, CAPACITY_MIN_INTERVAL_MS);
-}
-
-/**
- * Returns a browser capacity monitor wired to the real shared BrowserSemaphore
- * singleton, the default alert sink, and the default audit sink — or null
- * when RD_SYNC_BROWSER_CAPACITY_MONITOR !== "enabled".
- */
-export function resolveDefaultBrowserCapacityMonitor(): BrowserCapacityMonitor | null {
-  if (process.env.RD_SYNC_BROWSER_CAPACITY_MONITOR !== "enabled") {
-    return null;
-  }
-
-  return createBrowserCapacityMonitor({
-    sample: getBrowserCapacitySnapshotFromEnv,
-    alertSink: resolveDefaultAlertSink(),
-    auditSink: defaultAuditSink,
-    intervalMs: resolveCapacityIntervalMs(),
-  });
-}
-
-const capacityGlobalRegistry = globalThis as typeof globalThis & {
-  __rdSyncBrowserCapacityMonitor?: BrowserCapacityMonitor | null;
-};
-
-// Sentinel distinguishes "not yet initialised" from "null (disabled)".
-if (!("__rdSyncBrowserCapacityMonitor" in capacityGlobalRegistry)) {
-  capacityGlobalRegistry.__rdSyncBrowserCapacityMonitor = resolveDefaultBrowserCapacityMonitor();
-}
-
-// This module already eagerly constructs defaultIngestionConsumer above at
-// load time, so the capacity monitor follows the same eager side-effecting
-// pattern — start() is idempotent (internal handle guard).
-export const defaultBrowserCapacityMonitor: BrowserCapacityMonitor | null =
-  capacityGlobalRegistry.__rdSyncBrowserCapacityMonitor ?? null;
-
-defaultBrowserCapacityMonitor?.start();

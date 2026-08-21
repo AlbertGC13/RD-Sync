@@ -52,4 +52,12 @@ describe("in-memory ingestion consumer selection", () => {
     await expect(select()).resolves.toBeDefined();
     expect(loads).toBe(2);
   });
+
+  it("starts the monitor only after a valid selection", async () => {
+    let loads = 0; const monitor = async () => { loads += 1; return {}; };
+    await expect(createIngestionConsumerSelector({ env: { RD_SYNC_AUTHENTICATED_INGESTION: "enabled" }, loadCapacityMonitor: monitor })()).rejects.toThrow(AUTHENTICATED_INGESTION_REDIS_REQUIRED);
+    await createIngestionConsumerSelector({ env: { RD_SYNC_REDIS_URL: "redis://worker" }, loadCapacityMonitor: monitor })();
+    await createIngestionConsumerSelector({ env: {}, loadCapacityMonitor: monitor, loadDisabledRuntime: async () => ({ createDefaultInMemoryIngestionConsumer: () => ({ drainPending: async () => [] }) }) })();
+    expect(loads).toBe(2);
+  });
 });

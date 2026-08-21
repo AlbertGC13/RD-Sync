@@ -307,13 +307,13 @@ describe("defaultBrowserCapacityMonitor — globalThis sharing and single-start 
 
   it("null monitor is shared across module graphs when disabled", async () => {
     const { defaultBrowserCapacityMonitor: monitorA } = await import(
-      "./scrape-runs/consumer-defaults"
+      "./scrape-runs/capacity-monitor-defaults"
     );
 
     vi.resetModules();
 
     const { defaultBrowserCapacityMonitor: monitorB } = await import(
-      "./scrape-runs/consumer-defaults"
+      "./scrape-runs/capacity-monitor-defaults"
     );
 
     expect(monitorA).toBeNull();
@@ -328,7 +328,7 @@ describe("defaultBrowserCapacityMonitor — globalThis sharing and single-start 
     // observed via the globalThis anchor reusing the SAME (already-started)
     // instance across a simulated second module graph.
     const { defaultBrowserCapacityMonitor: monitorA } = await import(
-      "./scrape-runs/consumer-defaults"
+      "./scrape-runs/capacity-monitor-defaults"
     );
 
     expect(monitorA).not.toBeNull();
@@ -337,7 +337,7 @@ describe("defaultBrowserCapacityMonitor — globalThis sharing and single-start 
     vi.resetModules();
 
     const { defaultBrowserCapacityMonitor: monitorB } = await import(
-      "./scrape-runs/consumer-defaults"
+      "./scrape-runs/capacity-monitor-defaults"
     );
 
     expect(monitorB).toBe(monitorA);
