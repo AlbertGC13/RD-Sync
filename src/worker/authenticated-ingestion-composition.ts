@@ -1,4 +1,5 @@
 import type { AuthenticatedSessionCoordinatorDependencies } from "../modules/bank-sessions/ensure-authenticated-session";
+import { createAuditEvent } from "../modules/audit";
 import { createAuthenticatedIngestionDeliveryProcessor, AuthenticatedIngestionTerminalError, type AuthenticatedIngestionTerminalOutcome } from "./authenticated-ingestion-delivery";
 import { createAuthenticatedIngestionPrecondition } from "./authenticated-ingestion-precondition";
 import { createCollectionIngestionProcessor, type CollectionIngestionProcessorDependencies } from "./collection-ingestion-processor";
@@ -10,6 +11,12 @@ import { resolveAuthenticationHeartbeatConfig } from "./scraper/authentication-h
 
 type HeartbeatDependencies = Omit<AuthenticationHeartbeatSchedulerDependencies<unknown>, "delayMs">;
 type CollectionDependencies = Pick<CollectionIngestionProcessorDependencies, "scrapeRuns" | "transactions" | "resolveScraper" | "adminAlerts" | "auditSink" | "now">;
+type TerminalDependencies = Readonly<{
+  scrapeRuns: Pick<CollectionDependencies["scrapeRuns"], "markFailed" | "markNeedsAdminAction">;
+  auditSink?: Pick<NonNullable<CollectionDependencies["auditSink"]>, "record">;
+  adminAlerts?: Pick<NonNullable<CollectionDependencies["adminAlerts"]>, "notifyIngestionAttention">;
+  now?: () => Date;
+}>;
 
 export type AuthenticatedIngestionProcessorDependencies = Readonly<{
   env: Record<string, string | undefined>;
@@ -26,15 +33,35 @@ const terminalSummaries = {
 } as const;
 
 export function createAuthenticatedTerminalCompleter(
-  dependencies: Pick<CollectionDependencies, "scrapeRuns" | "now">,
+  dependencies: TerminalDependencies,
 ): (outcome: AuthenticatedIngestionTerminalOutcome) => Promise<IngestionResult> {
   const now = dependencies.now ?? (() => new Date());
-  return async ({ runId, status }) => {
+  return async ({ runId, bankId, status, reason }) => {
     try {
       if (status === "failed") await dependencies.scrapeRuns.markFailed(runId, terminalSummaries.failed, now());
       else await dependencies.scrapeRuns.markNeedsAdminAction(runId, terminalSummaries.needs_admin_action, now());
     } catch {
       throw new AuthenticatedIngestionTerminalError();
+    }
+    const summary = terminalSummaries[status];
+    const safeBankId = typeof bankId === "string" && /\S/.test(bankId) ? bankId : undefined;
+    try {
+      await dependencies.auditSink?.record(createAuditEvent({
+        id: `authenticated-terminal:${runId}:${status}:${reason}`,
+        actorId: "system:ingestion-worker",
+        actorRole: null,
+        action: `scrape_run.${status}`,
+        target: "scrape_run",
+        targetId: runId,
+        metadata: { stage: "precollection_authentication", reason, status, ...(safeBankId === undefined ? {} : { bankId: safeBankId }) },
+      }));
+    } catch {
+      // Audit delivery cannot change the already-persisted terminal result.
+    }
+    try {
+      await dependencies.adminAlerts?.notifyIngestionAttention({ runId, bankId: safeBankId ?? "unknown", status, safeErrorSummary: summary });
+    } catch {
+      // Alert delivery cannot change the already-persisted terminal result.
     }
     return { status, inserted: 0, skipped: 0 };
   };

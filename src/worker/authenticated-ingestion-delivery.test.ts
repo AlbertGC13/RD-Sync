@@ -74,7 +74,7 @@ describe("createAuthenticatedIngestionDeliveryProcessor", () => {
   it.each([{ runId: "run-1", bankId: "popular", accountFingerprint: "fingerprint-1" }, { runId: "run-1", bankId: "popular", accountFingerprint: "fingerprint-1", expiredEventId: "expired-1" }])("completes legacy payloads safely", async (data) => {
     const { processor, authenticate, downstream, complete } = setup();
     await expect(processor({ data })).resolves.toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
-    expect(complete).toHaveBeenCalledWith({ runId: "run-1", status: "needs_admin_action", reason: "legacy_authenticated_ingestion_delivery" });
+    expect(complete).toHaveBeenCalledWith({ runId: "run-1", bankId: "popular", status: "needs_admin_action", reason: "legacy_authenticated_ingestion_delivery" });
     expect(authenticate).not.toHaveBeenCalled(); expect(downstream).not.toHaveBeenCalled();
   });
 
@@ -92,6 +92,7 @@ describe("createAuthenticatedIngestionDeliveryProcessor", () => {
     await expect(processor({ data })).resolves.toEqual({ status: "needs_admin_action", inserted: 0, skipped: 0 });
     expect(authenticate).not.toHaveBeenCalled(); expect(downstream).not.toHaveBeenCalled();
     expect(complete).toHaveBeenCalledWith(expect.objectContaining({ status: "failed", reason: "invalid_authenticated_ingestion_delivery" }));
+    expect(complete.mock.calls[0]?.[0]).not.toHaveProperty("bankId");
   });
 
   it("throws a fixed typed invalid-job error when no safe run id is available", async () => {
@@ -112,7 +113,7 @@ describe("createAuthenticatedIngestionDeliveryProcessor", () => {
   it.each(["temporary_authentication_problem", "protected_authentication_step_detected", "bank_login_configuration_requires_review", "authentication_attempt_requires_review", "identity_conflict", "restoration_state_conflict"])("maps operator reason %s to a safe terminal outcome", async (reason) => {
     const { processor, downstream, complete } = setup({ status: "needs_operator_action", reason });
     await processor({ data: payload() });
-    expect(complete).toHaveBeenCalledWith({ runId: "run-1", status: "needs_admin_action", reason });
+    expect(complete).toHaveBeenCalledWith({ runId: "run-1", bankId: "popular", status: "needs_admin_action", reason });
     expect(downstream).not.toHaveBeenCalled();
   });
 
@@ -176,7 +177,7 @@ describe("createAuthenticatedIngestionDeliveryProcessor", () => {
   it("treats forged authenticated precondition results as operator review", async () => {
     const { processor, downstream, complete } = setup({ status: "authenticated", extra: "raw-sentinel" });
     await processor({ data: payload() });
-    expect(downstream).not.toHaveBeenCalled(); expect(complete).toHaveBeenCalledWith({ runId: "run-1", status: "needs_admin_action", reason: "authentication_precondition_requires_review" });
+    expect(downstream).not.toHaveBeenCalled(); expect(complete).toHaveBeenCalledWith({ runId: "run-1", bankId: "popular", status: "needs_admin_action", reason: "authentication_precondition_requires_review" });
     expect(JSON.stringify(complete.mock.calls)).not.toContain("raw-sentinel");
   });
 
