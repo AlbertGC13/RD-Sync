@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
 const { prismaPg, prismaClient } = vi.hoisted(() => ({ prismaPg: vi.fn(), prismaClient: vi.fn() }));
 
@@ -64,6 +65,9 @@ describe("authenticated ingestion data seams", () => {
   });
 
   it("returns fresh version-one key copies without reading environment after construction", () => {
+    const source = readFileSync(new URL("../bank-credentials/key-resolver.ts", import.meta.url), "utf8");
+    const factory = source.slice(source.indexOf("export function createCredentialKeyResolver"), source.indexOf("export function resolveCredentialKey"));
+    expect(factory.slice(0, factory.indexOf("return (version"))).not.toMatch(/decodeKey\(|Buffer\.from|process\.env/);
     const resolver = createCredentialKeyResolver("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     const first = resolver(1);
     first.fill(0);
@@ -72,5 +76,7 @@ describe("authenticated ingestion data seams", () => {
     expect(() => resolver(2)).toThrow("Unsupported key version");
     expect(() => createCredentialKeyResolver("not-a-key")).toThrow("not valid base64 or hex");
     expect(() => createCredentialKeyResolver("AA==")).toThrow("decoded to 1 bytes");
+    const canonical = Buffer.alloc(32).toString("base64");
+    expect(() => createCredentialKeyResolver(`${canonical.slice(0, -2)}B=`)).toThrow("not valid base64 or hex");
   });
 });
