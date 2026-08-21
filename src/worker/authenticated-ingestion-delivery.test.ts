@@ -7,6 +7,7 @@ import {
   AuthenticatedIngestionRetryError,
   AuthenticatedIngestionTerminalError,
   createAuthenticatedIngestionDeliveryProcessor,
+  isAuthenticatedIngestionRetryError,
 } from "./authenticated-ingestion-delivery";
 
 const payload = () => ({ runId: "run-1", bankId: "popular", accountFingerprint: "fingerprint-1", authentication: { version: 1, attemptId: "attempt-1" } });
@@ -20,6 +21,20 @@ const setup = (precondition: unknown = { status: "authenticated" }, terminalResu
 };
 
 describe("createAuthenticatedIngestionDeliveryProcessor", () => {
+  it("recognizes only retry errors constructed by the authentic constructor", () => {
+    class RetrySubclass extends AuthenticatedIngestionRetryError {}
+    const genuine = new AuthenticatedIngestionRetryError("retry_delivery");
+    const prototypeSpoof = Object.create(AuthenticatedIngestionRetryError.prototype);
+    const duckSpoof = { name: "AuthenticatedIngestionRetryError", message: "Authenticated ingestion delivery must be retried.", reason: "retry_delivery" };
+
+    expect(isAuthenticatedIngestionRetryError(genuine)).toBe(true);
+    expect(isAuthenticatedIngestionRetryError(new RetrySubclass("in_progress"))).toBe(true);
+    expect(isAuthenticatedIngestionRetryError(new AuthenticatedIngestionRetryError("cancelled"))).toBe(true);
+    expect(isAuthenticatedIngestionRetryError(prototypeSpoof)).toBe(false);
+    expect(isAuthenticatedIngestionRetryError(duckSpoof)).toBe(false);
+    expect(isAuthenticatedIngestionRetryError(new Proxy(genuine, {}))).toBe(false);
+    expect(JSON.stringify(genuine)).not.toContain("WeakSet");
+  });
   it("passes the queued durable identity to authentication, strips its wrapper, and delegates once", async () => {
     const { processor, authenticate, downstream, complete } = setup();
     await expect(processor({ data: payload() })).resolves.toEqual(result);

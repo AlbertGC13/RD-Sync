@@ -1,6 +1,6 @@
 import type { AuthenticatedSessionCoordinatorDependencies } from "../modules/bank-sessions/ensure-authenticated-session";
 import { createAuditEvent } from "../modules/audit";
-import { AuthenticatedIngestionRetryError, createAuthenticatedIngestionDeliveryProcessor, AuthenticatedIngestionTerminalError, readAuthenticatedIngestionDeliveryContext, type AuthenticatedIngestionDeliveryJob, type AuthenticatedIngestionTerminalOutcome } from "./authenticated-ingestion-delivery";
+import { createAuthenticatedIngestionDeliveryProcessor, AuthenticatedIngestionTerminalError, isAuthenticatedIngestionRetryError, readAuthenticatedIngestionDeliveryContext, type AuthenticatedIngestionDeliveryJob, type AuthenticatedIngestionTerminalOutcome } from "./authenticated-ingestion-delivery";
 import { createAuthenticatedIngestionPrecondition } from "./authenticated-ingestion-precondition";
 import { createCollectionIngestionProcessor, type CollectionIngestionProcessorDependencies } from "./collection-ingestion-processor";
 import type { IngestionResult } from "./queues";
@@ -103,7 +103,7 @@ export function createAuthenticatedIngestionProcessor(
     try {
       return await delivery(job);
     } catch (error) {
-      if (!(error instanceof AuthenticatedIngestionRetryError)) throw error;
+      if (!isAuthenticatedIngestionRetryError(error)) throw error;
       const context = readAuthenticatedIngestionDeliveryContext(job);
       if (context === null || context.deliveryAttempt.attemptsMade + 1 < context.deliveryAttempt.maxAttempts) throw error;
       return complete({ runId: context.data.runId, bankId: context.data.bankId, status: "needs_admin_action", reason: "authenticated_ingestion_retry_exhausted" });

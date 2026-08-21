@@ -17,9 +17,14 @@ export type AuthenticatedIngestionDeliveryDependencies<TResult> = Readonly<{
   createOwnerToken: () => string;
 }>;
 
+const authenticatedIngestionRetryErrors = new WeakSet<object>();
+
 export class AuthenticatedIngestionRetryError extends Error {
   readonly reason: "retry_delivery" | "in_progress" | "cancelled";
-  constructor(reason: "retry_delivery" | "in_progress" | "cancelled") { super("Authenticated ingestion delivery must be retried."); this.name = "AuthenticatedIngestionRetryError"; this.reason = reason; }
+  constructor(reason: "retry_delivery" | "in_progress" | "cancelled") { super("Authenticated ingestion delivery must be retried."); this.name = "AuthenticatedIngestionRetryError"; this.reason = reason; authenticatedIngestionRetryErrors.add(this); }
+}
+export function isAuthenticatedIngestionRetryError(value: unknown): value is AuthenticatedIngestionRetryError {
+  return typeof value === "object" && value !== null && authenticatedIngestionRetryErrors.has(value);
 }
 export class AuthenticatedIngestionInvalidJobError extends Error { constructor() { super("Invalid authenticated ingestion delivery job."); this.name = "AuthenticatedIngestionInvalidJobError"; } }
 export class AuthenticatedIngestionTerminalError extends Error { constructor() { super("Authenticated ingestion terminal completion failed."); this.name = "AuthenticatedIngestionTerminalError"; } }

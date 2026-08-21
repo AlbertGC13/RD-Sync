@@ -215,6 +215,6 @@ describe("createAuthenticatedIngestionProcessor", () => {
   it("remains factory-compatible and free of production activation dependencies", async () => {
     const source = await readFile(new URL("./authenticated-ingestion-composition.ts", import.meta.url), "utf8");
     const f = fixture(); const factoryCompatible: (job: { data: unknown }) => Promise<{ status: string; inserted: number; skipped: number }> = f.processor;
-    expect(factoryCompatible).toBeTypeOf("function"); expect(source).not.toMatch(/bullmq|prisma|process\.env|from ["'][^"']*ingestion-worker|recoverExpiredSession|from ["'][^"']*queues\/index/i);
+    expect(factoryCompatible).toBeTypeOf("function"); expect(source).toContain("isAuthenticatedIngestionRetryError(error)"); expect(source).not.toContain("instanceof AuthenticatedIngestionRetryError"); expect(source).not.toMatch(/bullmq|prisma|process\.env|from ["'][^"']*ingestion-worker|recoverExpiredSession|from ["'][^"']*queues\/index/i);
   });
 });
