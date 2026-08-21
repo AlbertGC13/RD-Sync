@@ -25,6 +25,51 @@ const defaults: AuthenticatedIngestionRedisResourceFactories = {
   createLock: ({ store, ttlMs, renewIntervalMs }) => createRenewableBankAuthenticationLock({ store, ttlMs, renewIntervalMs }),
 };
 
+function resolveFactories(overrides: unknown): AuthenticatedIngestionRedisResourceFactories | null {
+  try {
+    if (overrides === undefined) return defaults;
+    if (overrides === null || typeof overrides !== "object" || Array.isArray(overrides)) return null;
+    const keys = Reflect.ownKeys(overrides);
+    if (keys.some((key) => typeof key !== "string" || !["createClient", "createStore", "createLock"].includes(key))) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(overrides);
+    if (Object.values(descriptors).some((descriptor) => !descriptor.enumerable || !("value" in descriptor))) return null;
+    const { createClient, createStore, createLock } = descriptors as Record<string, PropertyDescriptor>;
+    if ([createClient, createStore, createLock].some((descriptor) => descriptor !== undefined && descriptor.value !== undefined && typeof descriptor.value !== "function")) return null;
+    // Explicit undefined deliberately retains the corresponding production default.
+    return {
+      createClient: createClient?.value === undefined ? defaults.createClient : createClient.value as AuthenticatedIngestionRedisResourceFactories["createClient"],
+      createStore: createStore?.value === undefined ? defaults.createStore : createStore.value as AuthenticatedIngestionRedisResourceFactories["createStore"],
+      createLock: createLock?.value === undefined ? defaults.createLock : createLock.value as AuthenticatedIngestionRedisResourceFactories["createLock"],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function hasFunctions(value: unknown, keys: readonly string[]): value is Record<string, (...args: never[]) => unknown> {
+  try {
+    return value !== null && typeof value === "object" && keys.every((key) => typeof (value as Record<string, unknown>)[key] === "function");
+  } catch {
+    return false;
+  }
+}
+
+function isRedisClient(value: unknown): value is RedisClient {
+  try {
+    return hasFunctions(value, ["eval", "quit", "disconnect"]) && typeof value.status === "string";
+  } catch {
+    return false;
+  }
+}
+
+function isLockStore(value: unknown): value is LockStore {
+  return hasFunctions(value, ["acquireSlot", "renewIfOwner", "releaseIfOwner"]);
+}
+
+function isRenewableLock(value: unknown): value is RenewableBankAuthenticationLock {
+  return hasFunctions(value, ["acquire"]);
+}
+
 function parseConfig(value: unknown): AuthenticatedIngestionRedisResourceConfig | null {
   try {
     if (value === null || typeof value !== "object" || Array.isArray(value) || !Object.isFrozen(value)) return null;
@@ -55,9 +100,12 @@ function validRedisUrl(redisUrl: string): boolean {
   }
 }
 
-async function disconnect(client: RedisClient): Promise<boolean> {
+async function disconnect(client: unknown): Promise<boolean> {
   try {
-    await client.disconnect();
+    if (client === null || typeof client !== "object") return false;
+    const method = (client as { disconnect?: unknown }).disconnect;
+    if (typeof method !== "function") return false;
+    await method.call(client);
     return true;
   } catch {
     return false;
@@ -87,21 +135,26 @@ async function closeClient(client: RedisClient): Promise<void> {
 
 export async function createAuthenticatedIngestionRedisResource(
   config: AuthenticatedIngestionRedisResourceConfig,
-  overrides: Partial<AuthenticatedIngestionRedisResourceFactories> = {},
+  overrides?: Partial<AuthenticatedIngestionRedisResourceFactories>,
 ): Promise<AuthenticatedIngestionRedisResource> {
   const parsed = parseConfig(config);
   if (!parsed) throw new Error(INVALID_CONFIGURATION);
-  const factories = { ...defaults, ...overrides };
-  let client: RedisClient | undefined;
+  const factories = resolveFactories(overrides);
+  if (!factories) throw new Error(CONSTRUCTION_ERROR);
+  let client: unknown;
   try {
     client = factories.createClient(parsed.redisUrl, CLIENT_OPTIONS);
-    const store = factories.createStore({ client });
+    if (!isRedisClient(client)) throw new Error(CONSTRUCTION_ERROR);
+    const ownedClient = client;
+    const store = factories.createStore({ client: ownedClient });
+    if (!isLockStore(store)) throw new Error(CONSTRUCTION_ERROR);
     const lock = factories.createLock({ store, ttlMs: parsed.ttlMs, renewIntervalMs: parsed.renewIntervalMs });
+    if (!isRenewableLock(lock)) throw new Error(CONSTRUCTION_ERROR);
     let closePromise: Promise<void> | undefined;
-    const close = () => closePromise ??= closeClient(client!);
+    const close = () => closePromise ??= closeClient(ownedClient);
     return Object.freeze({ lock, close });
   } catch {
-    if (client) await disconnect(client);
+    await disconnect(client);
     throw new Error(CONSTRUCTION_ERROR);
   }
 }

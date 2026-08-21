@@ -48,6 +48,33 @@ describe("createAuthenticatedIngestionRedisResource", () => {
     expect(resource.lock).toBe(lock);
   });
 
+  it("contains override boundary failures before creating a client and treats undefined as a default", async () => {
+    const throwing = arrange();
+    const throwingProxy = new Proxy({}, { ownKeys: () => { throw new Error("secret override"); } });
+    await expect(createAuthenticatedIngestionRedisResource(validConfig(), throwingProxy as never)).rejects.toThrow("Unable to create authenticated ingestion Redis resource.");
+    expect(throwing.calls.client).toBe(0);
+
+    const fallback = arrange();
+    await (await createAuthenticatedIngestionRedisResource(validConfig(), { ...fallback.factories, createLock: undefined })).close();
+    expect(fallback.calls).toMatchObject({ client: 1, lock: 0, disconnect: 1 });
+
+    const malformed = arrange();
+    await expect(createAuthenticatedIngestionRedisResource(validConfig(), { ...malformed.factories, createClient: true } as never)).rejects.toThrow("Unable to create authenticated ingestion Redis resource.");
+    expect(malformed.calls.client).toBe(0);
+  });
+
+  it("rejects malformed factory products and disconnects an acquired client once", async () => {
+    for (const override of [
+      (factories: AuthenticatedIngestionRedisResourceFactories, client: Client, calls: { client: number }) => ({ ...factories, createClient: () => { calls.client += 1; return ({ ...client, eval: undefined }) as never; } }),
+      (factories: AuthenticatedIngestionRedisResourceFactories) => ({ ...factories, createStore: () => ({ acquireSlot: async () => null }) as never }),
+      (factories: AuthenticatedIngestionRedisResourceFactories) => ({ ...factories, createLock: () => ({ acquire: undefined }) as never }),
+    ]) {
+      const { calls, client, factories } = arrange();
+      await expect(createAuthenticatedIngestionRedisResource(validConfig(), override(factories, client, calls))).rejects.toThrow("Unable to create authenticated ingestion Redis resource.");
+      expect(calls).toMatchObject({ client: 1, disconnect: 1, quit: 0 });
+    }
+  });
+
   it("disconnects wait and terminal clients, but quits ready clients", async () => {
     for (const status of ["wait", "end", "close"]) {
       const { calls, factories } = arrange(status);
@@ -74,14 +101,16 @@ describe("createAuthenticatedIngestionRedisResource", () => {
 
   it("disconnects when status access fails and cleans up partial construction without leaking details", async () => {
     const { calls, client, factories } = arrange();
-    Object.defineProperty(client, "status", { get: () => { throw new Error("redis://secret@host"); } });
+    let reads = 0;
+    Object.defineProperty(client, "status", { get: () => ++reads === 1 ? "wait" : (() => { throw new Error("redis://secret@host"); })() });
     await (await createAuthenticatedIngestionRedisResource(validConfig(), factories)).close();
     expect(calls.disconnect).toBe(1);
 
     const unreadable = arrange();
     Object.defineProperty(unreadable.client, "status", { get: () => { throw new Error("secret"); } });
     unreadable.client.disconnect = () => { unreadable.calls.disconnect += 1; throw new Error("secret"); };
-    await expect((await createAuthenticatedIngestionRedisResource(validConfig(), unreadable.factories)).close()).rejects.toThrow("Unable to close authenticated ingestion Redis resource.");
+    await expect(createAuthenticatedIngestionRedisResource(validConfig(), unreadable.factories)).rejects.toThrow("Unable to create authenticated ingestion Redis resource.");
+    expect(unreadable.calls.disconnect).toBe(1);
 
     const broken = arrange();
     await expect(createAuthenticatedIngestionRedisResource(validConfig(), { ...broken.factories, createStore: () => { throw new Error("redis://secret@host"); } })).rejects.toThrow("Unable to create authenticated ingestion Redis resource.");
