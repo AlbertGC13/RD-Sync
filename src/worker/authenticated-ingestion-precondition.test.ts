@@ -12,6 +12,11 @@ const identity = { bankCode: "popular", runId: "run-1", attemptId: "attempt-1" }
 const env = { RD_SYNC_AUTHENTICATION_LEASE_MS: "60000", RD_SYNC_AUTHENTICATION_HEARTBEAT_MS: "15000" };
 const key = Buffer.alloc(32, 7);
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  return { promise: new Promise<T>((done) => { resolve = done; }), resolve };
+}
+
 function createFixture() {
   let phase = "no_credential_interaction" as "no_credential_interaction" | "credentials_may_have_reached_portal" | "submit_may_have_been_dispatched";
   let authenticated = false;
@@ -65,6 +70,30 @@ describe("createAuthenticatedIngestionPrecondition", () => {
     expect(fixture.scheduler.schedule).not.toHaveBeenCalled();
   });
 
+  it("rejects a non-throwing AbortSignal prototype spoof before mutation", async () => {
+    const spoof = Object.create(AbortSignal.prototype); Object.defineProperty(spoof, "aborted", { value: false });
+    const fixture = createFixture();
+    await expect(fixture.precondition({ identity, ownerToken: "owner-token", signal: spoof })).resolves.toEqual({ status: "invalid_request" });
+    expect(fixture.runnerDependencies.credentials.findByBankCode).not.toHaveBeenCalled(); expect(fixture.scheduler.schedule).not.toHaveBeenCalled();
+  });
+
+  it("uses EventTarget intrinsics instead of overridden signal event methods", async () => {
+    const controller = new AbortController(); const add = vi.fn(() => { throw new Error("raw-listener-sentinel"); }); const remove = vi.fn(() => { throw new Error("raw-listener-sentinel"); });
+    Object.defineProperties(controller.signal, { addEventListener: { value: add }, removeEventListener: { value: remove } });
+    const fixture = createFixture();
+    await expect(fixture.precondition({ identity, ownerToken: "owner-token", signal: controller.signal })).resolves.toEqual({ status: "authenticated" });
+    expect(add).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("bridges a real delivery abort into fenced execution without later credential interaction", async () => {
+    const pending = deferred<{ status: "ready"; page: BankAutoLoginPage; close(): Promise<void> }>(); const started = deferred<void>();
+    const fixture = createFixture(); fixture.runnerDependencies.ensureBrowser = vi.fn(async () => { started.resolve(); return pending.promise as never; });
+    const controller = new AbortController(); const result = fixture.precondition({ identity, ownerToken: "owner-token", signal: controller.signal });
+    await started.promise; controller.abort(); pending.resolve({ status: "ready", page: fixture.page, close: async () => {} });
+    await expect(result).resolves.toEqual(expect.objectContaining({ status: expect.not.stringMatching(/^authenticated$/) }));
+    expect(fixture.page.fill).not.toHaveBeenCalled(); expect(fixture.page.click).not.toHaveBeenCalled(); expect(fixture.scheduler.cancel).toHaveBeenCalledOnce();
+  });
+
   it("supports real AbortSignal while pre-abort bypasses all mutation dependencies", async () => {
     const controller = new AbortController();
     controller.abort();
@@ -98,6 +127,7 @@ describe("createAuthenticatedIngestionPrecondition", () => {
     expect(() => createAuthenticatedIngestionPrecondition({ ...fixture.dependencies, env: { ...env, RD_SYNC_AUTHENTICATION_HEARTBEAT_MS: "60000" } })).toThrow("Invalid authentication heartbeat configuration.");
     expect(() => createAuthenticatedIngestionPrecondition({ ...fixture.dependencies, job: { data: { bankId: "popular", runId: "run-1", accountFingerprint: "fingerprint", expiredEventId: "legacy" } } })).toThrow("Invalid authenticated ingestion precondition configuration.");
     expect(source).toContain('completion: { mode: "attempt_only" }');
+    expect(source).toContain("cancellationSignal: invocation.signal"); expect(source).not.toContain("new AbortController");
     expect(source).not.toMatch(/BullMQ|Prisma|process\.env|createCoordinator|createExecution|createRunner/);
   });
 });

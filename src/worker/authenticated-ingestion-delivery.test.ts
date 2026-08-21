@@ -23,7 +23,7 @@ describe("createAuthenticatedIngestionDeliveryProcessor", () => {
   it("passes the queued durable identity to authentication, strips its wrapper, and delegates once", async () => {
     const { processor, authenticate, downstream, complete } = setup();
     await expect(processor({ data: payload() })).resolves.toEqual(result);
-    expect(authenticate).toHaveBeenCalledWith({ identity: { bankCode: "popular", runId: "run-1", attemptId: "attempt-1" }, ownerToken: "owner-token" });
+    expect(authenticate).toHaveBeenCalledWith({ identity: { bankCode: "popular", runId: "run-1", attemptId: "attempt-1" }, ownerToken: "owner-token", job: { data: { runId: "run-1", bankId: "popular", accountFingerprint: "fingerprint-1" } } });
     expect(downstream).toHaveBeenCalledWith({ data: { runId: "run-1", bankId: "popular", accountFingerprint: "fingerprint-1" } });
     expect(complete).not.toHaveBeenCalled();
   });
@@ -35,6 +35,40 @@ describe("createAuthenticatedIngestionDeliveryProcessor", () => {
     expect(authenticate.mock.calls.map(([input]) => (input as { ownerToken: string }).ownerToken)).toEqual(["owner-1", "owner-2"]);
     expect(JSON.stringify({ first, second, retry: new AuthenticatedIngestionRetryError("retry_delivery") })).not.toMatch(/owner-|fingerprint-1|attempt-1|credential|url|raw-sentinel/);
     expect(downstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("passes an optional AbortSignal to authentication without accepting signal accessors", async () => {
+    const controller = new AbortController(); const { processor, authenticate } = setup();
+    await processor({ data: payload(), signal: controller.signal } as never);
+    expect(authenticate).toHaveBeenCalledWith(expect.objectContaining({ signal: controller.signal }));
+  });
+
+  it("fails closed for a hostile signal accessor without exposing it to authentication", async () => {
+    const prototype = Object.create(AbortSignal.prototype); Object.defineProperty(prototype, "aborted", { get: () => { throw new Error("raw-signal-sentinel"); } });
+    const { processor, authenticate, complete } = setup();
+    await processor({ data: payload(), signal: Object.create(prototype) } as never);
+    expect(authenticate).not.toHaveBeenCalled(); expect(complete).toHaveBeenCalledWith(expect.objectContaining({ status: "failed" })); expect(JSON.stringify(complete.mock.calls)).not.toContain("raw-signal-sentinel");
+  });
+
+  it("rejects a non-throwing AbortSignal prototype spoof without invoking authentication", async () => {
+    const spoof = Object.create(AbortSignal.prototype); Object.defineProperty(spoof, "aborted", { value: false });
+    const { processor, authenticate, downstream, complete } = setup();
+    await processor({ data: payload(), signal: spoof } as never);
+    expect(authenticate).not.toHaveBeenCalled(); expect(downstream).not.toHaveBeenCalled(); expect(complete).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a proxied native signal without triggering its traps", async () => {
+    const controller = new AbortController(); const signal = new Proxy(controller.signal, { get() { throw new Error("raw-proxy-sentinel"); } });
+    const { processor, authenticate, downstream, complete } = setup();
+    await processor({ data: payload(), signal } as never);
+    expect(authenticate).not.toHaveBeenCalled(); expect(downstream).not.toHaveBeenCalled(); expect(JSON.stringify(complete.mock.calls)).not.toContain("raw-proxy-sentinel");
+  });
+
+  it("rechecks cancellation after authenticated precondition before collection", async () => {
+    const controller = new AbortController(); const downstream = vi.fn(async () => result); const complete = vi.fn(async () => result);
+    const processor = createAuthenticatedIngestionDeliveryProcessor({ authenticate: async () => { controller.abort(); return { status: "authenticated" }; }, downstream, complete, createOwnerToken: () => "owner" });
+    await expect(processor({ data: payload(), signal: controller.signal })).rejects.toEqual(new AuthenticatedIngestionRetryError("cancelled"));
+    expect(downstream).not.toHaveBeenCalled(); expect(complete).not.toHaveBeenCalled();
   });
 
   it.each([{ runId: "run-1", bankId: "popular", accountFingerprint: "fingerprint-1" }, { runId: "run-1", bankId: "popular", accountFingerprint: "fingerprint-1", expiredEventId: "expired-1" }])("completes legacy payloads safely", async (data) => {

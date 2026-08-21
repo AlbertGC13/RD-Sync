@@ -8,14 +8,16 @@ declare const credentialMutationFenceBrand: unique symbol;
 export interface CredentialMutationFence { readonly [credentialMutationFenceBrand]: typeof credentialMutationFenceBrand; beginCredentialInteraction(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; renewBeforeCredentialMutation(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; recordSubmitBarrier(): Promise<Readonly<{ status: "authorized" | "blocked" }>>; }
 export interface AuthenticationExecution { execute(input: Readonly<{ fence: CredentialMutationFence; signal: AbortSignal }>): Promise<AuthenticationExecutionResult>; }
 export interface AuthenticationHeartbeatScheduler { start(heartbeat: () => Promise<void>): Readonly<{ stop(): Promise<void> }>; }
-export type AuthenticatedSessionMutationRunnerDependencies = Readonly<{ execution: AuthenticationExecution; heartbeat: AuthenticationHeartbeatScheduler }>;
+export type AuthenticatedSessionMutationRunnerDependencies = Readonly<{ execution: AuthenticationExecution; heartbeat: AuthenticationHeartbeatScheduler; cancellationSignal?: AbortSignal }>;
 
 type Phase = "leased" | "interaction_started" | "submit_barrier_recorded";
 type Decision = Readonly<{ kind: "authenticated" }> | Readonly<{ kind: "retry" }> | Readonly<{ kind: "failed"; failure: SessionAuthenticationFailurePair }>;
 const activeCredentialMutationFences = new WeakSet<object>();
+const readNativeAbortSignal = Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get;
 export const isCredentialMutationFence = (value: unknown): value is CredentialMutationFence => typeof value === "object" && value !== null && activeCredentialMutationFences.has(value);
 const isRecord = (value: unknown): value is Record<PropertyKey, unknown> => typeof value === "object" && value !== null;
 const exact = (value: unknown, keys: readonly string[]) => isRecord(value) && Reflect.ownKeys(value).length === keys.length && Reflect.ownKeys(value).every((key) => typeof key === "string" && keys.includes(key));
+const cancellationState = (signal: unknown): boolean | null | undefined => signal === undefined ? undefined : (() => { try { return readNativeAbortSignal?.call(signal) ?? null; } catch { return null; } })();
 const executionResult = (value: unknown): AuthenticationExecutionResult | null => {
   const record = value as Record<PropertyKey, unknown>;
   if (exact(value, ["status"]) && (record.status === "succeeded" || record.status === "transient_unavailable" || record.status === "cancelled" || record.status === "blocked")) return value as AuthenticationExecutionResult;
@@ -36,11 +38,13 @@ const decide = (result: AuthenticationExecutionResult | null, phase: Phase): Dec
 };
 class Gate { private tail = Promise.resolve(); run<T>(work: () => Promise<T>): Promise<T> { const next = this.tail.then(work, work); this.tail = next.then(() => undefined, () => undefined); return next; } async drain() { await this.tail; } }
 
-export function createAuthenticatedSessionMutationRunner({ execution, heartbeat }: AuthenticatedSessionMutationRunnerDependencies): AuthenticatedSessionMutationRunner {
+export function createAuthenticatedSessionMutationRunner({ execution, heartbeat, cancellationSignal }: AuthenticatedSessionMutationRunnerDependencies): AuthenticatedSessionMutationRunner {
   return {
     async run(authority: AuthenticationMutationAuthority): Promise<AuthenticatedSessionMutationRunnerResult> {
       const claimed = claimAuthenticationMutationAuthority(authority);
       if (claimed.status !== "claimed") return { status: "unresolved" };
+      const cancellation = cancellationState(cancellationSignal);
+      if (cancellation === null) return { status: "unresolved" };
       const gate = new Gate(); const controller = new AbortController(); let phase: Phase = "leased"; let sticky = false; let active = false;
       const fail = () => { if (!sticky) { sticky = true; controller.abort(); } };
       const guarded = (operation: () => Promise<unknown>, advance?: Phase) => gate.run(async () => {
@@ -49,26 +53,31 @@ export function createAuthenticatedSessionMutationRunner({ execution, heartbeat 
         catch { fail(); return { status: "blocked" } as const; }
       });
       const fence = Object.freeze({ beginCredentialInteraction: () => guarded(() => claimed.authority.beginCredentialInteraction(), "interaction_started"), renewBeforeCredentialMutation: () => guarded(() => claimed.authority.renewLease()), recordSubmitBarrier: () => guarded(() => claimed.authority.recordSubmitBarrier(), "submit_barrier_recorded") }) as CredentialMutationFence;
-      let scheduler: Readonly<{ stop(): Promise<void> }>; let stopped = false;
-      try { scheduler = heartbeat.start(() => stopped ? Promise.resolve() : guarded(() => claimed.authority.renewLease()).then(() => undefined)); } catch { return { status: "unresolved" }; }
-      let result: unknown = null;
-      active = true;
-      activeCredentialMutationFences.add(fence);
-      try { result = await execution.execute({ fence, signal: controller.signal }); } catch { result = null; }
-      finally { active = false; activeCredentialMutationFences.delete(fence); }
-      stopped = true;
-      try { await scheduler.stop(); } catch { fail(); }
-      await gate.drain();
-      if (sticky) return { status: "unresolved" };
-      const decision = decide(executionResult(result), phase);
-      return gate.run(async () => {
+      const abort = () => fail(); let listening = false;
+      if (cancellationSignal !== undefined) { EventTarget.prototype.addEventListener.call(cancellationSignal, "abort", abort, { once: true }); listening = true; if (cancellationState(cancellationSignal) !== false) fail(); }
+      try {
         if (sticky) return { status: "unresolved" };
-        try {
-          if (decision.kind === "retry") { const retry = await claimed.authority.claimRetry(); return exact(retry, ["status"]) && (retry.status === "retry_claimed" || retry.status === "retry_exhausted") ? { status: retry.status } : { status: "unresolved" }; }
-          if (decision.kind === "authenticated") { const completed = await claimed.authority.completeAuthenticated(); return exact(completed, ["status"]) && completed.status === "completed" ? { status: "authenticated" } : { status: "unresolved" }; }
-          const completed = await claimed.authority.completeFailed(decision.failure); return exact(completed, ["status"]) && completed.status === "completed" ? { status: "failed", reason: decision.failure.operatorReason } : { status: "unresolved" };
-        } catch { return { status: "unresolved" }; }
-      });
+        let scheduler: Readonly<{ stop(): Promise<void> }>; let stopped = false;
+        try { scheduler = heartbeat.start(() => stopped ? Promise.resolve() : guarded(() => claimed.authority.renewLease()).then(() => undefined)); } catch { return { status: "unresolved" }; }
+        let result: unknown = null;
+        active = true;
+        activeCredentialMutationFences.add(fence);
+        try { result = await execution.execute({ fence, signal: controller.signal }); } catch { result = null; }
+        finally { active = false; activeCredentialMutationFences.delete(fence); }
+        stopped = true;
+        try { await scheduler.stop(); } catch { fail(); }
+        await gate.drain();
+        if (sticky) return { status: "unresolved" };
+        const decision = decide(executionResult(result), phase);
+        return gate.run(async () => {
+          if (sticky) return { status: "unresolved" };
+          try {
+            if (decision.kind === "retry") { if (sticky) return { status: "unresolved" }; const retry = await claimed.authority.claimRetry(); return exact(retry, ["status"]) && (retry.status === "retry_claimed" || retry.status === "retry_exhausted") ? { status: retry.status } : { status: "unresolved" }; }
+            if (decision.kind === "authenticated") { if (sticky) return { status: "unresolved" }; const completed = await claimed.authority.completeAuthenticated(); return exact(completed, ["status"]) && completed.status === "completed" ? { status: "authenticated" } : { status: "unresolved" }; }
+            if (sticky) return { status: "unresolved" }; const completed = await claimed.authority.completeFailed(decision.failure); return exact(completed, ["status"]) && completed.status === "completed" ? { status: "failed", reason: decision.failure.operatorReason } : { status: "unresolved" };
+          } catch { return { status: "unresolved" }; }
+        });
+      } finally { if (listening) EventTarget.prototype.removeEventListener.call(cancellationSignal!, "abort", abort); }
     },
   };
 }

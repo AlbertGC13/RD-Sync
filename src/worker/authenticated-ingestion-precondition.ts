@@ -37,6 +37,7 @@ export type AuthenticatedIngestionPreconditionDependencies = Readonly<{
 
 const review = (): AuthenticatedSessionPreconditionResult => ({ status: "needs_operator_action", reason: "authentication_attempt_requires_review" });
 const isNonblank = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
+const readNativeAbortSignal = Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get;
 
 function exact(value: unknown, keys: readonly string[]): Record<string, unknown> | null {
   if (value === null || typeof value !== "object" || Array.isArray(value) || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) return null;
@@ -63,8 +64,11 @@ function parseInvocation(value: unknown): Invocation | null {
 
 function parseSignal(value: unknown): AbortSignal | null | undefined {
   if (value === undefined) return undefined;
-  if (value === null || typeof value !== "object" || !AbortSignal.prototype.isPrototypeOf(value)) return null;
-  try { void (value as AbortSignal).aborted; return value as AbortSignal; } catch { return null; }
+  try { return value !== null && typeof value === "object" && readNativeAbortSignal?.call(value) !== undefined ? value as AbortSignal : null; } catch { return null; }
+}
+
+function aborted(signal: AbortSignal): boolean | null {
+  try { return readNativeAbortSignal?.call(signal) ?? null; } catch { return null; }
 }
 
 function parseJob(value: unknown): AuthenticationJob | null {
@@ -85,14 +89,14 @@ export function createAuthenticatedIngestionPrecondition(
     try {
       const invocation = parseInvocation(input);
       if (!invocation) return { status: "invalid_request" };
-      if (invocation.signal?.aborted) return { status: "cancelled" };
+      if (invocation.signal !== undefined && aborted(invocation.signal) !== false) return { status: "cancelled" };
       if (job.data.bankId !== invocation.identity.bankCode || job.data.runId !== invocation.identity.runId) return { status: "invalid_request" };
       const coordinator = { coordinate: (coordinatorInput: CoordinateAuthenticatedSessionStateInput) => coordinateAuthenticatedSessionState(coordinatorInput, { ...dependencies.coordinatorDependencies, completion: { mode: "attempt_only" } }) };
       const runner: AuthenticatedSessionMutationRunner = {
         run: async (authority) => {
           const execution = createScrapeTimeAutoLoginAuthenticationExecution({ runnerDependencies: dependencies.runnerDependencies, job: { data: job.data }, identity: invocation.identity });
           const heartbeat = createFixedDelayAuthenticationHeartbeatScheduler<unknown>({ delayMs: config.heartbeatMs, ...dependencies.heartbeat });
-          return createAuthenticatedSessionMutationRunner({ execution, heartbeat }).run(authority);
+          return createAuthenticatedSessionMutationRunner({ execution, heartbeat, ...(invocation.signal === undefined ? {} : { cancellationSignal: invocation.signal }) }).run(authority);
         },
       };
       const coordinatorInput: CoordinateAuthenticatedSessionStateInput = { identity: invocation.identity, ownerToken: invocation.ownerToken, leaseDurationMs: config.leaseMs, ...(invocation.signal === undefined ? {} : { signal: invocation.signal }) };
