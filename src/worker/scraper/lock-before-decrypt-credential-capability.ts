@@ -3,7 +3,7 @@ export type LockBeforeDecryptOutcome<TResult> = Readonly<
   | { status: "invalid_input" | "unsupported_bank" | "cancelled" | "lock_busy" | "lock_unavailable" | "credential_unavailable" | "execution_failed" }
 >;
 
-type Lease = Readonly<{ release(): Promise<boolean> }>;
+type Lease = Readonly<{ signal: AbortSignal; release(): Promise<boolean> }>;
 type Request = Readonly<{ bankCode: string; signal?: AbortSignal }>;
 type Dependencies<TCredential, TResult> = Readonly<{
   isSupportedBank(bankCode: string): boolean;
@@ -33,6 +33,22 @@ function readNativeAbortState(value: unknown): boolean | null {
   try { return nativeAbortSignalAborted?.call(value) ?? null; } catch { return null; }
 }
 
+function parseLease(value: unknown): Lease | null {
+  try {
+    if (!value || typeof value !== "object" || !Object.isFrozen(value)) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value); const signal = descriptors.signal; const release = descriptors.release;
+    if (Object.keys(descriptors).length !== 2 || !signal || !release || "get" in signal || "set" in signal || "get" in release || "set" in release || typeof release.value !== "function" || readNativeAbortState(signal.value) === null) return null;
+    return Object.freeze({ signal: signal.value as AbortSignal, release: release.value as () => Promise<boolean> });
+  } catch { return null; }
+}
+
+function composeAbortSignals(external: AbortSignal | undefined, lease: AbortSignal) {
+  const controller = new AbortController(); const abort = () => controller.abort();
+  if (readNativeAbortState(external) || readNativeAbortState(lease)) abort();
+  external?.addEventListener("abort", abort, { once: true }); lease.addEventListener("abort", abort, { once: true });
+  return { signal: controller.signal, dispose: () => { external?.removeEventListener("abort", abort); lease.removeEventListener("abort", abort); } };
+}
+
 export function createLockBeforeDecryptCredentialCapability<TCredential, TResult>(dependencies: Dependencies<TCredential, TResult>) {
   return Object.freeze({
     async run(value: unknown): Promise<LockBeforeDecryptOutcome<TResult>> {
@@ -43,16 +59,21 @@ export function createLockBeforeDecryptCredentialCapability<TCredential, TResult
       let lease: Lease | null;
       try { lease = await dependencies.lock.acquire(request); } catch { return outcome("lock_unavailable"); }
       if (!lease) return outcome("lock_busy");
+      const parsedLease = parseLease(lease);
+      if (!parsedLease) { try { await lease.release(); } catch {} return outcome("lock_unavailable"); }
+      const composed = composeAbortSignals(request.signal, parsedLease.signal);
       try {
-        if (readNativeAbortState(request.signal) === true) return outcome("cancelled");
+        if (readNativeAbortState(composed.signal) === true) return outcome("cancelled");
         let credential: TCredential | null;
         try { credential = await dependencies.loadCredential(request.bankCode); } catch { return outcome("credential_unavailable"); }
-        if (credential == null || readNativeAbortState(request.signal) === true) return outcome(credential == null ? "credential_unavailable" : "cancelled");
-        try { return outcome("completed", await dependencies.executeProtected(Object.freeze({ bankCode: request.bankCode, credential, ...(request.signal && { signal: request.signal }) }))); } catch { return outcome("execution_failed"); }
+        if (readNativeAbortState(composed.signal) === true) return outcome("cancelled");
+        if (credential == null) return outcome("credential_unavailable");
+        try { return outcome("completed", await dependencies.executeProtected(Object.freeze({ bankCode: request.bankCode, credential, signal: composed.signal }))); } catch { return outcome("execution_failed"); }
       } finally {
         let releaseFailed = false;
         try { releaseFailed = !(await lease.release()); } catch { releaseFailed = true; }
         if (releaseFailed) try { dependencies.observeReleaseFailure?.(); } catch {}
+        composed.dispose();
       }
     },
   });

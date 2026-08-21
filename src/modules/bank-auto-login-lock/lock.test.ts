@@ -6,6 +6,7 @@ import {
   DEFAULT_LOCK_TTL_MS,
   MAX_LOCK_TTL_MS,
   LOCK_KEY_PREFIX,
+  buildBankAuthenticationLockKey,
 } from "./index";
 import { createAuthenticationAttemptTrigger } from "../bank-auto-login-trigger";
 
@@ -227,6 +228,14 @@ describe("AutoLoginLock", () => {
   });
 
   describe("input validation", () => {
+    it("builds a dedicated bank-only cluster-safe authentication key", () => {
+      const key = buildBankAuthenticationLockKey("popular");
+      expect([key, `${key}:fence`]).toEqual(["autologin:lock:v3:bank-authentication:{popular}", "autologin:lock:v3:bank-authentication:{popular}:fence"]);
+      expect(buildBankAuthenticationLockKey("banreservas")).not.toBe(key);
+    });
+    it.each(["", "POPULAR", "popular!", new Proxy({}, {}) as never])("rejects invalid bank authentication key input", (bankCode) => {
+      expect(() => buildBankAuthenticationLockKey(bankCode)).toThrow(LockValidationError);
+    });
     it.each([
       ["", "empty bankCode"], ["POPULAR", "uppercase"], ["popular-bank!", "special chars"],
       ["1invalid", "starts with digit"], ["a".repeat(33), "exceeds 32 chars"],
