@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
+import { MAX_LOCK_TTL_MS } from "../modules/bank-auto-login-lock";
 import { createAuthenticatedIngestionProductionResources, type AuthenticatedIngestionProductionResourceFactories } from "./authenticated-ingestion-production-resources";
 
 const config = () => Object.freeze({ databaseUrl: "postgresql://user:secret@db.example:5432/rd", redisUrl: "rediss://user:secret@cache.example:6380/2", redisLockTtlMs: 30_000, redisLockRenewIntervalMs: 10_000, credentialKey: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", smtpUrl: "smtps://user:secret@mail.example:465", adminEmail: "ops@example.com" });
@@ -13,10 +14,10 @@ function arrange(fail?: "redis" | "repositories" | "transport" | "alert") {
   const resource = { lock, close };
   const repositories = Object.freeze({ authenticationAttempts: { getOrCreate: async () => null, resolveObservedRestoration: async () => null }, autoLoginConfigs: { getByBankCode: async () => null }, credentials: { findAuthenticationMaterialByBankCode: async () => null }, scrapeRuns: { createQueued: async () => null }, transactions: { upsertMany: async () => ({ inserted: 0, skipped: 0 }) }, auditSink: { record: async () => undefined } });
   const transport = { send: vi.fn(async () => undefined) };
-  const alertSink = { notifyIngestionAttention: async () => undefined, notifySessionAttention: async () => undefined };
+  const alertSink = { notifyIngestionAttention: async () => undefined, notifySessionAttention: async () => undefined, notifyCapacityAttention: async () => undefined };
   const factories: AuthenticatedIngestionProductionResourceFactories = {
     createPrismaClient: vi.fn(() => { order.push("prisma"); return prisma as never; }),
-    createRedisResource: vi.fn(async (input) => { order.push("redis"); expect(input).toEqual({ redisUrl: config().redisUrl, ttlMs: 30_000, renewIntervalMs: 10_000 }); if (fail === "redis") throw new Error("secret"); return resource; }),
+    createRedisResource: vi.fn(async (input) => { order.push("redis"); expect(input.redisUrl).toBe(config().redisUrl); if (fail === "redis") throw new Error("secret"); return resource; }),
     createRepositories: vi.fn((input) => { order.push("repositories"); expect(input.prisma).toBe(prisma); if (fail === "repositories") throw new Error("secret"); return repositories as never; }),
     createTransport: vi.fn((url) => { order.push("smtp"); expect(url).toBe(config().smtpUrl); if (fail === "transport") throw new Error("secret"); return transport; }),
     createAlertSink: vi.fn((input) => { order.push("alert"); expect(input).toEqual({ transport, recipient: "ops@example.com" }); if (fail === "alert") throw new Error("secret"); return alertSink; }),
@@ -33,7 +34,7 @@ describe("createAuthenticatedIngestionProductionResources", () => {
   it("rejects malformed config before every factory without exposing secrets", async () => {
     const { factories } = arrange();
     const accessor = Object.freeze(Object.defineProperty({ ...config() }, "databaseUrl", { enumerable: true, get: () => "postgresql://secret@db.example/rd" }));
-    const invalid = [{ ...config() }, Object.freeze({ ...config(), extra: true }), Object.freeze({ ...config(), [Symbol("x")]: true }), accessor, ...["databaseUrl", "redisUrl", "smtpUrl"].map((field) => Object.freeze({ ...config(), [field]: "http://bad.example/#x" })), Object.freeze({ ...config(), adminEmail: "not-email" }), Object.freeze({ ...config(), credentialKey: "AA==" })];
+    const invalid = [{ ...config() }, Object.freeze({ ...config(), extra: true }), Object.freeze({ ...config(), [Symbol("x")]: true }), accessor, ...["databaseUrl", "redisUrl", "smtpUrl"].map((field) => Object.freeze({ ...config(), [field]: "http://bad.example/#x" })), Object.freeze({ ...config(), adminEmail: "not-email" }), Object.freeze({ ...config(), credentialKey: "AA==" }), Object.freeze({ ...config(), redisLockTtlMs: MAX_LOCK_TTL_MS + 1 })];
     for (const value of invalid) await expect(createAuthenticatedIngestionProductionResources(value as never, factories)).rejects.toThrow("Invalid authenticated ingestion production resource configuration.");
     expect(factories.createPrismaClient).not.toHaveBeenCalled();
   });
@@ -42,6 +43,7 @@ describe("createAuthenticatedIngestionProductionResources", () => {
     const { alertSink, close, disconnect, factories, lock, order, transport } = arrange();
     const resources = await createAuthenticatedIngestionProductionResources(config(), factories);
     expect(order).toEqual(["prisma", "redis", "repositories", "smtp", "alert"]);
+    expect(factories.createRedisResource).toHaveBeenCalledWith({ redisUrl: config().redisUrl, ttlMs: 30_000, renewIntervalMs: 10_000 });
     expect(Object.isFrozen(resources)).toBe(true);
     expect(Reflect.ownKeys(resources)).toEqual(["authenticationAttempts", "restorationResolver", "autoLoginConfigs", "credentials", "scrapeRuns", "transactions", "auditSink", "credentialKeyResolver", "bankAuthenticationLock", "alertSink", "closeLock", "closePrisma"]);
     expect(resources).toMatchObject({ bankAuthenticationLock: lock, alertSink });
@@ -50,6 +52,11 @@ describe("createAuthenticatedIngestionProductionResources", () => {
     expect(disconnect).not.toHaveBeenCalled();
     const first = resources.credentialKeyResolver(); first.fill(0);
     expect(resources.credentialKeyResolver().toString("hex")).toBe(config().credentialKey);
+  });
+
+  it("accepts the exact maximum lock TTL", async () => {
+    const { factories } = arrange();
+    await expect(createAuthenticatedIngestionProductionResources(Object.freeze({ ...config(), redisLockTtlMs: MAX_LOCK_TTL_MS, redisLockRenewIntervalMs: MAX_LOCK_TTL_MS - 1 }), factories)).resolves.toBeDefined();
   });
 
   it("keeps shutdown promise identity and fixes close failures", async () => {
@@ -71,6 +78,12 @@ describe("createAuthenticatedIngestionProductionResources", () => {
       expect(setup.disconnect).toHaveBeenCalledTimes(1);
       if (failure !== "redis") expect(setup.close).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it("rejects an alert sink missing capacity support after reverse cleanup", async () => {
+    const setup = arrange();
+    await expect(createAuthenticatedIngestionProductionResources(config(), { ...setup.factories, createAlertSink: () => ({ notifyIngestionAttention: async () => undefined, notifySessionAttention: async () => undefined }) as never })).rejects.toThrow("Unable to create authenticated ingestion production resources.");
+    expect(setup.order.slice(-2)).toEqual(["lock-close", "prisma-close"]);
   });
 
   it("contains malformed overrides and products with fixed errors and cleanup", async () => {

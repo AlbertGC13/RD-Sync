@@ -1,4 +1,5 @@
 import type { PrismaClient } from "../generated/prisma/client";
+import { MAX_LOCK_TTL_MS } from "../modules/bank-auto-login-lock";
 import { BankAutoLoginConfigRepository } from "../modules/bank-auto-login-config/repository";
 import { BankCredentialRepository } from "../modules/bank-credentials/repository";
 import { createCredentialKeyResolver } from "../modules/bank-credentials/key-resolver";
@@ -77,10 +78,11 @@ function validUrl(value: unknown, schemes: readonly string[]): value is string {
 
 function parseConfig(value: unknown): AuthenticatedIngestionProductionResourceConfig | null {
   const config = exact(value, keys);
-  if (!config || !validUrl(config.databaseUrl, ["postgres:", "postgresql:"]) || !validUrl(config.redisUrl, ["redis:", "rediss:"]) || !validUrl(config.smtpUrl, ["smtp:", "smtps:"])) return null;
-  if (![config.redisLockTtlMs, config.redisLockRenewIntervalMs].every((value) => typeof value === "number" && Number.isSafeInteger(value) && value > 0) || (config.redisLockRenewIntervalMs as number) >= (config.redisLockTtlMs as number)) return null;
-  if (typeof config.adminEmail !== "string" || config.adminEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(config.adminEmail)) return null;
-  try { createCredentialKeyResolver(config.credentialKey as string); } catch { return null; }
+  if (!config || typeof config.databaseUrl !== "string" || typeof config.redisUrl !== "string" || typeof config.redisLockTtlMs !== "number" || typeof config.redisLockRenewIntervalMs !== "number" || typeof config.credentialKey !== "string" || typeof config.smtpUrl !== "string" || typeof config.adminEmail !== "string") return null;
+  if (!validUrl(config.databaseUrl, ["postgres:", "postgresql:"]) || !validUrl(config.redisUrl, ["redis:", "rediss:"]) || !validUrl(config.smtpUrl, ["smtp:", "smtps:"])) return null;
+  if (![config.redisLockTtlMs, config.redisLockRenewIntervalMs].every((value) => Number.isSafeInteger(value) && value > 0) || config.redisLockTtlMs > MAX_LOCK_TTL_MS || config.redisLockRenewIntervalMs >= config.redisLockTtlMs) return null;
+  if (config.adminEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(config.adminEmail)) return null;
+  try { createCredentialKeyResolver(config.credentialKey); } catch { return null; }
   return config as AuthenticatedIngestionProductionResourceConfig;
 }
 
@@ -130,7 +132,7 @@ export async function createAuthenticatedIngestionProductionResources(config: Au
     const transport = factories.createTransport(parsed.smtpUrl);
     if (!hasMethods(transport, ["send"])) throw new Error();
     const alertSink = factories.createAlertSink({ transport, recipient: parsed.adminEmail });
-    if (!hasMethods(alertSink, ["notifyIngestionAttention", "notifySessionAttention"])) throw new Error();
+    if (!hasMethods(alertSink, ["notifyIngestionAttention", "notifySessionAttention", "notifyCapacityAttention"])) throw new Error();
     let closePromise: Promise<void> | undefined;
     const closePrisma = () => closePromise ??= Promise.resolve().then(() => prisma?.$disconnect()).then(() => undefined, () => { throw new Error(CLOSE_ERROR); });
     return Object.freeze({
