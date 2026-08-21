@@ -29,4 +29,25 @@ describe("run-now route activation isolation", () => {
     let loads = 0; vi.doMock("./route-runtime", () => { if (loads++ === 0) throw new Error("secret"); return { postDefaultScrapeRunNow: async () => Response.json({}, { status: 202 }) }; });
     const { POST } = await import("./route"); expect((await POST(request())).status).toBe(503); expect((await POST(request())).status).toBe(202); expect(loads).toBe(2);
   });
+  it("fails closed after a real cached Redis queue survives an env transition", async () => {
+    const keys = ["__rdSyncIngestionQueue", "__rdSyncIngestionConsumer", "__rdSyncIngestionConsumerInitialized", "__rdSyncDefaultIngestionConsumerSelector"] as const;
+    const saved = keys.map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+    const redis = process.env.RD_SYNC_REDIS_URL; let runtimeLoads = 0;
+    try {
+      for (const [key] of saved) delete (globalThis as Record<string, unknown>)[key];
+      process.env.RD_SYNC_REDIS_URL = "redis://stale-sentinel";
+      vi.doMock("../../../../worker/queues/bullmq-queue", () => ({ buildRedisConnectionOptions: () => ({}), createBullmqIngestionQueue: () => ({ add: async () => undefined }) }));
+      vi.resetModules(); await import("../defaults");
+      delete process.env.RD_SYNC_REDIS_URL; vi.resetModules();
+      vi.doMock("./route-runtime", () => { runtimeLoads += 1; throw new Error("must not schedule"); });
+      process.env.RD_SYNC_TRUST_PROXY_HEADERS = "enabled";
+      const { POST } = await import("./route"); const response = await POST(request()); const body = await response.json();
+      expect(response.status).toBe(503); expect(body).toEqual({ error: "Unable to schedule run" }); expect(runtimeLoads).toBe(0);
+    } finally {
+      vi.doUnmock("../../../../worker/queues/bullmq-queue"); vi.doUnmock("./route-runtime");
+      for (const [key, descriptor] of saved) { delete (globalThis as Record<string, unknown>)[key]; if (descriptor) Object.defineProperty(globalThis, key, descriptor); }
+      if (redis === undefined) delete process.env.RD_SYNC_REDIS_URL; else process.env.RD_SYNC_REDIS_URL = redis;
+      vi.resetModules();
+    }
+  });
 });
