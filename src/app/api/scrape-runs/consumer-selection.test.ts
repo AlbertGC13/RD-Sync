@@ -10,12 +10,12 @@ describe("in-memory ingestion consumer selection", () => {
       .rejects.toThrow(AUTHENTICATED_INGESTION_REDIS_REQUIRED);
     expect(loads).toBe(0);
   });
-  it("leaves Redis modes to the separate worker without loading the in-memory runtime", async () => {
+  it("loads Redis modes after the decision but returns no in-memory consumer", async () => {
     let loads = 0;
     const loader = async () => { loads += 1; return { createDefaultInMemoryIngestionConsumer: () => ({ drainPending: async () => [] }) }; };
     await expect(selector({ RD_SYNC_AUTHENTICATED_INGESTION: "enabled", RD_SYNC_REDIS_URL: "redis://worker" }, loader)()).resolves.toBeUndefined();
     await expect(selector({ RD_SYNC_REDIS_URL: "redis://worker" }, loader)()).resolves.toBeUndefined();
-    expect(loads).toBe(0);
+    expect(loads).toBe(2);
   });
   it("loads and caches only the disabled terminal runtime", async () => {
     let loads = 0;
@@ -51,5 +51,10 @@ describe("in-memory ingestion consumer selection", () => {
     await expect(select()).rejects.toThrow(IN_MEMORY_INGESTION_RUNTIME_UNAVAILABLE);
     await expect(select()).resolves.toBeDefined();
     expect(loads).toBe(2);
+  });
+
+  it("rejects a cached non-terminal runtime without exposing its error", async () => {
+    const select = createIngestionConsumerSelector({ env: {}, loadDisabledRuntime: async () => ({ createDefaultInMemoryIngestionConsumer: () => undefined }) });
+    await expect(select()).rejects.toThrow(IN_MEMORY_INGESTION_RUNTIME_UNAVAILABLE);
   });
 });

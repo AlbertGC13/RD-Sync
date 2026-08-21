@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { InMemoryScrapeRunRepository } from "../../../modules/scrape-runs";
 import type { IngestionJobData, QueueLike } from "../../../worker/queues";
-import { createPostScrapeRunNowHandler } from "./run-now/route";
+import { createPostScrapeRunNowHandler } from "./run-now/route-runtime";
 
 describe("POST /api/scrape-runs/run-now", () => {
   beforeEach(() => {
