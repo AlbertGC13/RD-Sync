@@ -30,6 +30,7 @@ import { Worker } from "bullmq";
 
 import { buildRedisConnectionOptions } from "./queues/bullmq-queue";
 import { createIngestionWorker, type WorkerConstructor } from "./ingestion-worker-factory";
+import { createIngestionWorkerShutdown, installIngestionWorkerShutdown } from "./ingestion-worker-shutdown";
 import { createRetiredExpiryPublicationConsumer } from "./expiry-publication-consumer";
 import { createDefaultExpiryRuntime } from "./expiry-runtime";
 import { resolveDefaultAlertSink } from "./alerts/email-alert-sink";
@@ -180,22 +181,20 @@ console.log("[ingestion-worker] Started. Waiting for jobs on 'bank-transaction-i
 // How long to wait for in-flight jobs to finish before forcing a hard close.
 // Must be shorter than the container's terminationGracePeriodSeconds (default 30s).
 const SHUTDOWN_GRACE_MS = 25_000;
+const shutdown = createIngestionWorkerShutdown({
+  worker,
+  timeoutMs: SHUTDOWN_GRACE_MS,
+  hooks: {
+    stopExpiryScheduling: () => expiryRuntime.stopScheduling(),
+    // The default lock has no owned client-close hook; WU6d.5g owns that adapter.
+    closeLock: async () => undefined,
+    closeExpiryOutbox: () => expiryRuntime.shutdown(),
+    closePrisma: () => prisma.$disconnect(),
+  },
+});
 
-async function shutdown(signal: string): Promise<void> {
-  console.log(`[ingestion-worker] ${signal} received — shutting down gracefully (${SHUTDOWN_GRACE_MS}ms timeout)...`);
-
-  const graceful = Promise.all([worker.close(), expiryRuntime.shutdown()]);
-  const timeout = new Promise<void>((resolve) =>
-    setTimeout(() => {
-      console.warn("[ingestion-worker] Shutdown grace period exceeded — forcing exit.");
-      resolve();
-    }, SHUTDOWN_GRACE_MS),
-  );
-
-  await Promise.race([graceful, timeout]);
-  console.log("[ingestion-worker] Stopped.");
-  process.exit(0);
-}
-
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
-process.on("SIGINT", () => void shutdown("SIGINT"));
+installIngestionWorkerShutdown({
+  shutdown,
+  terminate: (code) => process.exit(code),
+  signals: process,
+});
