@@ -1,13 +1,14 @@
 import type { AuthenticatedSessionCoordinatorDependencies } from "../modules/bank-sessions/ensure-authenticated-session";
 import { createAuditEvent } from "../modules/audit";
 import { createAuthenticatedIngestionDeliveryProcessor, AuthenticatedIngestionTerminalError, isAuthenticatedIngestionRetryError, readAuthenticatedIngestionDeliveryContext, type AuthenticatedIngestionDeliveryJob, type AuthenticatedIngestionTerminalOutcome } from "./authenticated-ingestion-delivery";
-import { createAuthenticatedIngestionPrecondition } from "./authenticated-ingestion-precondition";
+import { createAuthenticatedIngestionPrecondition, type AuthenticatedIngestionExecutionFactory } from "./authenticated-ingestion-precondition";
 import { createCollectionIngestionProcessor, type CollectionIngestionProcessorDependencies } from "./collection-ingestion-processor";
 import type { IngestionResult } from "./queues";
 import { createAuthenticatedSessionProbe, type ReadonlySessionChecker } from "./scraper/authenticated-session-probe";
 import type { FencedScrapeTimeAutoLoginRunnerDependencies } from "./scraper/scrape-time-auto-login-authentication-execution";
 import type { AuthenticationHeartbeatSchedulerDependencies } from "./scraper/authentication-heartbeat-scheduler";
 import { resolveAuthenticationHeartbeatConfig } from "./scraper/authentication-heartbeat-scheduler";
+import type { ObservedRestorationResolver } from "../modules/bank-sessions/session-authentication-attempt-repository";
 
 type HeartbeatDependencies = Omit<AuthenticationHeartbeatSchedulerDependencies<unknown>, "delayMs">;
 type CollectionDependencies = Pick<CollectionIngestionProcessorDependencies, "scrapeRuns" | "transactions" | "resolveScraper" | "adminAlerts" | "auditSink" | "now">;
@@ -22,7 +23,9 @@ export type AuthenticatedIngestionProcessorDependencies = Readonly<{
   env: Record<string, string | undefined>;
   popularSessionChecker: ReadonlySessionChecker;
   attempts: AuthenticatedSessionCoordinatorDependencies["attempts"];
-  runnerDependencies: FencedScrapeTimeAutoLoginRunnerDependencies;
+  runnerDependencies?: FencedScrapeTimeAutoLoginRunnerDependencies;
+  executionFactory?: AuthenticatedIngestionExecutionFactory;
+  restorationResolver?: ObservedRestorationResolver;
   heartbeat?: HeartbeatDependencies;
   createOwnerToken: () => string;
 }> & CollectionDependencies;
@@ -91,8 +94,10 @@ export function createAuthenticatedIngestionProcessor(
     authenticate: async ({ identity, ownerToken, job, signal }) => createAuthenticatedIngestionPrecondition({
       env: dependencies.env,
       coordinatorDependencies: { attempts: dependencies.attempts, probe },
-      runnerDependencies: dependencies.runnerDependencies,
       job,
+      ...(dependencies.runnerDependencies === undefined ? {} : { runnerDependencies: dependencies.runnerDependencies }),
+      ...(dependencies.executionFactory === undefined ? {} : { executionFactory: dependencies.executionFactory }),
+      ...(dependencies.restorationResolver === undefined ? {} : { restorationResolver: dependencies.restorationResolver }),
       ...(dependencies.heartbeat === undefined ? {} : { heartbeat: dependencies.heartbeat }),
     })({ identity, ownerToken, ...(signal === undefined ? {} : { signal }) }),
     downstream,

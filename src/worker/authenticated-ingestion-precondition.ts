@@ -9,8 +9,10 @@ import {
   type CoordinateAuthenticatedSessionStateInput,
 } from "../modules/bank-sessions/ensure-authenticated-session";
 import type { SessionAuthenticationAttemptIdentity } from "../modules/bank-sessions/session-authentication-attempt";
+import type { ObservedRestorationResolver } from "../modules/bank-sessions/session-authentication-attempt-repository";
 import {
   createAuthenticatedSessionMutationRunner,
+  type AuthenticationExecution,
 } from "./scraper/authenticated-session-mutation-runner";
 import {
   createFixedDelayAuthenticationHeartbeatScheduler,
@@ -26,11 +28,14 @@ type Invocation = Readonly<{ identity: SessionAuthenticationAttemptIdentity; own
 type AuthenticationJob = Readonly<{ data: Readonly<{ bankId: string; runId: string; accountFingerprint: string }> }>;
 type CoordinatorDependencies = Omit<AuthenticatedSessionCoordinatorDependencies, "completion">;
 type HeartbeatDependencies = Omit<AuthenticationHeartbeatSchedulerDependencies<unknown>, "delayMs">;
+export type AuthenticatedIngestionExecutionFactory = (input: Readonly<{ job: AuthenticationJob["data"]; identity: SessionAuthenticationAttemptIdentity }>) => AuthenticationExecution;
 
 export type AuthenticatedIngestionPreconditionDependencies = Readonly<{
   env: Record<string, string | undefined>;
   coordinatorDependencies: CoordinatorDependencies;
-  runnerDependencies: FencedScrapeTimeAutoLoginRunnerDependencies;
+  runnerDependencies?: FencedScrapeTimeAutoLoginRunnerDependencies;
+  executionFactory?: AuthenticatedIngestionExecutionFactory;
+  restorationResolver?: ObservedRestorationResolver;
   job: unknown;
   heartbeat?: HeartbeatDependencies;
 }>;
@@ -83,7 +88,7 @@ export function createAuthenticatedIngestionPrecondition(
 ): (input: unknown) => Promise<AuthenticatedSessionPreconditionResult> {
   const config = resolveAuthenticationHeartbeatConfig(dependencies.env);
   const job = parseJob(dependencies.job);
-  if (!job) throw new Error("Invalid authenticated ingestion precondition configuration.");
+  if (!job || (!dependencies.executionFactory && !dependencies.runnerDependencies)) throw new Error("Invalid authenticated ingestion precondition configuration.");
 
   return async (input: unknown): Promise<AuthenticatedSessionPreconditionResult> => {
     try {
@@ -91,10 +96,13 @@ export function createAuthenticatedIngestionPrecondition(
       if (!invocation) return { status: "invalid_request" };
       if (invocation.signal !== undefined && aborted(invocation.signal) !== false) return { status: "cancelled" };
       if (job.data.bankId !== invocation.identity.bankCode || job.data.runId !== invocation.identity.runId) return { status: "invalid_request" };
-      const coordinator = { coordinate: (coordinatorInput: CoordinateAuthenticatedSessionStateInput) => coordinateAuthenticatedSessionState(coordinatorInput, { ...dependencies.coordinatorDependencies, completion: { mode: "attempt_only" } }) };
+      const completion = dependencies.restorationResolver === undefined ? { mode: "attempt_only" as const } : { mode: "expiry_restoration" as const, resolver: dependencies.restorationResolver };
+      const coordinator = { coordinate: (coordinatorInput: CoordinateAuthenticatedSessionStateInput) => coordinateAuthenticatedSessionState(coordinatorInput, { ...dependencies.coordinatorDependencies, completion }) };
       const runner: AuthenticatedSessionMutationRunner = {
         run: async (authority) => {
-          const execution = createScrapeTimeAutoLoginAuthenticationExecution({ runnerDependencies: dependencies.runnerDependencies, job: { data: job.data }, identity: invocation.identity });
+          const execution = dependencies.executionFactory
+            ? dependencies.executionFactory(Object.freeze({ job: Object.freeze({ ...job.data }), identity: Object.freeze({ ...invocation.identity }) }))
+            : createScrapeTimeAutoLoginAuthenticationExecution({ runnerDependencies: dependencies.runnerDependencies!, job: { data: job.data }, identity: invocation.identity });
           const heartbeat = createFixedDelayAuthenticationHeartbeatScheduler<unknown>({ delayMs: config.heartbeatMs, ...dependencies.heartbeat });
           return createAuthenticatedSessionMutationRunner({ execution, heartbeat, ...(invocation.signal === undefined ? {} : { cancellationSignal: invocation.signal }) }).run(authority);
         },
