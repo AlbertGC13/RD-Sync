@@ -26,8 +26,10 @@
 // tsx does not auto-load .env, so the worker process needs this explicitly.
 import "dotenv/config";
 
+import { randomUUID } from "node:crypto";
 import { Worker } from "bullmq";
 
+import { createCdpSessionChecker } from "../modules/bank-sessions";
 import { buildRedisConnectionOptions } from "./queues/bullmq-queue";
 import { createIngestionWorker, type WorkerConstructor } from "./ingestion-worker-factory";
 import { createIngestionWorkerShutdown, installIngestionWorkerShutdown } from "./ingestion-worker-shutdown";
@@ -53,6 +55,7 @@ import { defaultTransactionRepository } from "../app/api/transactions/defaults";
 import { defaultAuditSink } from "../app/api/audit/defaults";
 import { createIngestionProcessor } from "./queues";
 import { createProductionAutoLoginOutcomeHook } from "./auto-login-composition";
+import { activateAuthenticatedIngestionProduction } from "./authenticated-ingestion-production-activation";
 
 // ---------------------------------------------------------------------------
 // Fail fast if required env vars are absent
@@ -142,14 +145,40 @@ const runScrapeTimeAutoLogin = createScrapeTimeAutoLoginRunner({
   afterAutoLoginOutcome: createProductionAutoLoginOutcomeHook(defaultAuditSink),
 });
 
-const processor = createIngestionProcessor({
-  scrapeRuns: defaultScrapeRunRepository,
-  transactions: defaultTransactionRepository,
-  adminAlerts: resolveDefaultAlertSink(),
-  auditSink: defaultAuditSink,
-  resolveScraper: resolveDefaultScraper,
-  runScrapeTimeAutoLogin,
-  expiryEpisodes,
+const activatedProcessor = await activateAuthenticatedIngestionProduction({
+  env: process.env,
+  createLegacy: () => createIngestionProcessor({
+    scrapeRuns: defaultScrapeRunRepository,
+    transactions: defaultTransactionRepository,
+    adminAlerts: resolveDefaultAlertSink(),
+    auditSink: defaultAuditSink,
+    resolveScraper: resolveDefaultScraper,
+    runScrapeTimeAutoLogin,
+    expiryEpisodes,
+  }),
+  loadProduction: async () => {
+    const [resourcesModule, processorModule] = await Promise.all([
+      import("./authenticated-ingestion-production-resources"),
+      import("./authenticated-ingestion-production-processor"),
+    ]);
+    return {
+      createResources: resourcesModule.createAuthenticatedIngestionProductionResources,
+      createProcessor: (resources) => processorModule.createAuthenticatedIngestionProductionProcessor(resources, {
+        env: process.env,
+        popularSessionChecker: createCdpSessionChecker({ cdpUrl: resolveBankBrowserEnv(popularBankCode, process.env).cdpUrl }),
+        createOwnerToken: randomUUID,
+        resolveScraper: resolveDefaultScraper,
+        adapterRegistry: bankAdapterRegistry,
+        cdpUrlForBankCode: (bankCode) => resolveBankBrowserEnv(bankCode, process.env).cdpUrl || undefined,
+        ensureBrowser: createScrapeTimeAutoLoginBrowserOpener({
+          trustedLoginUrl: popularPortalConfig.baseUrl,
+          visibleSelectorTimeoutMs: parseAutoLoginSelectorTimeoutMs(process.env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS),
+          ensureBrowserRuntime: createEnsureBrowserForBank(popularBankCode, process.env),
+          acquireBrowserSlot: createAcquireBrowserSlotFromEnv(process.env),
+        }),
+      }),
+    };
+  },
 });
 
 const consumeRetiredExpiryPublicationJob = createRetiredExpiryPublicationConsumer({
@@ -162,7 +191,7 @@ const consumeRetiredExpiryPublicationJob = createRetiredExpiryPublicationConsume
 
 const worker = createIngestionWorker({
   connection,
-  processor,
+  processor: activatedProcessor.processor,
   consumeRetiredExpiryPublicationJob,
   concurrency: 2,
   // Bind the real bullmq Worker at the composition root; the factory stays
@@ -186,10 +215,12 @@ const shutdown = createIngestionWorkerShutdown({
   timeoutMs: SHUTDOWN_GRACE_MS,
   hooks: {
     stopExpiryScheduling: () => expiryRuntime.stopScheduling(),
-    // The default lock has no owned client-close hook; WU6d.5g owns that adapter.
-    closeLock: async () => undefined,
+    closeLock: activatedProcessor.kind === "authenticated" ? activatedProcessor.closeLock : async () => undefined,
     closeExpiryOutbox: () => expiryRuntime.shutdown(),
-    closePrisma: () => prisma.$disconnect(),
+    closePrisma: async () => {
+      if (activatedProcessor.kind === "authenticated") await activatedProcessor.closePrisma();
+      await prisma.$disconnect();
+    },
   },
 });
 
