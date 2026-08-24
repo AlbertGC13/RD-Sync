@@ -31,6 +31,7 @@ export const bhdPersonalPortalProfile = {
   selectors: {
     transactionTable: "table.p-datatable-table",
     transactionRow: "tr.body-responsive",
+    movementPanelButton: "button.bhd-btn-primary",
     fromDateInput: "input[placeholder='Fecha inicio']",
     toDateInput: "input[placeholder='Fecha final']",
   },
