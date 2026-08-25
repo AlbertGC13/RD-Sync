@@ -4,7 +4,7 @@ import { createAuthenticatedIngestionDeliveryProcessor, AuthenticatedIngestionTe
 import { createAuthenticatedIngestionPrecondition, type AuthenticatedIngestionExecutionFactory } from "./authenticated-ingestion-precondition";
 import { createCollectionIngestionProcessor, type CollectionIngestionProcessorDependencies } from "./collection-ingestion-processor";
 import type { IngestionResult } from "./queues";
-import { createAuthenticatedSessionProbe, type ReadonlySessionChecker } from "./scraper/authenticated-session-probe";
+import { createAuthenticatedSessionProbe, type SessionCheckerResolver } from "./scraper/authenticated-session-probe";
 import type { FencedScrapeTimeAutoLoginRunnerDependencies } from "./scraper/scrape-time-auto-login-authentication-execution";
 import type { AuthenticationHeartbeatSchedulerDependencies } from "./scraper/authentication-heartbeat-scheduler";
 import { resolveAuthenticationHeartbeatConfig } from "./scraper/authentication-heartbeat-scheduler";
@@ -21,7 +21,7 @@ type TerminalDependencies = Readonly<{
 
 export type AuthenticatedIngestionProcessorDependencies = Readonly<{
   env: Record<string, string | undefined>;
-  popularSessionChecker: ReadonlySessionChecker;
+  resolveSessionChecker: SessionCheckerResolver;
   attempts: AuthenticatedSessionCoordinatorDependencies["attempts"];
   runnerDependencies?: FencedScrapeTimeAutoLoginRunnerDependencies;
   executionFactory?: AuthenticatedIngestionExecutionFactory;
@@ -87,7 +87,7 @@ export function createAuthenticatedIngestionProcessor(
   dependencies: AuthenticatedIngestionProcessorDependencies,
 ): (job: AuthenticatedIngestionDeliveryJob) => Promise<IngestionResult> {
   resolveAuthenticationHeartbeatConfig(dependencies.env);
-  const probe = createAuthenticatedSessionProbe({ popularSessionChecker: dependencies.popularSessionChecker });
+  const probe = createAuthenticatedSessionProbe({ resolveSessionChecker: dependencies.resolveSessionChecker });
   const downstream = createCollectionIngestionProcessor(dependencies);
   const complete = createAuthenticatedTerminalCompleter(dependencies);
   const delivery = createAuthenticatedIngestionDeliveryProcessor({

@@ -163,20 +163,25 @@ const activatedProcessor = await activateAuthenticatedIngestionProduction({
     ]);
     return {
       createResources: resourcesModule.createAuthenticatedIngestionProductionResources,
-      createProcessor: (resources) => processorModule.createAuthenticatedIngestionProductionProcessor(resources, {
-        env: process.env,
-        popularSessionChecker: createCdpSessionChecker({ cdpUrl: resolveBankBrowserEnv(popularBankCode, process.env).cdpUrl }),
-        createOwnerToken: randomUUID,
-        resolveScraper: resolveDefaultScraper,
-        adapterRegistry: bankAdapterRegistry,
-        cdpUrlForBankCode: (bankCode) => resolveBankBrowserEnv(bankCode, process.env).cdpUrl || undefined,
-        ensureBrowser: createScrapeTimeAutoLoginBrowserOpener({
-          trustedLoginUrl: popularPortalConfig.baseUrl,
-          visibleSelectorTimeoutMs: parseAutoLoginSelectorTimeoutMs(process.env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS),
-          ensureBrowserRuntime: createEnsureBrowserForBank(popularBankCode, process.env),
-          acquireBrowserSlot: createAcquireBrowserSlotFromEnv(process.env),
-        }),
-      }),
+      createProcessor: (resources) => {
+        const popularSessionChecker = createCdpSessionChecker({ cdpUrl: resolveBankBrowserEnv(popularBankCode, process.env).cdpUrl });
+        return processorModule.createAuthenticatedIngestionProductionProcessor(resources, {
+          env: process.env,
+          resolveSessionChecker: (bankCode) => bankCode === popularBankCode
+            ? popularSessionChecker
+            : undefined,
+          createOwnerToken: randomUUID,
+          resolveScraper: resolveDefaultScraper,
+          adapterRegistry: bankAdapterRegistry,
+          cdpUrlForBankCode: (bankCode) => resolveBankBrowserEnv(bankCode, process.env).cdpUrl || undefined,
+          ensureBrowser: createScrapeTimeAutoLoginBrowserOpener({
+            trustedLoginUrl: popularPortalConfig.baseUrl,
+            visibleSelectorTimeoutMs: parseAutoLoginSelectorTimeoutMs(process.env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS),
+            ensureBrowserRuntime: createEnsureBrowserForBank(popularBankCode, process.env),
+            acquireBrowserSlot: createAcquireBrowserSlotFromEnv(process.env),
+          }),
+        });
+      },
     };
   },
 });
