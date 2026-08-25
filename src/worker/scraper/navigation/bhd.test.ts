@@ -62,7 +62,7 @@ describe("collectBhdPersonalMovements", () => {
 
     await expect(collectBhdPersonalMovements(page)).resolves.toMatchObject({
       status: "collected",
-      movements: [expect.objectContaining({ bankId: "bhd", amount: "15000.00", direction: "credit" })],
+      movements: [expect.objectContaining({ bankId: "bhd_personal", amount: "15000.00", direction: "credit" })],
     });
     expect(page.operations).toEqual([
       "currentUrl", "accessState", "isMovementPanelOpen", "expandMovementPanel", "readVisibleMovementRows", "scrollMovementTable",

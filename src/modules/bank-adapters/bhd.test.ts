@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  bhdBankCode,
+  bhdPersonalBankCode,
   bhdPersonalPortalProfile,
   parseBhdAmount,
   parseBhdDate,
@@ -10,9 +10,9 @@ import { bhdPersonalTransactions } from "./fixtures/bhd-personal";
 
 describe("BHD Personal profile", () => {
   it("exposes the canonical code, Personal variant, stable PrimeNG selectors, and row positions", () => {
-    expect(bhdBankCode).toBe("bhd");
+    expect(bhdPersonalBankCode).toBe("bhd_personal");
     expect(bhdPersonalPortalProfile).toMatchObject({
-      bankCode: "bhd",
+      bankCode: "bhd_personal",
       portalVariant: "personal",
       sessionAccess: "admin-assisted-cdp-attach",
       selectors: {
@@ -31,6 +31,7 @@ describe("BHD Personal parser", () => {
   it("parses sanitized credit and debit rows with Dominican midnight semantics", () => {
     expect(parseBhdTransactionRows(bhdPersonalTransactions)).toEqual([
       expect.objectContaining({
+        bankId: "bhd_personal", accountFingerprint: "bhd_personal-XXXXXXXXXX",
         postedAt: "2026-06-27T00:00:00-04:00", amount: "15000.00", direction: "credit", reference: "2638001",
       }),
       expect.objectContaining({

@@ -1,10 +1,10 @@
 import type { BankMovement } from "../transactions";
+import { bhdPersonalBankCode } from "./bank-identities";
 
 const SANTO_DOMINGO_OFFSET = "-04:00";
-const DEFAULT_ACCOUNT_FINGERPRINT = "bhd-XXXXXXXXXX";
+const DEFAULT_ACCOUNT_FINGERPRINT = "bhd_personal-XXXXXXXXXX";
 
-/** Canonical immutable domain code for BHD. This slice is not runtime-registered. */
-export const bhdBankCode = "bhd" as const;
+export { bhdPersonalBankCode } from "./bank-identities";
 export const bhdPersonalPortalVariant = "personal" as const;
 
 export interface BhdPersonalTransaction {
@@ -25,7 +25,7 @@ export interface BhdPersonalParseOptions {
 
 /** Declarative portal evidence only; connection and login behavior remain out of this slice. */
 export const bhdPersonalPortalProfile = {
-  bankCode: bhdBankCode,
+  bankCode: bhdPersonalBankCode,
   portalVariant: bhdPersonalPortalVariant,
   sessionAccess: "admin-assisted-cdp-attach",
   selectors: {
@@ -75,7 +75,7 @@ export function parseBhdTransactionRows(
     }
 
     return {
-      bankId: options.bankId ?? bhdBankCode,
+      bankId: options.bankId ?? bhdPersonalBankCode,
       accountFingerprint: options.accountFingerprint ?? DEFAULT_ACCOUNT_FINGERPRINT,
       postedAt: parseBhdDate(row.date),
       amount: Math.abs(parseBhdAmount(debit || credit)).toFixed(2),
