@@ -133,16 +133,57 @@ if ($DryRun) { exit 0 }
 $logFile = Get-BankEnvValue "RD_SYNC_BANK_BROWSER_LOG_FILE"
 if (-not $logFile) { $logFile = Join-Path $profileDir "browser.log" }
 
-# If CDP is already answering, preserve the existing browser and its session.
-try {
-    $probe = Invoke-WebRequest -Uri "http://${cdpProbeHost}:${cdpPort}/json/version" `
-        -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-    if ($probe.StatusCode -eq 200) {
-        Write-Host "El navegador de '$BankCode' ya esta corriendo en el puerto $cdpPort (CDP activo)."
-        exit 0
+# ---------------------------------------------------------------------------
+# 5. Fast path — if CDP already answers on this port, do not relaunch.
+# ---------------------------------------------------------------------------
+function Test-CdpAlive {
+    try {
+        $probe = Invoke-WebRequest -Uri "http://${cdpProbeHost}:${cdpPort}/json/version" `
+            -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+        return $probe.StatusCode -eq 200
+    } catch {
+        return $false
     }
+}
+
+if (Test-CdpAlive) {
+    Write-Host "El navegador de '$BankCode' ya esta corriendo en el puerto $cdpPort (CDP activo)."
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# 5b. Launch lock, held on this portal's own profile directory.
+#
+# Two overlapping launches for the same portal would each see CDP down and each
+# start a browser: the second one loses the Chromium singleton race, ignores its
+# own --remote-debugging-port, and leaves an orphan process. The lock file is
+# opened with FileShare.None, so a concurrent run cannot open it and is refused
+# until the first launch finishes waiting for CDP. Windows closes the handle if
+# this process dies, so a crash can never wedge the portal.
+# ---------------------------------------------------------------------------
+if (-not (Test-Path $profileDir)) {
+    New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+}
+
+$lockPath = Join-Path $profileDir ".launch.lock"
+try {
+    $lockStream = [System.IO.File]::Open(
+        $lockPath,
+        [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None)
 } catch {
-    # CDP is down — continue to launch.
+    Write-ErrLine "ERROR: ya hay un lanzamiento en curso para el portal '$BankCode'."
+    Write-ErrLine "       Espere a que termine antes de volver a lanzar el puerto CDP $cdpPort."
+    exit 1
+}
+
+# Double-check under the lock: a concurrent run may have finished launching
+# between the fast path above and the moment we took the lock.
+if (Test-CdpAlive) {
+    Write-Host "El navegador de '$BankCode' ya esta corriendo en el puerto $cdpPort (CDP activo)."
+    $lockStream.Close()
+    exit 0
 }
 
 $browserBin = Get-BankEnvValue "RD_SYNC_BANK_BROWSER_BIN"
@@ -186,6 +227,27 @@ Write-Host "  URL inicial: $startUrl"
 
 "launch argv: " + ($launchArgs -join " ") | Out-File -FilePath $logFile -Append -Encoding utf8
 Start-Process -FilePath $browserBin -ArgumentList $launchArgs
+
+# Hold the mutex until CDP is actually listening, so a concurrent run cannot
+# launch a second browser while this one is still starting.
+$readyTimeoutMs = 30000
+$configuredTimeout = Get-BankEnvValue "RD_SYNC_BANK_BROWSER_READY_TIMEOUT_MS"
+if ($configuredTimeout -match '^[0-9]+$') { $readyTimeoutMs = [int]$configuredTimeout }
+
+$deadline = (Get-Date).AddMilliseconds($readyTimeoutMs)
+$cdpReady = $false
+while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 500
+    if (Test-CdpAlive) { $cdpReady = $true; break }
+}
+
+$lockStream.Close()
+
+if (-not $cdpReady) {
+    Write-ErrLine "ERROR: el navegador no expuso CDP en el puerto $cdpPort dentro del tiempo previsto."
+    Write-ErrLine "       Revise $logFile y vuelva a intentarlo."
+    exit 1
+}
 
 Write-Host ""
 Write-Host "Inicie sesion manualmente, complete MFA y las preguntas de seguridad,"
