@@ -1,5 +1,5 @@
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -56,6 +56,15 @@ function runLauncher(args: string[], overrides: Record<string, string> = {}): Ru
     if (match) plan[match[1]] = match[2];
   }
   return { status: result.status, stderr: result.stderr ?? "", plan };
+}
+
+async function withTempDirAsync(fn: (dir: string) => Promise<void>): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "rd-sync-ps-launcher-"));
+  try {
+    await fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function withTempDir<T>(fn: (dir: string) => T): T {
@@ -170,13 +179,17 @@ describeIfPowershell("launch-bank-browser.ps1 real browser argv", () => {
       writeFileSync(fakeBrowser, `@echo off\r\necho %*>> "${argvLog}"\r\n`, "utf8");
       const profileDir = join(dir, "bank profile");
 
+      // The fake browser never exposes CDP, so the launcher reports that the
+      // browser did not become ready — after handing it the real argv.
       const result = runLauncher(["-BankCode", "bhd_personal"], {
         RD_SYNC_BANK_BHD_PERSONAL_CDP_URL: "http://127.0.0.1:9223",
         RD_SYNC_BANK_BHD_PERSONAL_PROFILE_DIR: profileDir,
         RD_SYNC_BANK_BROWSER_BIN: fakeBrowser,
+        RD_SYNC_BANK_BROWSER_READY_TIMEOUT_MS: "1000",
       });
 
-      expect(result.status).toBe(0);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(/no expuso CDP/);
 
       const deadline = Date.now() + 10_000;
       while (!existsSync(argvLog) && Date.now() < deadline) {
@@ -190,5 +203,98 @@ describeIfPowershell("launch-bank-browser.ps1 real browser argv", () => {
       expect(argv).toContain(`--user-data-dir="${profileDir}"`);
       expect(argv).toContain("https://ibp.bhd.com.do/#/login");
     });
-  });
+  }, 30_000);
+});
+
+describeIfPowershell("launch-bank-browser.ps1 concurrent launches", () => {
+  /** Holds a portal's launch lock from a separate process, as a live launch does. */
+  function holdLaunchLock(profileDir: string): {
+    release: () => Promise<void>;
+    held: Promise<void>;
+  } {
+    mkdirSync(profileDir, { recursive: true });
+    const lockPath = join(profileDir, ".launch.lock");
+    const child = spawn(powershellBin, [
+      "-NoProfile",
+      "-Command",
+      `$s = [System.IO.File]::Open(${JSON.stringify(lockPath)},` +
+        " [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite," +
+        " [System.IO.FileShare]::None); Write-Output 'held'; Start-Sleep -Seconds 20",
+    ]);
+
+    const held = new Promise<void>((resolve, reject) => {
+      child.stdout.on("data", (chunk: Buffer) => {
+        if (chunk.toString().includes("held")) resolve();
+      });
+      child.on("error", reject);
+      setTimeout(() => reject(new Error("lock holder never reported acquisition")), 15_000);
+    });
+
+    // The lock file must be closed before the temp dir can be removed, so the
+    // caller awaits the holder's exit rather than just signalling it.
+    const release = () =>
+      new Promise<void>((resolve) => {
+        child.on("exit", () => resolve());
+        child.kill();
+      });
+
+    return { release, held };
+  }
+
+  it("refuses a second launch while one is in flight on the same portal", async () => {
+    await withTempDirAsync(async (dir) => {
+      const profileDir = join(dir, "profile");
+      const holder = holdLaunchLock(profileDir);
+      await holder.held;
+
+      try {
+        const argvLog = join(dir, "argv.log");
+        const fakeBrowser = join(dir, "fake-browser.cmd");
+        writeFileSync(fakeBrowser, `@echo off
+echo %*>> "${argvLog}"
+`, "utf8");
+
+        const result = runLauncher(["-BankCode", "popular"], {
+          RD_SYNC_BANK_POPULAR_CDP_URL: "http://127.0.0.1:9601",
+          RD_SYNC_BANK_POPULAR_PROFILE_DIR: profileDir,
+          RD_SYNC_BANK_BROWSER_BIN: fakeBrowser,
+          RD_SYNC_BANK_BROWSER_READY_TIMEOUT_MS: "1000",
+        });
+
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toMatch(/lanzamiento en curso/);
+        expect(existsSync(argvLog), "no browser may start while the lock is held").toBe(false);
+      } finally {
+        await holder.release();
+      }
+    });
+  }, 30_000);
+
+  it("does not block a different portal", async () => {
+    await withTempDirAsync(async (dir) => {
+      const popularProfile = join(dir, "popular");
+      const bhdProfile = join(dir, "bhd");
+      const holder = holdLaunchLock(popularProfile);
+      await holder.held;
+
+      try {
+        const argvLog = join(dir, "argv.log");
+        const fakeBrowser = join(dir, "fake-browser.cmd");
+        writeFileSync(fakeBrowser, `@echo off
+echo %*>> "${argvLog}"
+`, "utf8");
+
+        const result = runLauncher(["-BankCode", "bhd_personal"], {
+          RD_SYNC_BANK_BHD_PERSONAL_CDP_URL: "http://127.0.0.1:9223",
+          RD_SYNC_BANK_BHD_PERSONAL_PROFILE_DIR: bhdProfile,
+          RD_SYNC_BANK_BROWSER_BIN: fakeBrowser,
+          RD_SYNC_BANK_BROWSER_READY_TIMEOUT_MS: "1000",
+        });
+
+        expect(result.stderr).not.toMatch(/lanzamiento en curso/);
+      } finally {
+        await holder.release();
+      }
+    });
+  }, 30_000);
 });

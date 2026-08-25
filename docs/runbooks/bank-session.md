@@ -8,18 +8,68 @@ The bank portal (Banco Popular) expires sessions after a short inactivity window
 
 ## Launching the dedicated browser
 
-### Windows (local development)
+### Asignación de puertos y perfiles por portal
 
-Use the provided PowerShell script to open Brave with an isolated profile reserved for the bank session:
+Cada portal es una identidad de runtime distinta (`bankCode`) y **debe** tener su propio puerto CDP loopback y su propio perfil persistente. Dos portales en el mismo puerto permiten que el worker se conecte a la sesión equivocada; dos portales en el mismo perfil de Chromium activan el bloqueo *singleton*, que hace que el segundo lanzamiento reutilice el primer navegador e **ignore silenciosamente** el `--remote-debugging-port` solicitado.
+
+Asignación operativa vigente (el lanzador no la inventa: la exige por variable de entorno):
+
+| Portal (`bankCode`) | Puerto CDP | Variable de entorno | Perfil por defecto (Windows) |
+|---|---|---|---|
+| `popular` | 9222 | `RD_SYNC_BANK_POPULAR_CDP_URL=http://127.0.0.1:9222` | `%LOCALAPPDATA%\rd-sync\bank-browser\popular` |
+| `bhd_personal` | 9223 | `RD_SYNC_BANK_BHD_PERSONAL_CDP_URL=http://127.0.0.1:9223` | `…\bank-browser\bhd_personal` |
+| `banreservas_personas` | 9224 | `RD_SYNC_BANK_BANRESERVAS_PERSONAS_CDP_URL=http://127.0.0.1:9224` | `…\bank-browser\banreservas_personas` |
+| `banreservas_empresas` | 9225 | `RD_SYNC_BANK_BANRESERVAS_EMPRESAS_CDP_URL=http://127.0.0.1:9225` | `…\bank-browser\banreservas_empresas` |
+| `bhd_empresarial` (diferido) | 9226 reservado | `RD_SYNC_BANK_BHD_EMPRESARIAL_CDP_URL=http://127.0.0.1:9226` | `…\bank-browser\bhd_empresarial` |
+
+Reglas que el lanzador **aplica**, no solo documenta:
+
+- Solo `popular` puede heredar `RD_SYNC_CDP_URL` o el puerto compartido por defecto. Cualquier otro portal sin su propia variable **falla cerrado**.
+- Una identidad de portal desconocida se rechaza; nunca se degrada a otro portal.
+- El endpoint debe ser `http://` loopback (`127.0.0.1`, `localhost` o `::1`), solo origen, con puerto entre 1 y 65535.
+- Si otro portal conocido ya declara ese puerto, el lanzamiento se rechaza por colisión.
+- El puerto **siempre** sale de la URL CDP resuelta: no hay ajuste `DEBUG_PORT`, así que lanzador y worker no pueden desincronizarse.
+- Nunca se comparten credenciales con RD-Sync: login, MFA y preguntas de seguridad los completa una persona.
+
+Estas variables se definen en el entorno del operador/worker; no se versionan.
+
+### Windows (desarrollo y pruebas live)
+
+El lanzador abre **un portal a la vez**, seleccionado por `BANK_CODE`:
 
 ```powershell
-.\scripts\launch-bank-browser.ps1
+.\scripts\launch-bank-browser.ps1 bhd_personal
 ```
 
-The script:
-- Creates a persistent profile at `%LOCALAPPDATA%\rd-sync\bank-browser`
-- Opens Brave on CDP port 9222
-- Detects Brave at the two standard install paths and exits with a clear error if absent
+Acepta el portal como argumento posicional, como `-BankCode`, o desde la variable `BANK_CODE` (la vía que usa el worker cuando el auto-lanzamiento está activo). Para inspeccionar la resolución sin abrir nada:
+
+```powershell
+.\scripts\launch-bank-browser.ps1 bhd_personal -DryRun
+```
+
+El lanzador:
+- Falla cerrado si no se indica portal, si el portal es desconocido o si falta su endpoint propio
+- Crea un perfil persistente por portal: `RD_SYNC_BANK_<PORTAL>_PROFILE_DIR` textual → `RD_SYNC_BANK_BROWSER_PROFILE_DIR` con sufijo `\<bankCode>` → `%LOCALAPPDATA%\rd-sync\bank-browser\<bankCode>`
+- Usa una URL inicial propia del portal o verificada; si no hay ninguna verificada abre `about:blank` y avisa. **Nunca** hereda la URL de otro portal
+- Solo permite URLs iniciales `https://` o `about:blank`; rechaza `javascript:`, `data:`, `file:` y `http://`
+- Toma un lock exclusivo (`.launch.lock`) en el perfil del portal, así dos ejecuciones simultáneas no lanzan dos navegadores; lo mantiene hasta que CDP responde (`RD_SYNC_BANK_BROWSER_READY_TIMEOUT_MS`, por defecto 30000)
+- Si CDP ya responde en ese puerto, informa y no relanza
+- Detecta Brave y Chrome en rutas estándar (`RD_SYNC_BANK_BROWSER_BIN` para forzar una ruta)
+
+La resolución de identidad y endpoint vive en `scripts/lib/bank-portal-endpoint.ps1`, con un test de paridad que la mantiene alineada con `bankPortalIdentities` del runtime.
+
+### Primera sesión live de un portal (procedimiento manual)
+
+RD-Sync no automatiza login, MFA ni preguntas de seguridad. Por cada portal, una persona hace esto una vez:
+
+1. Defina la variable CDP del portal según la tabla.
+2. Ejecute el lanzador con ese `bankCode`.
+3. Inicie sesión con las credenciales del portal.
+4. Complete MFA y preguntas de seguridad si el portal las pide.
+5. Cuando el portal ofrezca recordar o confiar en el dispositivo, **acéptelo**: las siguientes sesiones en ese perfil evitan repetir el MFA.
+6. Deje el navegador abierto. RD-Sync se conecta por CDP en modo lectura.
+
+No navegue sitios personales ni otro portal dentro de ese perfil: las cookies del portal son la sesión completa.
 
 ### Linux server (production)
 
