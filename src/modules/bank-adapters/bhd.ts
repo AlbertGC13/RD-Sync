@@ -27,6 +27,7 @@ export interface BhdPersonalParseOptions {
 export const bhdPersonalPortalProfile = {
   bankCode: bhdPersonalBankCode,
   portalVariant: bhdPersonalPortalVariant,
+  loginUrl: "https://ibp.bhd.com.do/#/login",
   sessionAccess: "admin-assisted-cdp-attach",
   selectors: {
     transactionTable: "table.p-datatable-table",
