@@ -165,8 +165,8 @@ describe("bank runtime resolver", () => {
     expect(createSessionChecker).toHaveBeenCalledWith("http://127.0.0.1:9444");
   });
 
-  it("requires an injected BHD read-only session checker and leaves BHD out of the worker runtime", async () => {
-    expect(createBhdPersonalBankRuntime({ RD_SYNC_BANK_BHD_PERSONAL_CDP_URL: "http://127.0.0.1:9444" })).toBeUndefined();
+  it("uses the BHD CDP checker by default and leaves BHD out of the worker runtime", async () => {
+    expect(createBhdPersonalBankRuntime({ RD_SYNC_BANK_BHD_PERSONAL_CDP_URL: "http://127.0.0.1:9444" })?.sessionChecker).toBeDefined();
     const source = await readFile(new URL("../ingestion-worker.ts", import.meta.url), "utf8");
     expect(source).not.toMatch(/createBhdPersonalBankRuntime|bhd_personal/);
   });
