@@ -44,11 +44,8 @@ import { createAuditEvent } from "../modules/audit";
 import { BANK_AUTOLOGIN_ACTIONS, BANK_CREDENTIAL_ACTIONS } from "../modules/audit/bank-actions";
 import { getPrismaClient } from "../modules/persistence/prisma-client";
 import { PrismaBankSessionExpiryEpisodeRepository } from "../modules/persistence/prisma-bank-session-expiry-episode-repository";
-import { popularBankCode } from "../modules/bank-adapters/popular";
-import { popularPortalConfig } from "../modules/bank-adapters/popular-portal";
-import { createAcquireBrowserSlotFromEnv, createEnsureBrowserForBank } from "./scraper/browser-runtime";
 import { createPopularBankRuntimeResolver } from "./scraper/bank-runtime";
-import { createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, parseAutoLoginSelectorTimeoutMs, type BankAutoLoginStrategy } from "./scraper/auto-login";
+import { createScrapeTimeAutoLoginRunner, type BankAutoLoginStrategy } from "./scraper/auto-login";
 import { resolveDefaultScraper } from "../app/api/scrape-runs/scraper-defaults";
 import { defaultScrapeRunRepository } from "../app/api/scrape-runs/defaults";
 import { defaultTransactionRepository } from "../app/api/transactions/defaults";
@@ -114,12 +111,7 @@ const runScrapeTimeAutoLogin = createScrapeTimeAutoLoginRunner({
   keyResolver: resolveCredentialKey,
   lock: defaultAutoLoginLock,
   cdpUrlForBankCode: bankRuntime.cdpUrlForBankCode,
-  ensureBrowser: createScrapeTimeAutoLoginBrowserOpener({
-    trustedLoginUrl: popularPortalConfig.baseUrl,
-    visibleSelectorTimeoutMs: parseAutoLoginSelectorTimeoutMs(process.env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS),
-    ensureBrowserRuntime: createEnsureBrowserForBank(popularBankCode, process.env),
-    acquireBrowserSlot: createAcquireBrowserSlotFromEnv(process.env),
-  }),
+  ensureBrowser: bankRuntime.ensureBrowser,
   recordFailure: async (bankCode, occurredAt) => {
     await autoLoginConfigs.recordFailure(bankCode, occurredAt);
   },
@@ -173,12 +165,7 @@ const activatedProcessor = await activateAuthenticatedIngestionProduction({
           resolveScraper: resolveDefaultScraper,
           adapterRegistry: bankAdapterRegistry,
           cdpUrlForBankCode: bankRuntime.cdpUrlForBankCode,
-          ensureBrowser: createScrapeTimeAutoLoginBrowserOpener({
-            trustedLoginUrl: popularPortalConfig.baseUrl,
-            visibleSelectorTimeoutMs: parseAutoLoginSelectorTimeoutMs(process.env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS),
-            ensureBrowserRuntime: createEnsureBrowserForBank(popularBankCode, process.env),
-            acquireBrowserSlot: createAcquireBrowserSlotFromEnv(process.env),
-          }),
+          ensureBrowser: bankRuntime.ensureBrowser,
         });
       },
     };

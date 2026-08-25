@@ -570,6 +570,7 @@ export type EnsureBrowserSessionResult =
 export type EnsureBrowserSession = (bankCode: string) => Promise<EnsureBrowserSessionResult>;
 export type BankSessionBrowserConfig = Readonly<{
   cdpUrl: string;
+  ensureBrowserRuntime: EnsureBrowserSeam | undefined;
   ensureBrowserSession: EnsureBrowserSession;
 }>;
 
@@ -605,11 +606,13 @@ export function createBankSessionBrowserConfig(
   } catch {
     return undefined;
   }
-  const ensureBrowser = env.RD_SYNC_BANK_BROWSER_AUTO_LAUNCH === "enabled"
+  const ensureBrowserRuntime = env.RD_SYNC_BANK_BROWSER_AUTO_LAUNCH === "enabled"
     ? createEnsureBrowserForCdpUrl(normalizedBankCode, cdpUrl, env, deps)
-    : () => ensureCdpBrowser({ cdpUrl, deps });
+    : undefined;
+  const ensureBrowser = ensureBrowserRuntime ?? (() => ensureCdpBrowser({ cdpUrl, deps }));
   return {
     cdpUrl,
+    ensureBrowserRuntime,
     ensureBrowserSession: createEnsureBrowserSessionForBank(normalizedBankCode, ensureBrowser),
   };
 }
