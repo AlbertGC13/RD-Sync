@@ -87,7 +87,8 @@ async function readStableRows(page: BhdPersonalPage): Promise<BhdPersonalTransac
     }
 
     const snapshot = JSON.stringify(visibleRows);
-    if (snapshot === previousSnapshot || readCount === MAX_SCROLL_READS - 1) return [...rows.values()];
+    if (snapshot === previousSnapshot) return [...rows.values()];
+    if (readCount === MAX_SCROLL_READS - 1) return null;
     previousSnapshot = snapshot;
     if (!(await page.scrollMovementTable())) return [...rows.values()];
   }

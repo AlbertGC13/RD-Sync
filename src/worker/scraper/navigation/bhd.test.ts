@@ -112,6 +112,15 @@ describe("collectBhdPersonalMovements", () => {
     expect(page.operations.filter((operation) => operation === "readVisibleMovementRows")).toHaveLength(3);
   });
 
+  it("fails closed when every bounded row snapshot changes", async () => {
+    const page = new FakeBhdPersonalPage({
+      snapshots: [[transactionRow], [transactionRow, ["27/06/2026", "2638002", "FEE", "REC-2", "RD$ 1.00", "", "RD$ 1.00"]], [transactionRow, ["27/06/2026", "2638003", "FEE", "REC-3", "RD$ 2.00", "", "RD$ 1.00"]]],
+      scrollResults: [true, true],
+    });
+
+    await expect(collectBhdPersonalMovements(page)).resolves.toMatchObject({ status: "unavailable", movements: [] });
+  });
+
   it("exposes no login or credential interaction selectors", () => {
     const page: BhdPersonalPage = new FakeBhdPersonalPage();
     expect("fill" in page).toBe(false);

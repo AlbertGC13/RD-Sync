@@ -16,6 +16,7 @@ import {
   type ScrapeTimeAutoLoginBrowserOpenerOptions,
   type ScrapeTimeAutoLoginBrowserResult,
 } from "./auto-login";
+import { createBhdPersonalCdpSessionChecker } from "./navigation/bhd-cdp";
 
 type ExactBankBrowserOpener = (bankCode: string, cdpUrl: string) => Promise<ScrapeTimeAutoLoginBrowserResult>;
 
@@ -42,7 +43,6 @@ export type PopularBankRuntimeDependencies = Readonly<{
 
 export type BhdPersonalBankRuntimeDependencies = Readonly<{
   browserRuntime?: BrowserRuntimeDeps;
-  /** Required until a BHD-specific read-only CDP page implementation is available. */
   createSessionChecker?(cdpUrl: string): ReadonlySessionChecker;
   createBrowserOpener?(options: ScrapeTimeAutoLoginBrowserOpenerOptions): ExactBankBrowserOpener;
 }>;
@@ -96,11 +96,10 @@ export function createBhdPersonalBankRuntime(
   env: Record<string, string | undefined> = process.env,
   dependencies: BhdPersonalBankRuntimeDependencies = {},
 ): BankRuntime | undefined {
-  if (dependencies.createSessionChecker === undefined) return undefined;
-
   const browser = createBankSessionBrowserConfig(bhdPersonalBankCode, env, dependencies.browserRuntime);
   if (!browser) return undefined;
 
+  const createSessionChecker = dependencies.createSessionChecker ?? createBhdPersonalCdpSessionChecker;
   const createBrowserOpener = dependencies.createBrowserOpener ?? createScrapeTimeAutoLoginBrowserOpener;
   return Object.freeze({
     bankCode: bhdPersonalBankCode,
@@ -112,6 +111,6 @@ export function createBhdPersonalBankRuntime(
       ensureBrowserRuntime: browser.ensureBrowserRuntime,
       acquireBrowserSlot: createAcquireBrowserSlotFromEnv(env),
     }),
-    sessionChecker: dependencies.createSessionChecker(browser.cdpUrl),
+    sessionChecker: createSessionChecker(browser.cdpUrl),
   });
 }
