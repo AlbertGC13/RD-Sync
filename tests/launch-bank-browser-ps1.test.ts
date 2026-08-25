@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -159,5 +159,36 @@ describeIfPowershell("launch-bank-browser.ps1 start URL safety", () => {
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/https:\/\/ o about:blank/);
+  });
+});
+
+describeIfPowershell("launch-bank-browser.ps1 real browser argv", () => {
+  it("hands the browser this portal's profile, port and start URL", () => {
+    withTempDir((dir) => {
+      const argvLog = join(dir, "argv.log");
+      const fakeBrowser = join(dir, "fake-browser.cmd");
+      writeFileSync(fakeBrowser, `@echo off\r\necho %*>> "${argvLog}"\r\n`, "utf8");
+      const profileDir = join(dir, "bank profile");
+
+      const result = runLauncher(["-BankCode", "bhd_personal"], {
+        RD_SYNC_BANK_BHD_PERSONAL_CDP_URL: "http://127.0.0.1:9223",
+        RD_SYNC_BANK_BHD_PERSONAL_PROFILE_DIR: profileDir,
+        RD_SYNC_BANK_BROWSER_BIN: fakeBrowser,
+      });
+
+      expect(result.status).toBe(0);
+
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(argvLog) && Date.now() < deadline) {
+        spawnSync(powershellBin, ["-NoProfile", "-Command", "Start-Sleep -Milliseconds 200"]);
+      }
+      expect(existsSync(argvLog), "the browser process was never started").toBe(true);
+
+      const argv = readFileSync(argvLog, "utf8");
+      expect(argv).toContain("--remote-debugging-port=9223");
+      expect(argv).toContain("--remote-debugging-address=127.0.0.1");
+      expect(argv).toContain(`--user-data-dir="${profileDir}"`);
+      expect(argv).toContain("https://ibp.bhd.com.do/#/login");
+    });
   });
 });

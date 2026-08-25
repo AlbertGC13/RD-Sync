@@ -130,5 +130,64 @@ Write-Output "plan.startUrl=$startUrl"
 
 if ($DryRun) { exit 0 }
 
-Write-ErrLine "ERROR: la ejecucion del navegador se incorpora en el siguiente slice del lanzador."
-exit 1
+$logFile = Get-BankEnvValue "RD_SYNC_BANK_BROWSER_LOG_FILE"
+if (-not $logFile) { $logFile = Join-Path $profileDir "browser.log" }
+
+# If CDP is already answering, preserve the existing browser and its session.
+try {
+    $probe = Invoke-WebRequest -Uri "http://${cdpProbeHost}:${cdpPort}/json/version" `
+        -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+    if ($probe.StatusCode -eq 200) {
+        Write-Host "El navegador de '$BankCode' ya esta corriendo en el puerto $cdpPort (CDP activo)."
+        exit 0
+    }
+} catch {
+    # CDP is down — continue to launch.
+}
+
+$browserBin = Get-BankEnvValue "RD_SYNC_BANK_BROWSER_BIN"
+if (-not $browserBin) {
+    $candidates = @(
+        (Join-Path $env:ProgramFiles "BraveSoftware\Brave-Browser\Application\brave.exe"),
+        (Join-Path $env:LOCALAPPDATA "BraveSoftware\Brave-Browser\Application\brave.exe"),
+        (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) { $browserBin = $candidate; break }
+    }
+}
+
+if (-not $browserBin -or -not (Test-Path $browserBin)) {
+    Write-ErrLine "ERROR: no se encontro Brave ni Chrome en las rutas estandar."
+    Write-ErrLine "       Instale Brave o defina RD_SYNC_BANK_BROWSER_BIN con la ruta al ejecutable."
+    exit 1
+}
+
+if (-not (Test-Path $profileDir)) {
+    New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+}
+
+# Start-Process joins this list verbatim, so quote the profile path to preserve
+# it as one argument when its directory contains spaces.
+$launchArgs = @(
+    "--user-data-dir=`"$profileDir`"",
+    "--remote-debugging-address=$cdpBindAddress",
+    "--remote-debugging-port=$cdpPort",
+    "--no-first-run",
+    "--new-window",
+    $startUrl
+)
+
+Write-Host "Lanzando el navegador del portal '$BankCode'..."
+Write-Host "  Navegador  : $browserBin"
+Write-Host "  Perfil     : $profileDir"
+Write-Host "  Puerto CDP : $cdpPort ($cdpBindAddress unicamente)"
+Write-Host "  URL inicial: $startUrl"
+
+"launch argv: " + ($launchArgs -join " ") | Out-File -FilePath $logFile -Append -Encoding utf8
+Start-Process -FilePath $browserBin -ArgumentList $launchArgs
+
+Write-Host ""
+Write-Host "Inicie sesion manualmente, complete MFA y las preguntas de seguridad,"
+Write-Host "y marque el navegador como confiable cuando el portal lo ofrezca."
+Write-Host "Este perfil es exclusivo del portal '$BankCode': no navegue otros sitios aqui."
