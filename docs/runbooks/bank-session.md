@@ -85,7 +85,8 @@ The script:
 - Detects the first available browser binary in this order: `brave-browser`, `brave`, `chromium-browser`, `chromium`, `google-chrome` (override with `RD_SYNC_BANK_BROWSER_BIN`)
 - Creates a persistent profile at `~/.local/share/rd-sync/bank-browser` — bank-scoped to `…/bank-browser/<bank_code>` when a bank code is passed so each bank stays isolated. A **global** `RD_SYNC_BANK_BROWSER_PROFILE_DIR` is also bank-scoped (it gets `/<bank_code>` appended); only a per-bank `RD_SYNC_BANK_<BANK>_PROFILE_DIR` is used verbatim
 - Binds CDP to **127.0.0.1 only**; the debug port ALWAYS comes from the resolved CDP URL (`RD_SYNC_BANK_<BANK>_CDP_URL` / `RD_SYNC_CDP_URL`) so it always matches the worker. There is no `DEBUG_PORT` knob. When no CDP URL is configured, the launcher and worker share one default (`http://127.0.0.1:9222`) — never exposes CDP to the network
-- Opens the bank portal at `https://ib.bpd.com.do` (override with `RD_SYNC_BANK_BROWSER_START_URL`)
+- Abre la URL inicial del portal indicado: `RD_SYNC_BANK_<BANCO>_START_URL` → `RD_SYNC_BANK_BROWSER_START_URL` → la URL **verificada** de ese portal (`popular` → `https://ib.bpd.com.do`, `bhd_personal` → `https://ibp.bhd.com.do/#/login`). Un portal sin URL verificada abre `about:blank` con una advertencia: **nunca** hereda la URL de otro banco, porque llevaría a iniciar sesión en el portal equivocado dentro de un perfil dedicado a otro
+- Solo acepta URLs iniciales `https://` o `about:blank`; rechaza `javascript:`, `data:`, `file:` y `http://`
 - If CDP is already alive on the port, prints a message and exits without relaunching
 - Writes browser logs to `~/.local/share/rd-sync/bank-browser/browser.log` (override with `RD_SYNC_BANK_BROWSER_LOG_FILE`)
 

