@@ -225,6 +225,15 @@ describe("createIngestionWorker", () => {
     expect(source).not.toContain("process.exit(0)");
   });
 
+  it("uses the bank runtime resolver instead of independently composing Popular session availability", async () => {
+    const source = await readFile(new URL("./ingestion-worker.ts", import.meta.url), "utf8");
+
+    expect(source).toContain("createPopularBankRuntimeResolver(process.env)");
+    expect(source).toContain("resolveSessionChecker: bankRuntime.resolveSessionChecker");
+    expect(source).toContain("ensureBrowserSession: bankRuntime.ensureBrowserSession");
+    expect(source).not.toMatch(/createCdpSessionChecker|createBankSessionBrowserConfig|createEnsureBrowserSessionForBank/);
+  });
+
   it("the worker handler does NOT swallow an unexpected processor throw", async () => {
     const { Ctor, instances } = makeFakeWorkerCtor();
     const error = new Error("DB connection lost");

@@ -29,7 +29,6 @@ import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { Worker } from "bullmq";
 
-import { createCdpSessionChecker } from "../modules/bank-sessions";
 import { buildRedisConnectionOptions } from "./queues/bullmq-queue";
 import { createIngestionWorker, type WorkerConstructor } from "./ingestion-worker-factory";
 import { createIngestionWorkerShutdown, installIngestionWorkerShutdown } from "./ingestion-worker-shutdown";
@@ -47,7 +46,8 @@ import { getPrismaClient } from "../modules/persistence/prisma-client";
 import { PrismaBankSessionExpiryEpisodeRepository } from "../modules/persistence/prisma-bank-session-expiry-episode-repository";
 import { popularBankCode } from "../modules/bank-adapters/popular";
 import { popularPortalConfig } from "../modules/bank-adapters/popular-portal";
-import { createAcquireBrowserSlotFromEnv, createBankSessionBrowserConfig, createEnsureBrowserForBank, createEnsureBrowserSessionForBank, resolveBankBrowserEnv } from "./scraper/browser-runtime";
+import { createAcquireBrowserSlotFromEnv, createEnsureBrowserForBank } from "./scraper/browser-runtime";
+import { createPopularBankRuntimeResolver } from "./scraper/bank-runtime";
 import { createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, parseAutoLoginSelectorTimeoutMs, type BankAutoLoginStrategy } from "./scraper/auto-login";
 import { resolveDefaultScraper } from "../app/api/scrape-runs/scraper-defaults";
 import { defaultScrapeRunRepository } from "../app/api/scrape-runs/defaults";
@@ -80,6 +80,7 @@ const connection = buildRedisConnectionOptions(redisUrl);
 const prisma = getPrismaClient();
 const expiryEpisodes = new PrismaBankSessionExpiryEpisodeRepository(prisma);
 const autoLoginConfigs = new BankAutoLoginConfigRepository(prisma);
+const bankRuntime = createPopularBankRuntimeResolver(process.env);
 
 function toScrapeTimeAutoLoginStrategy(strategy: unknown, bankCode: string): BankAutoLoginStrategy {
   if (isScrapeTimeAutoLoginStrategy(strategy)) return strategy;
@@ -112,7 +113,7 @@ const runScrapeTimeAutoLogin = createScrapeTimeAutoLoginRunner({
   credentials: new BankCredentialRepository(prisma),
   keyResolver: resolveCredentialKey,
   lock: defaultAutoLoginLock,
-  cdpUrlForBankCode: (bankCode) => resolveBankBrowserEnv(bankCode, process.env).cdpUrl || undefined,
+  cdpUrlForBankCode: bankRuntime.cdpUrlForBankCode,
   ensureBrowser: createScrapeTimeAutoLoginBrowserOpener({
     trustedLoginUrl: popularPortalConfig.baseUrl,
     visibleSelectorTimeoutMs: parseAutoLoginSelectorTimeoutMs(process.env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS),
@@ -164,21 +165,14 @@ const activatedProcessor = await activateAuthenticatedIngestionProduction({
     return {
       createResources: resourcesModule.createAuthenticatedIngestionProductionResources,
       createProcessor: (resources) => {
-        const popularSessionBrowser = createBankSessionBrowserConfig(popularBankCode, process.env);
-        const popularSessionChecker = popularSessionBrowser === undefined
-          ? undefined
-          : createCdpSessionChecker({ cdpUrl: popularSessionBrowser.cdpUrl });
         return processorModule.createAuthenticatedIngestionProductionProcessor(resources, {
           env: process.env,
-          resolveSessionChecker: (bankCode) => bankCode === popularBankCode
-            ? popularSessionChecker
-            : undefined,
-          ensureBrowserSession: popularSessionBrowser?.ensureBrowserSession
-            ?? createEnsureBrowserSessionForBank(popularBankCode, undefined),
+          resolveSessionChecker: bankRuntime.resolveSessionChecker,
+          ensureBrowserSession: bankRuntime.ensureBrowserSession,
           createOwnerToken: randomUUID,
           resolveScraper: resolveDefaultScraper,
           adapterRegistry: bankAdapterRegistry,
-          cdpUrlForBankCode: (bankCode) => resolveBankBrowserEnv(bankCode, process.env).cdpUrl || undefined,
+          cdpUrlForBankCode: bankRuntime.cdpUrlForBankCode,
           ensureBrowser: createScrapeTimeAutoLoginBrowserOpener({
             trustedLoginUrl: popularPortalConfig.baseUrl,
             visibleSelectorTimeoutMs: parseAutoLoginSelectorTimeoutMs(process.env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS),
