@@ -161,7 +161,42 @@ cdpUrl="$(resolveBankVar 'CDP_URL' 'RD_SYNC_CDP_URL' "$DEFAULT_CDP_URL")"
 parseLoopbackCdpUrl "$cdpUrl"
 debugPort="$parsedCdpPort"
 
-startUrl="$(resolveBankVar 'START_URL' 'RD_SYNC_BANK_BROWSER_START_URL' 'https://ib.bpd.com.do')"
+# Start URL resolution (H3). Precedence: per-bank override, then the global
+# override, then the VERIFIED URL for this exact portal.
+#
+# A portal with no verified URL opens about:blank. It must NEVER inherit
+# another portal's URL: sending the operator to Popular's login page while the
+# profile and CDP port belong to BHD or Banreservas invites logging into the
+# wrong bank inside a profile dedicated to a different one.
+verifiedStartUrlFor() {
+  case "$1" in
+    "popular") echo "https://ib.bpd.com.do" ;;
+    "bhd_personal") echo "https://ibp.bhd.com.do/#/login" ;;
+    *) echo "" ;;
+  esac
+}
+
+perBankStartUrlKey="${BANK_PREFIX}START_URL"
+if [[ -n "$BANK_CODE" && -n "${!perBankStartUrlKey:-}" ]]; then
+  startUrl="${!perBankStartUrlKey}"
+elif [[ -n "${RD_SYNC_BANK_BROWSER_START_URL:-}" ]]; then
+  startUrl="${RD_SYNC_BANK_BROWSER_START_URL}"
+else
+  startUrl="$(verifiedStartUrlFor "${BANK_CODE,,}")"
+  if [[ -z "$startUrl" ]]; then
+    startUrl="about:blank"
+    echo "ADVERTENCIA: no hay URL inicial verificada para '${BANK_CODE:-<sin banco>}'; se abre una pestaña en blanco." >&2
+    echo "             Defina '${BANK_PREFIX:-RD_SYNC_BANK_<BANCO>_}START_URL' con la URL del portal." >&2
+  fi
+fi
+
+# Only https origins and about:blank may reach the browser argv: this URL is
+# handed to a browser that holds a bank session, so javascript:, data:, file:
+# and plain http: are refused.
+if [[ "$startUrl" != "about:blank" && ! "$startUrl" =~ ^https://[^[:space:]/]+(/[^[:space:]]*)?$ ]]; then
+  echo "ERROR: la URL inicial debe ser https:// o about:blank." >&2
+  exit 1
+fi
 logFile="${RD_SYNC_BANK_BROWSER_LOG_FILE:-$profileDir/browser.log}"
 lockFile="$profileDir/.launch.lock"
 
