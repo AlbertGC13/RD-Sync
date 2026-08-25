@@ -1,6 +1,8 @@
 import { createCdpSessionChecker } from "../../modules/bank-sessions";
+import { bhdPersonalBankCode } from "../../modules/bank-adapters/bhd";
 import { popularBankCode } from "../../modules/bank-adapters/popular";
 import { popularPortalConfig } from "../../modules/bank-adapters/popular-portal";
+import { bhdPersonalPortalProfile } from "../../modules/bank-adapters/bhd";
 import {
   createAcquireBrowserSlotFromEnv,
   createBankSessionBrowserConfig,
@@ -34,6 +36,13 @@ export type BankRuntimeResolver = Readonly<{
 
 export type PopularBankRuntimeDependencies = Readonly<{
   browserRuntime?: BrowserRuntimeDeps;
+  createSessionChecker?(cdpUrl: string): ReadonlySessionChecker;
+  createBrowserOpener?(options: ScrapeTimeAutoLoginBrowserOpenerOptions): ExactBankBrowserOpener;
+}>;
+
+export type BhdPersonalBankRuntimeDependencies = Readonly<{
+  browserRuntime?: BrowserRuntimeDeps;
+  /** Required until a BHD-specific read-only CDP page implementation is available. */
   createSessionChecker?(cdpUrl: string): ReadonlySessionChecker;
   createBrowserOpener?(options: ScrapeTimeAutoLoginBrowserOpenerOptions): ExactBankBrowserOpener;
 }>;
@@ -77,4 +86,32 @@ export function createPopularBankRuntimeResolver(
     }),
     sessionChecker: createSessionChecker(browser.cdpUrl),
   })]);
+}
+
+/**
+ * Creates an inert BHD Personal runtime for explicit composition only. It is
+ * deliberately not added to the production resolver or worker.
+ */
+export function createBhdPersonalBankRuntime(
+  env: Record<string, string | undefined> = process.env,
+  dependencies: BhdPersonalBankRuntimeDependencies = {},
+): BankRuntime | undefined {
+  if (dependencies.createSessionChecker === undefined) return undefined;
+
+  const browser = createBankSessionBrowserConfig(bhdPersonalBankCode, env, dependencies.browserRuntime);
+  if (!browser) return undefined;
+
+  const createBrowserOpener = dependencies.createBrowserOpener ?? createScrapeTimeAutoLoginBrowserOpener;
+  return Object.freeze({
+    bankCode: bhdPersonalBankCode,
+    cdpUrl: browser.cdpUrl,
+    ensureBrowserSession: browser.ensureBrowserSession,
+    ensureBrowser: createBrowserOpener({
+      trustedLoginUrl: bhdPersonalPortalProfile.loginUrl,
+      visibleSelectorTimeoutMs: parseAutoLoginSelectorTimeoutMs(env.RD_SYNC_AUTOLOGIN_SELECTOR_TIMEOUT_MS),
+      ensureBrowserRuntime: browser.ensureBrowserRuntime,
+      acquireBrowserSlot: createAcquireBrowserSlotFromEnv(env),
+    }),
+    sessionChecker: dependencies.createSessionChecker(browser.cdpUrl),
+  });
 }
