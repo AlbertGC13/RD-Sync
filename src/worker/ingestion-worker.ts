@@ -47,7 +47,7 @@ import { getPrismaClient } from "../modules/persistence/prisma-client";
 import { PrismaBankSessionExpiryEpisodeRepository } from "../modules/persistence/prisma-bank-session-expiry-episode-repository";
 import { popularBankCode } from "../modules/bank-adapters/popular";
 import { popularPortalConfig } from "../modules/bank-adapters/popular-portal";
-import { createAcquireBrowserSlotFromEnv, createEnsureBrowserForBank, resolveBankBrowserEnv } from "./scraper/browser-runtime";
+import { createAcquireBrowserSlotFromEnv, createBankSessionBrowserConfig, createEnsureBrowserForBank, createEnsureBrowserSessionForBank, resolveBankBrowserEnv } from "./scraper/browser-runtime";
 import { createScrapeTimeAutoLoginBrowserOpener, createScrapeTimeAutoLoginRunner, parseAutoLoginSelectorTimeoutMs, type BankAutoLoginStrategy } from "./scraper/auto-login";
 import { resolveDefaultScraper } from "../app/api/scrape-runs/scraper-defaults";
 import { defaultScrapeRunRepository } from "../app/api/scrape-runs/defaults";
@@ -164,12 +164,17 @@ const activatedProcessor = await activateAuthenticatedIngestionProduction({
     return {
       createResources: resourcesModule.createAuthenticatedIngestionProductionResources,
       createProcessor: (resources) => {
-        const popularSessionChecker = createCdpSessionChecker({ cdpUrl: resolveBankBrowserEnv(popularBankCode, process.env).cdpUrl });
+        const popularSessionBrowser = createBankSessionBrowserConfig(popularBankCode, process.env);
+        const popularSessionChecker = popularSessionBrowser === undefined
+          ? undefined
+          : createCdpSessionChecker({ cdpUrl: popularSessionBrowser.cdpUrl });
         return processorModule.createAuthenticatedIngestionProductionProcessor(resources, {
           env: process.env,
           resolveSessionChecker: (bankCode) => bankCode === popularBankCode
             ? popularSessionChecker
             : undefined,
+          ensureBrowserSession: popularSessionBrowser?.ensureBrowserSession
+            ?? createEnsureBrowserSessionForBank(popularBankCode, undefined),
           createOwnerToken: randomUUID,
           resolveScraper: resolveDefaultScraper,
           adapterRegistry: bankAdapterRegistry,

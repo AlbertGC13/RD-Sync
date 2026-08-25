@@ -5,6 +5,7 @@ import { createAuthenticatedIngestionPrecondition, type AuthenticatedIngestionEx
 import { createCollectionIngestionProcessor, type CollectionIngestionProcessorDependencies } from "./collection-ingestion-processor";
 import type { IngestionResult } from "./queues";
 import { createAuthenticatedSessionProbe, type SessionCheckerResolver } from "./scraper/authenticated-session-probe";
+import type { EnsureBrowserSession } from "./scraper/browser-runtime";
 import type { FencedScrapeTimeAutoLoginRunnerDependencies } from "./scraper/scrape-time-auto-login-authentication-execution";
 import type { AuthenticationHeartbeatSchedulerDependencies } from "./scraper/authentication-heartbeat-scheduler";
 import { resolveAuthenticationHeartbeatConfig } from "./scraper/authentication-heartbeat-scheduler";
@@ -22,6 +23,7 @@ type TerminalDependencies = Readonly<{
 export type AuthenticatedIngestionProcessorDependencies = Readonly<{
   env: Record<string, string | undefined>;
   resolveSessionChecker: SessionCheckerResolver;
+  ensureBrowserSession: EnsureBrowserSession;
   attempts: AuthenticatedSessionCoordinatorDependencies["attempts"];
   runnerDependencies?: FencedScrapeTimeAutoLoginRunnerDependencies;
   executionFactory?: AuthenticatedIngestionExecutionFactory;
@@ -87,7 +89,10 @@ export function createAuthenticatedIngestionProcessor(
   dependencies: AuthenticatedIngestionProcessorDependencies,
 ): (job: AuthenticatedIngestionDeliveryJob) => Promise<IngestionResult> {
   resolveAuthenticationHeartbeatConfig(dependencies.env);
-  const probe = createAuthenticatedSessionProbe({ resolveSessionChecker: dependencies.resolveSessionChecker });
+  const probe = createAuthenticatedSessionProbe({
+    resolveSessionChecker: dependencies.resolveSessionChecker,
+    ensureBrowserSession: dependencies.ensureBrowserSession,
+  });
   const downstream = createCollectionIngestionProcessor(dependencies);
   const complete = createAuthenticatedTerminalCompleter(dependencies);
   const delivery = createAuthenticatedIngestionDeliveryProcessor({

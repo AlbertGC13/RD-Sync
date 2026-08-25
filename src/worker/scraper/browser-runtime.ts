@@ -563,6 +563,56 @@ export function resolveBankBrowserEnv(
 // ---------------------------------------------------------------------------
 
 export type EnsureBrowserSeam = () => Promise<EnsureCdpBrowserResult>;
+export type EnsureBrowserSessionResult =
+  | Readonly<{ status: "ready" }>
+  | Readonly<{ status: "unavailable" }>
+  | Readonly<{ status: "throttled" }>;
+export type EnsureBrowserSession = (bankCode: string) => Promise<EnsureBrowserSessionResult>;
+export type BankSessionBrowserConfig = Readonly<{
+  cdpUrl: string;
+  ensureBrowserSession: EnsureBrowserSession;
+}>;
+
+/** Adapts one canonical bank runtime to the session probe's bank-aware port. */
+export function createEnsureBrowserSessionForBank(
+  bankCode: string,
+  ensureBrowser: EnsureBrowserSeam | undefined,
+): EnsureBrowserSession {
+  const canonicalBankCode = normalizeBankCode(bankCode);
+  return async (requestedBankCode) => {
+    if (requestedBankCode !== canonicalBankCode || ensureBrowser === undefined) {
+      return { status: "unavailable" };
+    }
+    try {
+      return (await ensureBrowser()).ok ? { status: "ready" } : { status: "unavailable" };
+    } catch {
+      return { status: "unavailable" };
+    }
+  };
+}
+
+/** Builds the session-only browser configuration from an explicit bank endpoint. */
+export function createBankSessionBrowserConfig(
+  bankCode: string,
+  env: Record<string, string | undefined> = process.env,
+  deps?: BrowserRuntimeDeps,
+): BankSessionBrowserConfig | undefined {
+  const normalizedBankCode = normalizeBankCode(bankCode);
+  const cdpUrl = readNonBlankEnv(env, `RD_SYNC_BANK_${normalizedBankCode.toUpperCase()}_CDP_URL`);
+  if (cdpUrl === undefined) return undefined;
+  try {
+    assertCdpLoopback(cdpUrl);
+  } catch {
+    return undefined;
+  }
+  const ensureBrowser = env.RD_SYNC_BANK_BROWSER_AUTO_LAUNCH === "enabled"
+    ? createEnsureBrowserForCdpUrl(normalizedBankCode, cdpUrl, env, deps)
+    : () => ensureCdpBrowser({ cdpUrl, deps });
+  return {
+    cdpUrl,
+    ensureBrowserSession: createEnsureBrowserSessionForBank(normalizedBankCode, ensureBrowser),
+  };
+}
 
 function parseOptionalMs(
   value: string | undefined,
@@ -623,7 +673,16 @@ export function createEnsureBrowserForBank(
 ): EnsureBrowserSeam | undefined {
   const normalizedBankCode = normalizeBankCode(bankCode);
   const bankEnv = resolveBankBrowserEnv(normalizedBankCode, env);
-  if (env.RD_SYNC_BANK_BROWSER_AUTO_LAUNCH !== "enabled" || !bankEnv.cdpUrl) {
+  return createEnsureBrowserForCdpUrl(normalizedBankCode, bankEnv.cdpUrl, env, deps);
+}
+
+function createEnsureBrowserForCdpUrl(
+  normalizedBankCode: string,
+  cdpUrl: string,
+  env: Record<string, string | undefined>,
+  deps?: BrowserRuntimeDeps,
+): EnsureBrowserSeam | undefined {
+  if (env.RD_SYNC_BANK_BROWSER_AUTO_LAUNCH !== "enabled" || !cdpUrl) {
     return undefined;
   }
 
@@ -639,7 +698,7 @@ export function createEnsureBrowserForBank(
 
   return () =>
     ensureCdpBrowser({
-      cdpUrl: bankEnv.cdpUrl,
+      cdpUrl,
       launchCommand,
       launchEnv: launchCommand ? { BANK_CODE: normalizedBankCode } : undefined,
       readyTimeoutMs,
