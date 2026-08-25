@@ -36,7 +36,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
   const collect = vi.fn(async () => ({ status: "collected" as const, movements: [] }));
   const createOwnerToken = vi.fn().mockReturnValueOnce("owner-1").mockReturnValueOnce("owner-2");
   const processor = createAuthenticatedIngestionProcessor({
-    env, resolveSessionChecker: (bankCode) => bankCode === "popular" ? { check: async () => ({ status: authenticated ? "active" : "expired", checkedAt: "2026-08-21T00:00:00.000Z", safeSummary: "safe" }) } : undefined,
+    env, resolveSessionChecker: (bankCode) => bankCode === "popular" ? { check: async () => ({ status: authenticated ? "active" : "expired", checkedAt: "2026-08-21T00:00:00.000Z", safeSummary: "safe" }) } : undefined, ensureBrowserSession: vi.fn(async () => ({ status: "ready" as const })),
     attempts: { findExact: async () => authenticated ? { status: "found", record: record() } : { status: "missing" }, getOrCreate: async () => ({ status: "created", record: record() }), acquireLease: async (input: { ownerToken: string }) => { ownerToken = input.ownerToken; return { status: "lease_acquired", owner: { identity, ownerToken, generation: 0n }, record: record(true) }; }, reconcileExpiredLease: async () => ({ status: "missing" }), renewLease: async () => ({ status: "lease_renewed", record: record(true) }), beginCredentialInteraction: async () => { phase = "credentials_may_have_reached_portal"; return { status: "interaction_started", record: record(true) }; }, recordSubmitBarrier: async () => { phase = "submit_may_have_been_dispatched"; return { status: "recorded", record: record(true) }; }, claimRetry: async () => ({ status: "retry_claimed", retryCount: 1 as const, record: record() }), completeAuthenticated: async () => { authenticated = true; return { status: "authenticated", record: record() }; }, completeFailed: async () => ({ status: "failed", record: record() }) } as never,
     runnerDependencies, heartbeat: scheduler, scrapeRuns, auditSink, adminAlerts, transactions: { upsertMany: vi.fn(async () => ({ inserted: 0, skipped: 0 })) }, resolveScraper: vi.fn(() => ({ collect })), createOwnerToken, now: () => now, ...overrides,
   });
@@ -139,9 +139,10 @@ describe("createAuthenticatedIngestionProcessor", () => {
   });
 
   it("uses an already-authenticated probe without touching credential mutation dependencies", async () => {
-    const f = fixture({ resolveSessionChecker: (bankCode: string) => bankCode === "popular" ? { check: async () => ({ status: "active", checkedAt: "2026-08-21T00:00:00.000Z", safeSummary: "safe" }) } : undefined });
+    const ensureBrowserSession = vi.fn(async () => ({ status: "ready" as const }));
+    const f = fixture({ resolveSessionChecker: (bankCode: string) => bankCode === "popular" ? { check: async () => ({ status: "active", checkedAt: "2026-08-21T00:00:00.000Z", safeSummary: "safe" }) } : undefined, ensureBrowserSession });
     await expect(f.processor(payload())).resolves.toEqual({ status: "succeeded", inserted: 0, skipped: 0 });
-    expect(f.runnerDependencies.credentials.findByBankCode).not.toHaveBeenCalled(); expect(f.page.fill).not.toHaveBeenCalled(); expect(f.collect).toHaveBeenCalledOnce();
+    expect(ensureBrowserSession).toHaveBeenCalledExactlyOnceWith("popular"); expect(f.runnerDependencies.credentials.findByBankCode).not.toHaveBeenCalled(); expect(f.page.fill).not.toHaveBeenCalled(); expect(f.collect).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -208,7 +209,7 @@ describe("createAuthenticatedIngestionProcessor", () => {
 
   it("fails invalid heartbeat configuration during construction before low-level dependencies", () => {
     const f = fixture();
-    expect(() => createAuthenticatedIngestionProcessor({ env: { ...env, RD_SYNC_AUTHENTICATION_HEARTBEAT_MS: "60000" }, resolveSessionChecker: () => ({ check: async () => null }), attempts: {} as never, runnerDependencies: f.runnerDependencies, scrapeRuns: f.scrapeRuns, transactions: { upsertMany: vi.fn() }, resolveScraper: vi.fn(), createOwnerToken: vi.fn() })).toThrow("Invalid authentication heartbeat configuration.");
+    expect(() => createAuthenticatedIngestionProcessor({ env: { ...env, RD_SYNC_AUTHENTICATION_HEARTBEAT_MS: "60000" }, resolveSessionChecker: () => ({ check: async () => null }), ensureBrowserSession: async () => ({ status: "ready" }), attempts: {} as never, runnerDependencies: f.runnerDependencies, scrapeRuns: f.scrapeRuns, transactions: { upsertMany: vi.fn() }, resolveScraper: vi.fn(), createOwnerToken: vi.fn() })).toThrow("Invalid authentication heartbeat configuration.");
     expect(f.runnerDependencies.credentials.findByBankCode).not.toHaveBeenCalled();
   });
 

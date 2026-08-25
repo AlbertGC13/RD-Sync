@@ -1,4 +1,5 @@
 import type { AuthenticatedSessionProbe } from "../../modules/bank-sessions/ensure-authenticated-session";
+import type { EnsureBrowserSession } from "./browser-runtime";
 
 export interface ReadonlySessionChecker {
   check(): Promise<unknown>;
@@ -6,7 +7,10 @@ export interface ReadonlySessionChecker {
 export type SessionCheckerResolver = (bankCode: string) => ReadonlySessionChecker | undefined;
 type CheckerResult = Readonly<{ status: "active" | "expired" | "browser_unavailable"; checkedAt: string; safeSummary: string }>;
 
-export type AuthenticatedSessionProbeDependencies = Readonly<{ resolveSessionChecker: SessionCheckerResolver }>;
+export type AuthenticatedSessionProbeDependencies = Readonly<{
+  resolveSessionChecker: SessionCheckerResolver;
+  ensureBrowserSession: EnsureBrowserSession;
+}>;
 
 const unavailable = (): Awaited<ReturnType<AuthenticatedSessionProbe["observe"]>> => ({ status: "unavailable" });
 
@@ -52,7 +56,7 @@ function isAborted(signal: AbortSignal | undefined): boolean | null {
 /** Maps a read-only, already-attached CDP checker to the coordinator probe port.
  * The checker owns its timeout and page closure; cancellation only suppresses its result. */
 export function createAuthenticatedSessionProbe(
-  { resolveSessionChecker }: AuthenticatedSessionProbeDependencies,
+  { resolveSessionChecker, ensureBrowserSession }: AuthenticatedSessionProbeDependencies,
 ): AuthenticatedSessionProbe {
   return {
     async observe(input) {
@@ -60,6 +64,7 @@ export function createAuthenticatedSessionProbe(
         if (isAborted(input.signal) !== false) return unavailable();
         const sessionChecker = resolveSessionChecker(input.bankCode);
         if (!sessionChecker) return unavailable();
+        if ((await ensureBrowserSession(input.bankCode)).status !== "ready") return unavailable();
         const result = parseResult(await sessionChecker.check());
         if (isAborted(input.signal) !== false || !result) return unavailable();
         if (result.status === "expired") return { status: "unauthenticated" };

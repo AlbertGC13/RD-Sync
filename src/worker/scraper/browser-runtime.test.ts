@@ -5,6 +5,8 @@ import {
   ensureCdpBrowser,
   createEnsureBrowserFromEnv,
   createEnsureBrowserForBank,
+  createEnsureBrowserSessionForBank,
+  createBankSessionBrowserConfig,
   createAcquireBrowserSlotFromEnv,
   getBrowserCapacitySnapshotFromEnv,
   assertCdpLoopback,
@@ -73,6 +75,75 @@ function makeFakeClock(start: number, step: number): () => number {
 }
 
 const CDP_URL = "http://127.0.0.1:9222";
+
+describe("createEnsureBrowserSessionForBank", () => {
+  it("ensures only its canonical bank without a cross-bank fallback", async () => {
+    const ensureBrowser = vi.fn(async () => ({ ok: true as const, launched: false }));
+    const ensureSession = createEnsureBrowserSessionForBank("popular", ensureBrowser);
+
+    await expect(ensureSession("bhd")).resolves.toEqual({ status: "unavailable" });
+    await expect(ensureSession("popular")).resolves.toEqual({ status: "ready" });
+
+    expect(ensureBrowser).toHaveBeenCalledOnce();
+  });
+});
+
+describe("createBankSessionBrowserConfig", () => {
+  it("rejects global fallback and accepts only a validated canonical bank endpoint", async () => {
+    expect(createBankSessionBrowserConfig("popular", {
+      RD_SYNC_CDP_URL: "http://127.0.0.1:9222",
+    })).toBeUndefined();
+    expect(createBankSessionBrowserConfig("popular", {
+      RD_SYNC_BANK_POPULAR_CDP_URL: "http://10.0.0.1:9222",
+    })).toBeUndefined();
+
+    const config = createBankSessionBrowserConfig("popular", {
+      RD_SYNC_CDP_URL: "http://127.0.0.1:9222",
+      RD_SYNC_BANK_POPULAR_CDP_URL: "http://127.0.0.1:9333",
+    });
+    expect(config?.cdpUrl).toBe("http://127.0.0.1:9333");
+    await expect(config?.ensureBrowserSession("bhd")).resolves.toEqual({ status: "unavailable" });
+  });
+
+  it("probes a manually provisioned bank browser without launching", async () => {
+    const { fetch, urls } = makeFetchSequence([true]);
+    const { spawn, calls } = makeSpawnTracker();
+    const config = createBankSessionBrowserConfig("popular", {
+      RD_SYNC_BANK_POPULAR_CDP_URL: "http://127.0.0.1:9333",
+    }, { fetch, spawn });
+
+    await expect(config?.ensureBrowserSession("popular")).resolves.toEqual({ status: "ready" });
+    expect(urls).toEqual(["http://127.0.0.1:9333/json/version"]);
+    expect(calls).toEqual([]);
+  });
+
+  it("fails closed for an unavailable manual browser without launching", async () => {
+    const { fetch } = makeFetchSequence([false]);
+    const { spawn, calls } = makeSpawnTracker();
+    const config = createBankSessionBrowserConfig("popular", {
+      RD_SYNC_BANK_POPULAR_CDP_URL: "http://127.0.0.1:9333",
+    }, { fetch, spawn });
+
+    await expect(config?.ensureBrowserSession("popular")).resolves.toEqual({ status: "unavailable" });
+    expect(calls).toEqual([]);
+  });
+
+  it("retains launch behavior when auto-launch is enabled", async () => {
+    const { fetch } = makeFetchSequence([false, true]);
+    const { spawn, calls, envs } = makeSpawnTracker();
+    const config = createBankSessionBrowserConfig("popular", {
+      RD_SYNC_BANK_POPULAR_CDP_URL: "http://127.0.0.1:9333",
+      RD_SYNC_BANK_BROWSER_AUTO_LAUNCH: "enabled",
+      RD_SYNC_BANK_BROWSER_LAUNCH_COMMAND: "launch-popular",
+      RD_SYNC_BANK_BROWSER_READY_TIMEOUT_MS: "1000",
+      RD_SYNC_BANK_BROWSER_POLL_INTERVAL_MS: "1",
+    }, { fetch, spawn, sleep: noopSleep, now: makeFakeClock(0, 1) });
+
+    await expect(config?.ensureBrowserSession("popular")).resolves.toEqual({ status: "ready" });
+    expect(calls).toEqual(["launch-popular"]);
+    expect(envs).toEqual([{ BANK_CODE: "popular" }]);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // isCdpAvailable
