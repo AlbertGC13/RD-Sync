@@ -58,6 +58,7 @@ export const bankPortalIdentities = Object.freeze([
 ] as const satisfies readonly BankPortalIdentity[]);
 
 export const bhdPersonalBankCode = bhdPersonalIdentity.bankCode;
+export const banreservasEmpresasBankCode = banreservasEmpresasIdentity.bankCode;
 
 const identitiesByBankCode: ReadonlyMap<string, BankPortalIdentity> = new Map(
   bankPortalIdentities.map((identity) => [identity.bankCode, identity]),
