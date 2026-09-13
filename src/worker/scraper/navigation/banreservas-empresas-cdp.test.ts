@@ -207,17 +207,31 @@ describe("CdpBanreservasEmpresasPage", () => {
       `click:${dateTo}`, `press:${dateTo}:Control+a`, `type:${dateTo}:13092026`, `press:${dateTo}:Tab`,
       `evaluate:${JSON.stringify([dateFrom, dateTo])}`,
     ]);
-    await expect(adapter(new MainFrame(detailUrl, { evaluate: [["14/08/2026", "12/09/2026"]] })).setPeriod(period)).resolves.toBe(false);
+    const retried = new MainFrame(detailUrl, { evaluate: [["14/08/2026", "12/09/2026"], ["14/08/2026", "13/09/2026"]] });
+    await expect(adapter(retried).setPeriod(period)).resolves.toBe(true);
+    expect(retried.calls.filter((call) => call.startsWith("type:"))).toHaveLength(4);
+    const stubborn = new MainFrame(detailUrl, { evaluate: [["14/08/2026", "12/09/2026"], ["14/08/2026", "12/09/2026"], ["14/08/2026", "13/09/2026"]] });
+    await expect(adapter(stubborn).setPeriod(period)).resolves.toBe(false);
+    expect(stubborn.calls.filter((call) => call.startsWith("type:"))).toHaveLength(4);
   });
 
   it("clicks Consultar or Next and waits until the async postback settles, failing on timeout", async () => {
-    const main = new MainFrame(detailUrl, { evaluate: [true, true, false] });
+    const main = new MainFrame(detailUrl, { evaluate: [true, true, false, false] });
     await expect(adapter(main).runQuery()).resolves.toBe(true);
     expect(main.calls[0]).toBe("click:#ctl00_MainHolder_period_linkButtonConsultar");
-    expect(main.calls.filter((call) => call.startsWith("evaluate"))).toHaveLength(3);
+    expect(main.calls.filter((call) => call.startsWith("evaluate"))).toHaveLength(4);
     const stuck = new MainFrame(detailUrl, { evaluate: Array.from({ length: 20 }, () => true) });
     await expect(adapter(stuck).goToNextPage()).resolves.toBe(false);
     expect(stuck.calls[0]).toBe("click:#ctl00_MainHolder_AccountTransactionGrid_lnkNext");
+  });
+
+  it("treats a Consultar blocked by an invalid ASP.NET validator as a failed query, never as an empty result", async () => {
+    const blocked = new MainFrame(detailUrl, { evaluate: [false, true] });
+    await expect(adapter(blocked).runQuery()).resolves.toBe(false);
+    expect(blocked.calls.filter((call) => call.startsWith("evaluate"))).toHaveLength(2);
+    const paged = new MainFrame(detailUrl, { evaluate: [false] });
+    await expect(adapter(paged).goToNextPage()).resolves.toBe(true);
+    expect(paged.calls.filter((call) => call.startsWith("evaluate"))).toHaveLength(1);
   });
 
   it("reads grid state through the profile selectors and maps the session checker to access states", async () => {
@@ -249,7 +263,7 @@ describe("createBanreservasEmpresasCdpScraper", () => {
   };
 
   it("collects one account through the consultation flow only, then detaches without closing the page", async () => {
-    const main = new MainFrame(`${origin}/TuBancoEmpresas/Home.aspx`, { evaluate: [1, "TYPE_1", ["14/08/2026", "13/09/2026"], false, fakeRows, false] });
+    const main = new MainFrame(`${origin}/TuBancoEmpresas/Home.aspx`, { evaluate: [1, "TYPE_1", ["14/08/2026", "13/09/2026"], false, false, fakeRows, false] });
     const tab = framesetTab(main);
     const browser = browserOf(tab);
     const result = await scraper(browser).scraper.collect();

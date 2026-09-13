@@ -113,6 +113,8 @@ export type CdpBanreservasEmpresasPageDependencies = Readonly<{
 }>;
 
 type AsyncPostbackWindow = { Sys?: { WebForms?: { PageRequestManager?: { getInstance(): { get_isInAsyncPostBack(): boolean } } } } };
+type ValidatorsWindow = { Page_Validators?: readonly { isvalid?: boolean }[] };
+const PERIOD_ENTRY_ATTEMPTS = 2;
 
 /**
  * Main-frame adapter for the consultation flow. It clicks only the account
@@ -172,7 +174,16 @@ export class CdpBanreservasEmpresasPage implements BanreservasEmpresasPage {
     return this.mainFrame().evaluate((selector) => document.querySelector<HTMLSelectElement>(selector)?.value ?? "", selectors.productCombo);
   }
 
+  /** The masked inputs occasionally swallow a keystroke; one re-entry is allowed before failing closed. */
   async setPeriod(period: BanreservasEmpresasPeriod): Promise<boolean> {
+    for (let attempt = 0; attempt < PERIOD_ENTRY_ATTEMPTS; attempt++) {
+      await this.typePeriod(period);
+      if (await this.periodMatches(period)) return true;
+    }
+    return false;
+  }
+
+  private async typePeriod(period: BanreservasEmpresasPeriod): Promise<void> {
     const main = this.mainFrame();
     for (const [selector, value] of [[selectors.dateFrom, period.from], [selectors.dateTo, period.to]] as const) {
       await main.click(selector, { timeout: this.navigationTimeoutMs });
@@ -180,13 +191,21 @@ export class CdpBanreservasEmpresasPage implements BanreservasEmpresasPage {
       await main.type(selector, value.replace(/\//g, ""), { delay: TYPE_DELAY_MS });
       await main.press(selector, "Tab");
     }
-    const typed = await main.evaluate((inputs) => inputs.map((input) => document.querySelector<HTMLInputElement>(input)?.value ?? ""), [selectors.dateFrom, selectors.dateTo]);
+  }
+
+  private async periodMatches(period: BanreservasEmpresasPeriod): Promise<boolean> {
+    const typed = await this.mainFrame().evaluate((inputs) => inputs.map((input) => document.querySelector<HTMLInputElement>(input)?.value ?? ""), [selectors.dateFrom, selectors.dateTo]);
     return typed[0] === period.from && typed[1] === period.to;
   }
 
+  /** A Consultar blocked by client validation never posts back, so an unchanged grid must not read as empty. */
   async runQuery(): Promise<boolean> {
     await this.mainFrame().click(selectors.query, { timeout: this.navigationTimeoutMs });
-    return this.settleAsyncPostback();
+    if (!(await this.settleAsyncPostback())) return false;
+    return !(await this.mainFrame().evaluate(() => {
+      const validators = (window as ValidatorsWindow).Page_Validators;
+      return Array.isArray(validators) && validators.some((validator) => validator.isvalid === false);
+    }));
   }
 
   async readVisibleTransactionRows(): Promise<readonly (readonly string[])[]> {
