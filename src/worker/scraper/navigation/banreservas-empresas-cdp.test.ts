@@ -6,6 +6,7 @@ import {
   CdpBanreservasEmpresasPage,
   createBanreservasEmpresasCdpScraper,
   createBanreservasEmpresasCdpSessionChecker,
+  parseBanreservasEmpresasSelectedCurrency,
   resolveBanreservasEmpresasCdpUrl,
   type BanreservasCdpBrowser,
   type BanreservasCdpFrame,
@@ -148,6 +149,7 @@ describe("createBanreservasEmpresasCdpSessionChecker", () => {
 const accountsUrl = `${origin}/TuBancoEmpresas/Pages/Accounts/Accounts.aspx`;
 const detailUrl = `${origin}/TuBancoEmpresas/Pages/Common/ProductStatus.aspx?k=v`;
 const accountGrid = "#ctl00_MainHolder_AccountGrid_AccountASPxGridView";
+const productCombo = "#ctl00_MainHolder_cmbProducts";
 const transactionGrid = "#ctl00_MainHolder_AccountTransactionGrid_ASPxGridViewTransactions";
 const dateFrom = "#ctl00_MainHolder_period_dateTextBoxDateFrom";
 const dateTo = "#ctl00_MainHolder_period_dateTextBoxDateTo";
@@ -235,15 +237,17 @@ describe("CdpBanreservasEmpresasPage", () => {
   });
 
   it("reads grid state through the profile selectors and maps the session checker to access states", async () => {
-    const main = new MainFrame(detailUrl, { evaluate: [2, "TYPE_1", fakeRows, false] });
+    const main = new MainFrame(detailUrl, { evaluate: [2, "TYPE_1", "USD", fakeRows, false] });
     const page = adapter(main);
     await expect(page.countAccountRows()).resolves.toBe(2);
     await expect(page.selectedAccountKey()).resolves.toBe("TYPE_1");
+    await expect(page.selectedAccountCurrency()).resolves.toBe("USD");
     await expect(page.readVisibleTransactionRows()).resolves.toEqual(fakeRows);
     await expect(page.hasNextPage()).resolves.toBe(false);
     expect(main.calls).toEqual([
       `evaluate:${JSON.stringify(`${accountGrid} tr[id*="_AccountASPxGridView_DXDataRow"].dxgvDataRow`)}`,
-      `evaluate:${JSON.stringify("#ctl00_MainHolder_cmbProducts")}`,
+      `evaluate:${JSON.stringify(productCombo)}`,
+      `evaluate:${JSON.stringify(productCombo)}`,
       `evaluate:${JSON.stringify(`${transactionGrid} tr[id*="_DXDataRow"].dxgvDataRow`)}`,
       `evaluate:${JSON.stringify("#ctl00_MainHolder_AccountTransactionGrid_lnkNext")}`,
     ]);
@@ -254,26 +258,56 @@ describe("CdpBanreservasEmpresasPage", () => {
   });
 });
 
+describe("parseBanreservasEmpresasSelectedCurrency", () => {
+  it.each([
+    ["TYPE_1|DOP", "DOP"],
+    ["TYPE_1|USD", "USD"],
+    ["TYPE_1| EUR ", "EUR"],
+    ["TYPE_1|USD|EUR", "EUR"],
+    ["TYPE_1", ""],
+    ["TYPE_1|", ""],
+  ])("returns only the text after the final separator for %j", (optionText, expected) => {
+    expect(parseBanreservasEmpresasSelectedCurrency(optionText)).toBe(expected);
+  });
+});
+
 describe("createBanreservasEmpresasCdpScraper", () => {
   const clock = () => new Date("2026-09-13T15:00:00.000Z");
   const browserOf = (...pages: readonly BanreservasCdpPage<BanreservasCdpMainFrame>[]) => ({ close: vi.fn(async () => {}), contexts: () => [{ pages: () => pages }] });
-  const scraper = (browser: ReturnType<typeof browserOf>, cdpUrl = BANRESERVAS_EMPRESAS_CDP_URL) => {
+  const scraper = (browser: ReturnType<typeof browserOf>, cdpUrl = BANRESERVAS_EMPRESAS_CDP_URL, env?: Readonly<Record<string, string | undefined>>) => {
     const connect = vi.fn(async () => browser);
-    return { connect, scraper: createBanreservasEmpresasCdpScraper({ cdpUrl, connect, clock, page: { sleep: async () => {} } }) };
+    return { connect, scraper: createBanreservasEmpresasCdpScraper({ cdpUrl, connect, clock, env, page: { sleep: async () => {} } }) };
   };
 
   it("collects one account through the consultation flow only, then detaches without closing the page", async () => {
-    const main = new MainFrame(`${origin}/TuBancoEmpresas/Home.aspx`, { evaluate: [1, "TYPE_1", ["14/08/2026", "13/09/2026"], false, false, fakeRows, false] });
+    const main = new MainFrame(`${origin}/TuBancoEmpresas/Home.aspx`, { evaluate: [1, "TYPE_1", "USD", ["06/09/2026", "13/09/2026"], false, false, fakeRows, false] });
     const tab = framesetTab(main);
     const browser = browserOf(tab);
     const result = await scraper(browser).scraper.collect();
-    expect(result).toMatchObject({ status: "collected", movements: [expect.objectContaining({ bankId: "banreservas_empresas", direction: "credit", amount: "1250.00" })] });
+    expect(result).toMatchObject({ status: "collected", movements: [expect.objectContaining({ bankId: "banreservas_empresas", direction: "credit", amount: "1250.00", currency: "USD" })] });
     expect(result.movements[0].accountFingerprint).toMatch(/^banreservas_empresas-[0-9a-f]{10}$/);
     const clicked = main.calls.filter((call) => call.startsWith("click:")).map((call) => call.slice(6));
     expect(clicked).toEqual([`${accountGrid}_DXDataRow0 > td:first-child`, dateFrom, dateTo, "#ctl00_MainHolder_period_linkButtonConsultar"]);
     expect(clicked.some((selector) => /linkButtonGeneratePDF|linkButtonQIF|linkButtonCSV|linkButton2|Transfer|Payment|Logout/i.test(selector))).toBe(false);
     expect(browser.close).toHaveBeenCalledOnce();
     expect("close" in tab).toBe(false);
+  });
+
+  it("uses the injected Popular-style lookback environment while ignoring global CDP fallback values", async () => {
+    const main = new MainFrame(`${origin}/TuBancoEmpresas/Home.aspx`, { evaluate: [1, "TYPE_1", "DOP", ["15/06/2026", "13/09/2026"], false, false, fakeRows, false] });
+    const browser = browserOf(framesetTab(main));
+    const { connect, scraper: candidate } = scraper(browser, BANRESERVAS_EMPRESAS_CDP_URL, {
+      RD_SYNC_SCRAPE_LOOKBACK_DAYS: "91",
+      RD_SYNC_CDP_URL: "http://127.0.0.1:9999",
+    });
+
+    await expect(candidate.collect()).resolves.toMatchObject({ status: "collected" });
+
+    expect(connect).toHaveBeenCalledWith(BANRESERVAS_EMPRESAS_CDP_URL);
+    expect(main.calls.filter((call) => call.startsWith("type:"))).toEqual([
+      `type:${dateFrom}:15062026`,
+      `type:${dateTo}:13092026`,
+    ]);
   });
 
   it("maps invalid endpoints, missing framesets, connection errors, and collection failures to one safe manual result", async () => {

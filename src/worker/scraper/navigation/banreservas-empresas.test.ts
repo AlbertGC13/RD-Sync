@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   collectBanreservasEmpresasMovements,
   deriveBanreservasEmpresasAccountFingerprint,
+  DEFAULT_BANRESERVAS_EMPRESAS_LOOKBACK_DAYS,
+  parseBanreservasEmpresasLookbackDays,
   resolveBanreservasEmpresasPeriod,
   type BanreservasEmpresasAccessState,
   type BanreservasEmpresasPage,
@@ -12,7 +14,7 @@ const creditRow = ["29/06/26", "TXN-EXAMPLE-001", "PAYMENT RECEIVED", "0.00", "1
 const debitRow = ["28/06/26", "   ", "SERVICE CHARGE", "9.75", "0.00", "DOP 9,990.24"];
 const clock = () => new Date("2026-09-13T15:00:00.000Z");
 
-type AccountScript = { key?: string; pages: readonly (readonly (readonly string[])[])[]; nextAfterLastPage?: boolean };
+type AccountScript = { key?: string; currency?: string; pages: readonly (readonly (readonly string[])[])[]; nextAfterLastPage?: boolean };
 
 class FakePage implements BanreservasEmpresasPage {
   readonly operations: string[] = [];
@@ -38,6 +40,7 @@ class FakePage implements BanreservasEmpresasPage {
   async countAccountRows() { this.step("countAccountRows"); return this.state.accounts?.length ?? 0; }
   async selectAccountRow(index: number) { this.step("selectAccountRow", String(index)); this.account = index; this.pageIndex = 0; return !this.state.fail?.selectAccountRow; }
   async selectedAccountKey() { this.step("selectedAccountKey"); return this.script.key ?? `key-${this.account}`; }
+  async selectedAccountCurrency() { this.step("selectedAccountCurrency"); return this.script.currency ?? "DOP"; }
   async setPeriod(period: { from: string; to: string }) { this.step("setPeriod", `${period.from}..${period.to}`); return !this.state.fail?.setPeriod; }
   async runQuery() { this.step("runQuery"); return !this.state.fail?.runQuery; }
   async readVisibleTransactionRows() { this.step("readVisibleTransactionRows"); return this.script.pages[this.pageIndex] ?? []; }
@@ -64,11 +67,24 @@ describe("collectBanreservasEmpresasMovements", () => {
     expect(JSON.stringify(result)).not.toMatch(/TYPE_1|TYPE_2|9,999|9,990/);
     expect(page.operations).toEqual([
       "accessState", "openAccountsQuery", "countAccountRows",
-      "selectAccountRow:0", "selectedAccountKey", "setPeriod:14/08/2026..13/09/2026", "runQuery",
+      "selectAccountRow:0", "selectedAccountKey", "selectedAccountCurrency", "setPeriod:14/08/2026..13/09/2026", "runQuery",
       "readVisibleTransactionRows", "hasNextPage", "goToNextPage", "readVisibleTransactionRows", "hasNextPage", "goToNextPage", "readVisibleTransactionRows",
-      "openAccountsQuery", "selectAccountRow:1", "selectedAccountKey", "setPeriod:14/08/2026..13/09/2026", "runQuery",
+      "openAccountsQuery", "selectAccountRow:1", "selectedAccountKey", "selectedAccountCurrency", "setPeriod:14/08/2026..13/09/2026", "runQuery",
       "readVisibleTransactionRows", "hasNextPage",
     ]);
+  });
+
+  it("propagates the selected DOP, USD, and EUR currencies to parsed movements", async () => {
+    const page = new FakePage({ accounts: [
+      { currency: "USD", pages: [[creditRow]] },
+      { currency: "DOP", pages: [[debitRow]] },
+      { currency: "EUR", pages: [[creditRow]] },
+    ] });
+
+    const result = await collectBanreservasEmpresasMovements(page, { clock, lookbackDays: 7 });
+
+    expect(result.status).toBe("collected");
+    expect(result.movements.map((movement) => movement.currency)).toEqual(["USD", "DOP", "EUR"]);
   });
 
   it("treats an empty first page as a complete empty result without paging further", async () => {
@@ -84,6 +100,19 @@ describe("collectBanreservasEmpresasMovements", () => {
       .resolves.toEqual({ status: "unavailable", movements: [], safeErrorSummary: "Banreservas Empresas page is unavailable." });
     await expect(collectBanreservasEmpresasMovements(new FakePage({ accounts: [] }), { clock }))
       .resolves.toEqual({ status: "unavailable", movements: [], safeErrorSummary: "Banreservas Empresas accounts are unavailable." });
+  });
+
+  it.each(["JPY", "", "usd", "USD|"])("fails closed without partial movements for an unsupported selected currency %j", async (currency) => {
+    const page = new FakePage({ accounts: [
+      { currency: "USD", pages: [[creditRow]] },
+      { currency, pages: [[debitRow]] },
+    ] });
+
+    await expect(collectBanreservasEmpresasMovements(page, { clock })).resolves.toEqual({
+      status: "unavailable",
+      movements: [],
+      safeErrorSummary: "Banreservas Empresas movements could not be safely parsed.",
+    });
   });
 
   it("fails closed without partial movements on navigation, paging, parsing, and observation failures", async () => {
@@ -113,7 +142,22 @@ describe("resolveBanreservasEmpresasPeriod", () => {
     expect(resolveBanreservasEmpresasPeriod(new Date("2026-09-13T03:30:00.000Z"), 30)).toEqual({ from: "13/08/2026", to: "12/09/2026" });
     expect(resolveBanreservasEmpresasPeriod(new Date("2026-03-01T12:00:00.000Z"), 1)).toEqual({ from: "28/02/2026", to: "01/03/2026" });
     expect(resolveBanreservasEmpresasPeriod(new Date("2026-09-13T12:00:00.000Z"), 500)).toEqual({ from: "15/06/2026", to: "13/09/2026" });
-    expect(resolveBanreservasEmpresasPeriod(new Date("2026-09-13T12:00:00.000Z"), Number.NaN)).toEqual({ from: "14/08/2026", to: "13/09/2026" });
+    expect(resolveBanreservasEmpresasPeriod(new Date("2026-09-13T12:00:00.000Z"), Number.NaN)).toEqual({ from: "06/09/2026", to: "13/09/2026" });
+  });
+});
+
+describe("parseBanreservasEmpresasLookbackDays", () => {
+  it("uses a seven-day default, follows Popular numeric parsing, and preserves the 1–90-day bounds", () => {
+    expect(DEFAULT_BANRESERVAS_EMPRESAS_LOOKBACK_DAYS).toBe(7);
+    expect(parseBanreservasEmpresasLookbackDays(undefined)).toBe(7);
+    expect(parseBanreservasEmpresasLookbackDays("   ")).toBe(7);
+    expect(parseBanreservasEmpresasLookbackDays("not-a-number")).toBe(7);
+    expect(parseBanreservasEmpresasLookbackDays("Infinity")).toBe(7);
+    expect(parseBanreservasEmpresasLookbackDays("0")).toBe(1);
+    expect(parseBanreservasEmpresasLookbackDays("-3")).toBe(1);
+    expect(parseBanreservasEmpresasLookbackDays("45.9")).toBe(45);
+    expect(parseBanreservasEmpresasLookbackDays("90")).toBe(90);
+    expect(parseBanreservasEmpresasLookbackDays("91")).toBe(90);
   });
 });
 

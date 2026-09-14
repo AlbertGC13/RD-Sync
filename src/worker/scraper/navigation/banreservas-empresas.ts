@@ -9,11 +9,14 @@ import type { BankMovement } from "../../../modules/transactions";
 
 const SANTO_DOMINGO_OFFSET_MS = -4 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const DEFAULT_LOOKBACK_DAYS = 30;
+export const DEFAULT_BANRESERVAS_EMPRESAS_LOOKBACK_DAYS = 7;
+const MIN_LOOKBACK_DAYS = 1;
 const MAX_LOOKBACK_DAYS = 90;
+export const BANRESERVAS_EMPRESAS_LOOKBACK_DAYS_ENV = "RD_SYNC_SCRAPE_LOOKBACK_DAYS";
 const DEFAULT_MAX_PAGES_PER_ACCOUNT = 100;
 const TRANSACTION_CELL_COUNT = 6;
 const FINGERPRINT_LENGTH = 10;
+const SUPPORTED_CURRENCIES = new Set(["DOP", "USD", "EUR"]);
 
 const SAFE_SUMMARY_PROTECTED = "Banreservas Empresas session requires administrator action.";
 const SAFE_SUMMARY_UNAVAILABLE = "Banreservas Empresas page is unavailable.";
@@ -38,6 +41,8 @@ export interface BanreservasEmpresasPage {
   selectAccountRow(index: number): Promise<boolean>;
   /** Opaque portal key of the selected account; hashed before it reaches any movement. */
   selectedAccountKey(): Promise<string>;
+  /** Sanitized currency of the selected account; account/product text must not leave the page. */
+  selectedAccountCurrency(): Promise<string>;
   setPeriod(period: BanreservasEmpresasPeriod): Promise<boolean>;
   runQuery(): Promise<boolean>;
   /** Direct cells of every visible transaction row, in grid order. */
@@ -70,10 +75,24 @@ function formatPeriodDate(date: Date): string {
 
 /** Resolves the Santo Domingo calendar window ending today with a bounded lookback. */
 export function resolveBanreservasEmpresasPeriod(now: Date, lookbackDays: number): BanreservasEmpresasPeriod {
-  const days = Number.isFinite(lookbackDays) ? Math.min(MAX_LOOKBACK_DAYS, Math.max(1, Math.floor(lookbackDays))) : DEFAULT_LOOKBACK_DAYS;
+  const days = Number.isFinite(lookbackDays) ? Math.min(MAX_LOOKBACK_DAYS, Math.max(MIN_LOOKBACK_DAYS, Math.trunc(lookbackDays))) : DEFAULT_BANRESERVAS_EMPRESAS_LOOKBACK_DAYS;
   const local = new Date(now.getTime() + SANTO_DOMINGO_OFFSET_MS);
   const end = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate());
   return { from: formatPeriodDate(new Date(end - days * DAY_MS)), to: formatPeriodDate(new Date(end)) };
+}
+
+/** Parses the shared scrape lookback setting using the same rules as Popular. */
+export function parseBanreservasEmpresasLookbackDays(value: string | undefined): number {
+  const normalized = value?.trim();
+  if (!normalized) return DEFAULT_BANRESERVAS_EMPRESAS_LOOKBACK_DAYS;
+
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) return DEFAULT_BANRESERVAS_EMPRESAS_LOOKBACK_DAYS;
+
+  return Math.min(
+    MAX_LOOKBACK_DAYS,
+    Math.max(MIN_LOOKBACK_DAYS, Math.trunc(parsed)),
+  );
 }
 
 /** Opaque, stable per-account fingerprint; the portal key itself never leaves the collector. */
@@ -124,7 +143,7 @@ export async function collectBanreservasEmpresasMovements(
 
     const accountCount = await page.countAccountRows();
     if (!Number.isInteger(accountCount) || accountCount <= 0) return unavailable(SAFE_SUMMARY_ACCOUNTS);
-    const period = resolveBanreservasEmpresasPeriod(clock(), options.lookbackDays ?? DEFAULT_LOOKBACK_DAYS);
+    const period = resolveBanreservasEmpresasPeriod(clock(), options.lookbackDays ?? DEFAULT_BANRESERVAS_EMPRESAS_LOOKBACK_DAYS);
 
     const movements: BankMovement[] = [];
     for (let index = 0; index < accountCount; index++) {
@@ -132,12 +151,22 @@ export async function collectBanreservasEmpresasMovements(
       if (!(await page.selectAccountRow(index))) return unavailable(SAFE_SUMMARY_ACCOUNTS);
       const accountKey = (await page.selectedAccountKey()).trim();
       if (!accountKey) return unavailable(SAFE_SUMMARY_ACCOUNTS);
+      let selectedCurrency: string;
+      try {
+        selectedCurrency = (await page.selectedAccountCurrency()).trim();
+      } catch {
+        return unavailable(SAFE_SUMMARY_PARSE);
+      }
+      if (!SUPPORTED_CURRENCIES.has(selectedCurrency)) return unavailable(SAFE_SUMMARY_PARSE);
       if (!(await page.setPeriod(period)) || !(await page.runQuery())) return unavailable(SAFE_SUMMARY_MOVEMENTS);
 
       const paged = await readAllPages(page, maxPages);
       if (paged.status !== "ok") return unavailable(paged.safeErrorSummary);
       try {
-        movements.push(...parseBanreservasEmpresasTransactionRows(paged.rows, { accountFingerprint: deriveBanreservasEmpresasAccountFingerprint(accountKey) }));
+        movements.push(...parseBanreservasEmpresasTransactionRows(paged.rows, {
+          accountFingerprint: deriveBanreservasEmpresasAccountFingerprint(accountKey),
+          currency: selectedCurrency,
+        }));
       } catch {
         return unavailable(SAFE_SUMMARY_PARSE);
       }

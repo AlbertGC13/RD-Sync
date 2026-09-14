@@ -11,7 +11,9 @@ import {
   type BanreservasEmpresasFrameObservation,
 } from "../banreservas-empresas-session-checker";
 import {
+  BANRESERVAS_EMPRESAS_LOOKBACK_DAYS_ENV,
   collectBanreservasEmpresasMovements,
+  parseBanreservasEmpresasLookbackDays,
   type BanreservasEmpresasAccessState,
   type BanreservasEmpresasPage,
   type BanreservasEmpresasPeriod,
@@ -174,6 +176,16 @@ export class CdpBanreservasEmpresasPage implements BanreservasEmpresasPage {
     return this.mainFrame().evaluate((selector) => document.querySelector<HTMLSelectElement>(selector)?.value ?? "", selectors.productCombo);
   }
 
+  async selectedAccountCurrency(): Promise<string> {
+    return this.mainFrame().evaluate((selector) => {
+      const select = document.querySelector<HTMLSelectElement>(selector);
+      const selectedOption = select?.options[select.selectedIndex];
+      const text = selectedOption?.textContent ?? "";
+      const separator = text.lastIndexOf("|");
+      return separator >= 0 ? text.slice(separator + 1).trim() : "";
+    }, selectors.productCombo);
+  }
+
   /** The masked inputs occasionally swallow a keystroke; one re-entry is allowed before failing closed. */
   async setPeriod(period: BanreservasEmpresasPeriod): Promise<boolean> {
     for (let attempt = 0; attempt < PERIOD_ENTRY_ATTEMPTS; attempt++) {
@@ -285,9 +297,17 @@ export type BanreservasEmpresasCdpScraperOptions = Readonly<{
   cdpUrl?: string;
   connect?: BanreservasCdpConnect<BanreservasCdpMainFrame>;
   clock?: () => Date;
+  env?: Readonly<Record<string, string | undefined>>;
   lookbackDays?: number;
   page?: CdpBanreservasEmpresasPageDependencies;
 }>;
+
+/** Extracts only the currency suffix from a selected product option's text. */
+export function parseBanreservasEmpresasSelectedCurrency(optionText: string): string {
+  if (typeof optionText !== "string") return "";
+  const separator = optionText.lastIndexOf("|");
+  return separator >= 0 ? optionText.slice(separator + 1).trim() : "";
+}
 
 function manualAction(): ScrapeCollectionResult {
   return { status: "needs_admin_action", movements: [], safeErrorSummary: SAFE_SUMMARY_MANUAL };
@@ -304,7 +324,9 @@ export function createBanreservasEmpresasCdpScraper(options: BanreservasEmpresas
         browser = await connect(options.cdpUrl);
         const page = findTrustedPortalPage(browser, false);
         if (!page) return manualAction();
-        const result = await collectBanreservasEmpresasMovements(new CdpBanreservasEmpresasPage(page, options.page), { clock: options.clock, lookbackDays: options.lookbackDays });
+        const env = options.env ?? process.env;
+        const lookbackDays = options.lookbackDays ?? parseBanreservasEmpresasLookbackDays(env[BANRESERVAS_EMPRESAS_LOOKBACK_DAYS_ENV]);
+        const result = await collectBanreservasEmpresasMovements(new CdpBanreservasEmpresasPage(page, options.page), { clock: options.clock, lookbackDays });
         return result.status === "collected" ? result : manualAction();
       } catch {
         return manualAction();
