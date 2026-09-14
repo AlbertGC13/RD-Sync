@@ -29,8 +29,12 @@ export const banreservasEmpresasPortalProfile = {
   landingUrl: "https://www.banreservas.com.do/TuBancoEmpresas/Default.aspx",
   framework: "aspnet-webforms+devexpress",
   frames: { top: "topFrame", left: "leftFrame", main: "mainFrame", content: "mainFrame" },
-  routes: { accounts: "/TuBancoEmpresas/Pages/Accounts/Accounts.aspx" },
+  routes: { accounts: "/TuBancoEmpresas/Pages/Accounts/Accounts.aspx", detail: "/TuBancoEmpresas/Pages/Common/ProductStatus.aspx" },
   selectors: {
+    accountGrid: "#ctl00_MainHolder_AccountGrid_AccountASPxGridView",
+    accountRow: 'tr[id*="_AccountASPxGridView_DXDataRow"].dxgvDataRow',
+    productCombo: "#ctl00_MainHolder_cmbProducts",
+    nextPage: "#ctl00_MainHolder_AccountTransactionGrid_lnkNext",
     dateFrom: "#ctl00_MainHolder_period_dateTextBoxDateFrom",
     dateTo: "#ctl00_MainHolder_period_dateTextBoxDateTo",
     query: "#ctl00_MainHolder_period_linkButtonConsultar",

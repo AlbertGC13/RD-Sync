@@ -3,10 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BANRESERVAS_EMPRESAS_CDP_URL,
   CdpBanreservasEmpresasFrames,
+  CdpBanreservasEmpresasPage,
+  createBanreservasEmpresasCdpScraper,
   createBanreservasEmpresasCdpSessionChecker,
   resolveBanreservasEmpresasCdpUrl,
   type BanreservasCdpBrowser,
   type BanreservasCdpFrame,
+  type BanreservasCdpMainFrame,
   type BanreservasCdpPage,
 } from "./banreservas-empresas-cdp";
 
@@ -28,7 +31,7 @@ class Frame implements BanreservasCdpFrame {
 }
 
 class Page implements BanreservasCdpPage {
-  constructor(private readonly address: string, private readonly pageFrames: readonly Frame[]) {}
+  constructor(private readonly address: string, private readonly pageFrames: readonly BanreservasCdpFrame[]) {}
   url() { return this.address; }
   frames() { return this.pageFrames; }
 }
@@ -135,5 +138,146 @@ describe("createBanreservasEmpresasCdpSessionChecker", () => {
     browser.close.mockRejectedValueOnce(new Error("internal"));
     await expect(checker(browser).checker.check()).resolves.toMatchObject({ status: "active" });
     expect(browser.close).toHaveBeenCalledOnce();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Movement collection adapter and scraper factory
+// ---------------------------------------------------------------------------
+
+const accountsUrl = `${origin}/TuBancoEmpresas/Pages/Accounts/Accounts.aspx`;
+const detailUrl = `${origin}/TuBancoEmpresas/Pages/Common/ProductStatus.aspx?k=v`;
+const accountGrid = "#ctl00_MainHolder_AccountGrid_AccountASPxGridView";
+const transactionGrid = "#ctl00_MainHolder_AccountTransactionGrid_ASPxGridViewTransactions";
+const dateFrom = "#ctl00_MainHolder_period_dateTextBoxDateFrom";
+const dateTo = "#ctl00_MainHolder_period_dateTextBoxDateTo";
+const fakeRows = [["29/06/26", "TXN-EXAMPLE-001", "PAYMENT RECEIVED", "0.00", "1,250.00", "DOP 9,999.99"]];
+
+class MainFrame implements BanreservasCdpMainFrame {
+  readonly calls: string[] = [];
+  address: string;
+  constructor(address: string, private readonly script: { evaluate?: unknown[]; landOn?: string; reachDetail?: boolean } = {}) { this.address = address; }
+  name() { return "mainFrame"; }
+  url() { return this.address; }
+  async evaluate<Result>(pageFunction: (arg?: never) => Result, arg?: unknown): Promise<Result> {
+    void pageFunction;
+    this.calls.push(`evaluate:${JSON.stringify(arg ?? null)}`);
+    const next = this.script.evaluate?.shift();
+    if (next instanceof Error) throw next;
+    return next as Result;
+  }
+  async goto(url: string) { this.calls.push(`goto:${url}`); this.address = this.script.landOn ?? url; }
+  async click(selector: string) { this.calls.push(`click:${selector}`); if ((this.script.reachDetail ?? true) && /_DXDataRow\d+ > td:first-child$/.test(selector)) this.address = detailUrl; }
+  async press(selector: string, key: string) { this.calls.push(`press:${selector}:${key}`); }
+  async type(selector: string, text: string) { this.calls.push(`type:${selector}:${text}`); }
+  async waitForSelector(selector: string) { this.calls.push(`waitForSelector:${selector}`); }
+}
+
+function framesetTab(main: MainFrame, headerMarker: unknown = true): BanreservasCdpPage<BanreservasCdpMainFrame> {
+  const frames = [new Frame("topFrame", `${origin}/TuBancoEmpresas/Header.aspx`, headerMarker), new Frame("leftFrame", `${origin}/TuBancoEmpresas/Menu.aspx`), main];
+  return { url: () => framesetUrl, frames: () => frames as unknown as readonly BanreservasCdpMainFrame[] };
+}
+
+function adapter(main: MainFrame, tab = framesetTab(main)) {
+  let tick = 0;
+  return new CdpBanreservasEmpresasPage(tab, { sleep: async () => {}, now: () => (tick += 1000), settleTimeoutMs: 5000, navigationTimeoutMs: 5000 });
+}
+
+describe("CdpBanreservasEmpresasPage", () => {
+  it("navigates only the main frame to the accounts route and reports where it landed", async () => {
+    const main = new MainFrame(`${origin}/TuBancoEmpresas/Home.aspx`);
+    await expect(adapter(main).openAccountsQuery()).resolves.toBe(true);
+    expect(main.calls).toEqual([`goto:${accountsUrl}`, `waitForSelector:${accountGrid}`]);
+    await expect(adapter(new MainFrame(accountsUrl, { landOn: loginUrl })).openAccountsQuery()).resolves.toBe(false);
+  });
+
+  it("selects an account by clicking its indexed row and waits for the detail route", async () => {
+    const main = new MainFrame(accountsUrl);
+    await expect(adapter(main).selectAccountRow(1)).resolves.toBe(true);
+    expect(main.calls).toEqual([`click:${accountGrid}_DXDataRow1 > td:first-child`, `waitForSelector:${transactionGrid}`]);
+    await expect(adapter(new MainFrame(accountsUrl, { reachDetail: false })).selectAccountRow(0)).resolves.toBe(false);
+  });
+
+  it("types digit-only period bounds into both masked inputs and verifies the echoed values", async () => {
+    const period = { from: "14/08/2026", to: "13/09/2026" };
+    const main = new MainFrame(detailUrl, { evaluate: [["14/08/2026", "13/09/2026"]] });
+    await expect(adapter(main).setPeriod(period)).resolves.toBe(true);
+    expect(main.calls).toEqual([
+      `click:${dateFrom}`, `press:${dateFrom}:Control+a`, `type:${dateFrom}:14082026`, `press:${dateFrom}:Tab`,
+      `click:${dateTo}`, `press:${dateTo}:Control+a`, `type:${dateTo}:13092026`, `press:${dateTo}:Tab`,
+      `evaluate:${JSON.stringify([dateFrom, dateTo])}`,
+    ]);
+    await expect(adapter(new MainFrame(detailUrl, { evaluate: [["14/08/2026", "12/09/2026"]] })).setPeriod(period)).resolves.toBe(false);
+  });
+
+  it("clicks Consultar or Next and waits until the async postback settles, failing on timeout", async () => {
+    const main = new MainFrame(detailUrl, { evaluate: [true, true, false] });
+    await expect(adapter(main).runQuery()).resolves.toBe(true);
+    expect(main.calls[0]).toBe("click:#ctl00_MainHolder_period_linkButtonConsultar");
+    expect(main.calls.filter((call) => call.startsWith("evaluate"))).toHaveLength(3);
+    const stuck = new MainFrame(detailUrl, { evaluate: Array.from({ length: 20 }, () => true) });
+    await expect(adapter(stuck).goToNextPage()).resolves.toBe(false);
+    expect(stuck.calls[0]).toBe("click:#ctl00_MainHolder_AccountTransactionGrid_lnkNext");
+  });
+
+  it("reads grid state through the profile selectors and maps the session checker to access states", async () => {
+    const main = new MainFrame(detailUrl, { evaluate: [2, "TYPE_1", fakeRows, false] });
+    const page = adapter(main);
+    await expect(page.countAccountRows()).resolves.toBe(2);
+    await expect(page.selectedAccountKey()).resolves.toBe("TYPE_1");
+    await expect(page.readVisibleTransactionRows()).resolves.toEqual(fakeRows);
+    await expect(page.hasNextPage()).resolves.toBe(false);
+    expect(main.calls).toEqual([
+      `evaluate:${JSON.stringify(`${accountGrid} tr[id*="_AccountASPxGridView_DXDataRow"].dxgvDataRow`)}`,
+      `evaluate:${JSON.stringify("#ctl00_MainHolder_cmbProducts")}`,
+      `evaluate:${JSON.stringify(`${transactionGrid} tr[id*="_DXDataRow"].dxgvDataRow`)}`,
+      `evaluate:${JSON.stringify("#ctl00_MainHolder_AccountTransactionGrid_lnkNext")}`,
+    ]);
+    await expect(adapter(new MainFrame(detailUrl)).accessState()).resolves.toBe("authenticated");
+    await expect(adapter(new MainFrame(detailUrl), framesetTab(new MainFrame(detailUrl), false)).accessState()).resolves.toBe("unknown");
+    const loginTab: BanreservasCdpPage<BanreservasCdpMainFrame> = { url: () => loginUrl, frames: () => [new Frame("", loginUrl, true)] as unknown as readonly BanreservasCdpMainFrame[] };
+    await expect(new CdpBanreservasEmpresasPage(loginTab).accessState()).resolves.toBe("login");
+  });
+});
+
+describe("createBanreservasEmpresasCdpScraper", () => {
+  const clock = () => new Date("2026-09-13T15:00:00.000Z");
+  const browserOf = (...pages: readonly BanreservasCdpPage<BanreservasCdpMainFrame>[]) => ({ close: vi.fn(async () => {}), contexts: () => [{ pages: () => pages }] });
+  const scraper = (browser: ReturnType<typeof browserOf>, cdpUrl = BANRESERVAS_EMPRESAS_CDP_URL) => {
+    const connect = vi.fn(async () => browser);
+    return { connect, scraper: createBanreservasEmpresasCdpScraper({ cdpUrl, connect, clock, page: { sleep: async () => {} } }) };
+  };
+
+  it("collects one account through the consultation flow only, then detaches without closing the page", async () => {
+    const main = new MainFrame(`${origin}/TuBancoEmpresas/Home.aspx`, { evaluate: [1, "TYPE_1", ["14/08/2026", "13/09/2026"], false, fakeRows, false] });
+    const tab = framesetTab(main);
+    const browser = browserOf(tab);
+    const result = await scraper(browser).scraper.collect();
+    expect(result).toMatchObject({ status: "collected", movements: [expect.objectContaining({ bankId: "banreservas_empresas", direction: "credit", amount: "1250.00" })] });
+    expect(result.movements[0].accountFingerprint).toMatch(/^banreservas_empresas-[0-9a-f]{10}$/);
+    const clicked = main.calls.filter((call) => call.startsWith("click:")).map((call) => call.slice(6));
+    expect(clicked).toEqual([`${accountGrid}_DXDataRow0 > td:first-child`, dateFrom, dateTo, "#ctl00_MainHolder_period_linkButtonConsultar"]);
+    expect(clicked.some((selector) => /linkButtonGeneratePDF|linkButtonQIF|linkButtonCSV|linkButton2|Transfer|Payment|Logout/i.test(selector))).toBe(false);
+    expect(browser.close).toHaveBeenCalledOnce();
+    expect("close" in tab).toBe(false);
+  });
+
+  it("maps invalid endpoints, missing framesets, connection errors, and collection failures to one safe manual result", async () => {
+    const manual = { status: "needs_admin_action", movements: [], safeErrorSummary: "Banreservas Empresas observation requires administrator action." };
+    const { connect, scraper: invalid } = scraper(browserOf(), "http://example.test:9225");
+    await expect(invalid.collect()).resolves.toEqual(manual);
+    expect(connect).not.toHaveBeenCalled();
+    const loginOnly: BanreservasCdpPage<BanreservasCdpMainFrame> = { url: () => loginUrl, frames: () => [new Frame("", loginUrl, true)] as unknown as readonly BanreservasCdpMainFrame[] };
+    const broken = framesetTab(new MainFrame(`${origin}/TuBancoEmpresas/Home.aspx`, { landOn: loginUrl }));
+    for (const candidate of [
+      scraper(browserOf()).scraper,
+      scraper(browserOf(loginOnly)).scraper,
+      scraper(browserOf(broken)).scraper,
+      createBanreservasEmpresasCdpScraper({ cdpUrl: BANRESERVAS_EMPRESAS_CDP_URL, connect: async () => { throw new Error("internal"); } }),
+    ]) {
+      const result = await candidate.collect();
+      expect(result).toEqual(manual);
+      expect("cause" in result).toBe(false);
+    }
   });
 });
